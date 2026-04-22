@@ -223,12 +223,21 @@ func sanitizeSequence(sequence string) string {
 }
 
 func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastResultRow) error {
-	timestamp := time.Now().Format("20060102_150405")
-	excelPath := filepath.Join(".", "blast_results_"+timestamp+".xlsx")
-	textPath := filepath.Join(".", "blast_peptides_"+timestamp+".txt")
-
 	fmt.Fprintln(w.out)
-	fmt.Fprintf(w.out, "Exporting %d selected rows...\n", len(rows))
+	fmt.Fprintf(w.out, "Preparing export for %d selected rows...\n", len(rows))
+
+	baseName, err := w.prompt.ExportBaseName()
+	if err != nil {
+		return err
+	}
+
+	outputDir, err := applicationDir()
+	if err != nil {
+		return err
+	}
+
+	excelPath := filepath.Join(outputDir, baseName+".xlsx")
+	textPath := filepath.Join(outputDir, baseName+".txt")
 
 	if err := export.WriteBlastResultsExcel(excelPath, rows); err != nil {
 		return err
@@ -274,4 +283,20 @@ func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []mo
 	}
 
 	return records, nil
+}
+
+func applicationDir() (string, error) {
+	executablePath, err := os.Executable()
+	if err == nil {
+		executableDir := filepath.Dir(executablePath)
+		if !strings.Contains(strings.ToLower(executableDir), strings.ToLower(os.TempDir())) {
+			return executableDir, nil
+		}
+	}
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve application directory: %w", err)
+	}
+	return workingDir, nil
 }

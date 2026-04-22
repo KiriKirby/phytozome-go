@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -14,6 +15,8 @@ type Prompter struct {
 	in  *bufio.Reader
 	out io.Writer
 }
+
+var invalidFileNameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
 
 func New(in io.Reader, out io.Writer) *Prompter {
 	return &Prompter{
@@ -152,6 +155,23 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 	}
 }
 
+func (p *Prompter) ExportBaseName() (string, error) {
+	for {
+		value, err := p.readLine("Export file name (without extension): ")
+		if err != nil {
+			return "", err
+		}
+
+		name := sanitizeFileName(value)
+		if name == "" {
+			fmt.Fprintln(p.out, "File name cannot be empty.")
+			continue
+		}
+
+		return name, nil
+	}
+}
+
 func toggleSelections(selected []bool, fields []string) error {
 	for _, field := range fields {
 		index, err := strconv.Atoi(field)
@@ -176,4 +196,11 @@ func (p *Prompter) readLine(label string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+func sanitizeFileName(value string) string {
+	value = strings.TrimSpace(value)
+	value = invalidFileNameChars.ReplaceAllString(value, "_")
+	value = strings.Trim(value, ". ")
+	return value
 }

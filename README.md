@@ -68,11 +68,12 @@ Today the implemented path is:
 8. parse the BLAST XML into row records
 9. print the returned rows as a terminal table with `gene_report_url`
 10. let the user select rows with `all`, `none`, `toggle`, and `done`
-11. export selected rows to `.xlsx`
-12. fetch peptide sequences and export selected rows to `.txt`
+11. ask for one export file name before writing files
+12. export selected rows to `应用目录/<name>.xlsx`
+13. fetch peptide sequences and export selected rows to `应用目录/<name>.txt`
 
 Still pending:
 
 - paging or a more compact selector for large result sets
 - better formatting of species labels in BLAST row output
-- optional non-interactive flags and output-path control
+- optional non-interactive flags
