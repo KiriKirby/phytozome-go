@@ -312,9 +312,14 @@ Implemented:
 - BLAST XML parsing into structured rows
 - terminal-table rendering for parsed BLAST rows
 - derived protein report URLs for parsed rows
+- row selection commands: `all`, `none`, `toggle`, `done`
+- `.xlsx` export for selected rows
+- protein sequence export to FASTA-like `.txt`
+- live protein-sequence retrieval via:
+  - `/api/db/gene_{proteome}?protein={proteinId}`
+  - `/api/db/sequence/protein/{internalTranscriptId}`
 
 Pending:
 
-- multi-select interactions including `select all` and `select none`
-- `.xlsx` export
-- peptide-sequence retrieval and `.txt` export
+- selector pagination or a denser row-selection UX for very large result sets
+- output-path flags and non-interactive batch mode

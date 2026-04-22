@@ -51,6 +51,9 @@ The repository currently contains:
 - interactive species search and selection for `blast wizard`
 - BLAST job submission and polling
 - XML parsing for BLAST result rows
+- interactive row selection with `all` and `none`
+- Excel export for selected rows
+- peptide text export for selected rows
 - derived `gene_report_url` values for result rows
 
 Today the implemented path is:
@@ -64,9 +67,12 @@ Today the implemented path is:
 7. submit the BLAST job and poll until completion
 8. parse the BLAST XML into row records
 9. print the returned rows as a terminal table with `gene_report_url`
+10. let the user select rows with `all`, `none`, `toggle`, and `done`
+11. export selected rows to `.xlsx`
+12. fetch peptide sequences and export selected rows to `.txt`
 
 Still pending:
 
-- interactive multi-select with `select all` and `select none`
-- Excel export
-- peptide-sequence fetch and text export
+- paging or a more compact selector for large result sets
+- better formatting of species labels in BLAST row output
+- optional non-interactive flags and output-path control

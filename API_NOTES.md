@@ -69,6 +69,35 @@ This is enough to derive BLAST protein report URLs:
 
 - `https://phytozome-next.jgi.doe.gov/report/protein/{jbrowseName}/{sequenceId}`
 
+## Confirmed export-related record lookups
+
+Verified against the live site on April 22, 2026.
+
+- gene report data for a BLAST protein row can be fetched with:
+  - `GET /api/db/gene_{proteome}?protein={proteinId}`
+- example:
+  - `GET /api/db/gene_725?protein=TraesCS7A03G0821400.1`
+- this response includes:
+  - top-level `_id` such as `PAC:53859059`
+  - transcript array entries containing:
+    - `primaryidentifier`
+    - `protein`
+    - `secondaryidentifier`
+
+- protein residues can then be fetched with:
+  - `GET /api/db/sequence/protein/{internalTranscriptId}`
+- example:
+  - `GET /api/db/sequence/protein/PAC:53859059`
+
+Observed protein-sequence response shape:
+
+- JSON array with at least:
+  - `uniquename`
+  - `name`
+  - `organism`
+  - `phytozome_genome_id`
+  - `residues`
+
 ## Candidate species source
 
 Two viable approaches are visible right now.
@@ -113,8 +142,8 @@ Transcript report URLs may still matter in other flows, but they are not the cor
 
 The next code step should be:
 
-1. render the full parsed result table, not only a preview
-2. add interactive multi-select
-3. export selected rows to Excel and peptide text
+1. improve row-selection UX for large result sets
+2. add output-path options and non-interactive flags
+3. tighten species-label formatting in exported files
 
 Only after that should we wire BLAST submission and polling.

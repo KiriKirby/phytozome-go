@@ -52,11 +52,11 @@ type blastIterationsXML struct {
 }
 
 type blastIterationXML struct {
-	IterNum  int            `xml:"Iteration_iter-num"`
-	QueryID  string         `xml:"Iteration_query-def"`
-	QueryLen int            `xml:"Iteration_query-len"`
-	Hits     blastHitsXML   `xml:"Iteration_hits"`
-	Message  string         `xml:"Iteration_message"`
+	IterNum  int          `xml:"Iteration_iter-num"`
+	QueryID  string       `xml:"Iteration_query-def"`
+	QueryLen int          `xml:"Iteration_query-len"`
+	Hits     blastHitsXML `xml:"Iteration_hits"`
+	Message  string       `xml:"Iteration_message"`
 }
 
 type blastHitsXML struct {
@@ -64,11 +64,11 @@ type blastHitsXML struct {
 }
 
 type blastHitXML struct {
-	Num       int           `xml:"Hit_num"`
-	Def       string        `xml:"Hit_def"`
-	Accession string        `xml:"Hit_accession"`
-	Length    int           `xml:"Hit_len"`
-	HSPs      blastHSPsXML  `xml:"Hit_hsps"`
+	Num       int          `xml:"Hit_num"`
+	Def       string       `xml:"Hit_def"`
+	Accession string       `xml:"Hit_accession"`
+	Length    int          `xml:"Hit_len"`
+	HSPs      blastHSPsXML `xml:"Hit_hsps"`
 }
 
 type blastHSPsXML struct {
@@ -89,6 +89,24 @@ type blastHSPXML struct {
 	Positive   int     `xml:"Hsp_positive"`
 	Gaps       int     `xml:"Hsp_gaps"`
 	AlignLen   int     `xml:"Hsp_align-len"`
+}
+
+type geneRecord struct {
+	ID          string `json:"_id"`
+	Proteome    string `json:"proteome"`
+	Transcripts []struct {
+		Protein           string `json:"protein"`
+		PrimaryIdentifier string `json:"primaryidentifier"`
+		SecondaryID       string `json:"secondaryidentifier"`
+	} `json:"transcripts"`
+}
+
+type proteinSequenceResponse []struct {
+	Uniquename string `json:"uniquename"`
+	Name       string `json:"name"`
+	Organism   string `json:"organism"`
+	GenomeID   string `json:"phytozome_genome_id"`
+	Residues   string `json:"residues"`
 }
 
 func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
@@ -357,4 +375,66 @@ func writeSequenceField(writer *multipart.Writer, sequence string) error {
 		return fmt.Errorf("write sequence field: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) FetchGeneByProtein(ctx context.Context, proteomeID int, proteinID string) (geneRecord, error) {
+	url := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?protein=%s", proteomeID, proteinID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return geneRecord{}, fmt.Errorf("create gene request: %w", err)
+	}
+
+	resp, err := c.baseHTTP.Do(req)
+	if err != nil {
+		return geneRecord{}, fmt.Errorf("fetch gene by protein: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return geneRecord{}, fmt.Errorf("no gene record for protein %s in proteome %d", proteinID, proteomeID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return geneRecord{}, fmt.Errorf("fetch gene by protein: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var gene geneRecord
+	if err := json.NewDecoder(resp.Body).Decode(&gene); err != nil {
+		return geneRecord{}, fmt.Errorf("decode gene by protein response: %w", err)
+	}
+	if gene.ID == "" {
+		return geneRecord{}, fmt.Errorf("gene by protein response missing _id for %s", proteinID)
+	}
+	return gene, nil
+}
+
+func (c *Client) FetchProteinSequence(ctx context.Context, transcriptInternalID string) (string, error) {
+	url := "https://phytozome-next.jgi.doe.gov/api/db/sequence/protein/" + transcriptInternalID
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create protein sequence request: %w", err)
+	}
+
+	resp, err := c.baseHTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch protein sequence: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return "", fmt.Errorf("no protein sequence for transcript id %s", transcriptInternalID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("fetch protein sequence: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var payload proteinSequenceResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return "", fmt.Errorf("decode protein sequence response: %w", err)
+	}
+	if len(payload) == 0 || strings.TrimSpace(payload[0].Residues) == "" {
+		return "", fmt.Errorf("protein sequence response empty for transcript id %s", transcriptInternalID)
+	}
+	return strings.TrimSpace(payload[0].Residues), nil
 }

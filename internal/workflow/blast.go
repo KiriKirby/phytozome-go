@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/wangsychn/phytozome-batch-cli/internal/export"
 	"github.com/wangsychn/phytozome-batch-cli/internal/model"
 	"github.com/wangsychn/phytozome-batch-cli/internal/phytozome"
 	"github.com/wangsychn/phytozome-batch-cli/internal/prompt"
@@ -85,7 +87,16 @@ func (w *BlastWizard) Run(ctx context.Context) error {
 		return err
 	}
 
-	return w.printResults(results)
+	if err := w.printResults(results); err != nil {
+		return err
+	}
+
+	selectedRows, err := w.prompt.SelectBlastRows(results.Rows)
+	if err != nil {
+		return err
+	}
+
+	return w.exportSelections(ctx, selectedRows)
 }
 
 func (w *BlastWizard) printSelection(candidate model.SpeciesCandidate) error {
@@ -209,4 +220,58 @@ func sanitizeSequence(sequence string) string {
 	cleaned = strings.ReplaceAll(cleaned, "\r", "")
 	cleaned = strings.ReplaceAll(cleaned, " ", "")
 	return cleaned
+}
+
+func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastResultRow) error {
+	timestamp := time.Now().Format("20060102_150405")
+	excelPath := filepath.Join(".", "blast_results_"+timestamp+".xlsx")
+	textPath := filepath.Join(".", "blast_peptides_"+timestamp+".txt")
+
+	fmt.Fprintln(w.out)
+	fmt.Fprintf(w.out, "Exporting %d selected rows...\n", len(rows))
+
+	if err := export.WriteBlastResultsExcel(excelPath, rows); err != nil {
+		return err
+	}
+
+	records, err := w.fetchProteinSequenceRecords(ctx, rows)
+	if err != nil {
+		return err
+	}
+	if err := export.WriteProteinSequencesText(textPath, records); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(w.out, "Excel: %s\n", excelPath)
+	fmt.Fprintf(w.out, "Peptides: %s\n", textPath)
+	return nil
+}
+
+func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []model.BlastResultRow) ([]model.ProteinSequenceRecord, error) {
+	cache := make(map[string]string, len(rows))
+	records := make([]model.ProteinSequenceRecord, 0, len(rows))
+
+	for _, row := range rows {
+		cacheKey := fmt.Sprintf("%d:%s", row.TargetID, row.Protein)
+
+		sequence, ok := cache[cacheKey]
+		if !ok {
+			gene, err := w.phytozome.FetchGeneByProtein(ctx, row.TargetID, row.Protein)
+			if err != nil {
+				return nil, err
+			}
+			sequence, err = w.phytozome.FetchProteinSequence(ctx, gene.ID)
+			if err != nil {
+				return nil, err
+			}
+			cache[cacheKey] = sequence
+		}
+
+		records = append(records, model.ProteinSequenceRecord{
+			Header:   fmt.Sprintf(">%s|%s", row.Species, row.Protein),
+			Sequence: sequence,
+		})
+	}
+
+	return records, nil
 }

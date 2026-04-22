@@ -19,10 +19,10 @@ const projectOverviewURL = "https://phytozome-next.jgi.doe.gov/api/content/proje
 const homePageURL = "https://phytozome-next.jgi.doe.gov/"
 
 var (
-	rowPattern   = regexp.MustCompile(`(?is)<tr>\s*<td><a href="/info/([^"]+)">(.+?)</a></td>\s*<td>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*</tr>`)
-	tagPattern   = regexp.MustCompile(`(?is)<[^>]+>`)
-	spacePattern = regexp.MustCompile(`\s+`)
-	mainJSPathPattern = regexp.MustCompile(`(?is)<script src="(/main-[^"]+\.js)"`)
+	rowPattern          = regexp.MustCompile(`(?is)<tr>\s*<td><a href="/info/([^"]+)">(.+?)</a></td>\s*<td>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*</tr>`)
+	tagPattern          = regexp.MustCompile(`(?is)<[^>]+>`)
+	spacePattern        = regexp.MustCompile(`\s+`)
+	mainJSPathPattern   = regexp.MustCompile(`(?is)<script src="(/main-[^"]+\.js)"`)
 	targetRecordPattern = regexp.MustCompile(`\{"attributes":\{.*?\},"name":".*?","proteomeId":\d+,"taxId":".*?"\}`)
 )
 

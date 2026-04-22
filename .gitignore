@@ -6,4 +6,5 @@ dist/
 *.dylib
 .env
 *.log
-
+blast_results_*.xlsx
+blast_peptides_*.txt

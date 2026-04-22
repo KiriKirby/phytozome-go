@@ -74,6 +74,98 @@ func (p *Prompter) SequenceInput() (string, error) {
 	}
 }
 
+func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastResultRow, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	selected := make([]bool, len(rows))
+	for i := range selected {
+		selected[i] = true
+	}
+
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, "Selected BLAST rows:")
+		for i, row := range rows {
+			marker := " "
+			if selected[i] {
+				marker = "x"
+			}
+			fmt.Fprintf(
+				p.out,
+				"[%s] %d. %s | %s | e=%s | id=%.2f%% | %s\n",
+				marker,
+				i+1,
+				row.Protein,
+				row.Species,
+				row.EValue,
+				row.PercentIdentity,
+				row.GeneReportURL,
+			)
+		}
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, "Commands: all | none | toggle 1 2 3 | done")
+
+		input, err := p.readLine("Selection command: ")
+		if err != nil {
+			return nil, err
+		}
+
+		fields := strings.Fields(strings.ToLower(strings.TrimSpace(input)))
+		if len(fields) == 0 {
+			continue
+		}
+
+		switch fields[0] {
+		case "all":
+			for i := range selected {
+				selected[i] = true
+			}
+		case "none":
+			for i := range selected {
+				selected[i] = false
+			}
+		case "toggle":
+			if len(fields) == 1 {
+				fmt.Fprintln(p.out, "Provide one or more row numbers after 'toggle'.")
+				continue
+			}
+			if err := toggleSelections(selected, fields[1:]); err != nil {
+				fmt.Fprintf(p.out, "Invalid toggle command: %v\n", err)
+			}
+		case "done":
+			chosen := make([]model.BlastResultRow, 0, len(rows))
+			for i, ok := range selected {
+				if ok {
+					chosen = append(chosen, rows[i])
+				}
+			}
+			if len(chosen) == 0 {
+				fmt.Fprintln(p.out, "No rows selected.")
+				continue
+			}
+			return chosen, nil
+		default:
+			fmt.Fprintln(p.out, "Unknown command.")
+		}
+	}
+}
+
+func toggleSelections(selected []bool, fields []string) error {
+	for _, field := range fields {
+		index, err := strconv.Atoi(field)
+		if err != nil {
+			return fmt.Errorf("invalid row number %q", field)
+		}
+		if index < 1 || index > len(selected) {
+			return fmt.Errorf("row %d out of range", index)
+		}
+		selected[index-1] = !selected[index-1]
+	}
+	return nil
+}
+
 func (p *Prompter) readLine(label string) (string, error) {
 	fmt.Fprint(p.out, label)
 	line, err := p.in.ReadString('\n')
