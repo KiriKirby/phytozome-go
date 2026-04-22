@@ -219,18 +219,82 @@ The site is JavaScript-heavy. We should first look for stable request endpoints 
 
 The final `gene_report_url` must be derived from stable row identifiers. Do not hardcode the sample URL pattern until the live row payload is verified.
 
+Current finding:
+
+- the Phytozome frontend code builds gene-report links with:
+  - `/report/transcript/{jbrowseName}/{transcriptName}`
+- this is slightly different from the sample protein report URL provided by the user
+- we should verify which route is actually present in BLAST results before freezing the export column name and format
+
 ### Large result sets
 
 BLAST can return many rows. Avoid rendering the entire table in one unpaged terminal view if usability suffers.
+
+## Confirmed endpoints
+
+These were verified from the live `phytozome-next` frontend bundle on April 22, 2026.
+
+### BLAST submit and poll
+
+- submit pasted sequence:
+  - `POST /api/blast/submit/sequence`
+- submit uploaded sequence file:
+  - `POST /api/blast/submit/sequence-in-file`
+- poll result payload:
+  - `GET /api/blast/results/{jobId}`
+
+Observed submit payload fields:
+
+- `targets`
+- `targetType`
+- `program`
+- `eValue`
+- `comparisonMatrix`
+- `wordLength`
+- `alignmentsToShow`
+- `allowGaps`
+- `filterQuery`
+- optional `userEmail`
+- optional `emailResults`
+- one of:
+  - `sequence`
+  - `sequenceInFile`
+
+### Sequence retrieval
+
+- peptide sequence:
+  - `GET /api/db/sequence/protein/{transcriptId}`
+
+### Proteome and info pages
+
+- proteome properties:
+  - `GET /api/db/properties/proteome/{proteomeId}`
+  - `GET /api/db/properties/proteome/{proteomeId}?format=verbose`
+- info page data:
+  - `GET /api/content/info/{proteomeId}`
+
+### Home/project content
+
+- project/home content:
+  - `GET /api/content/project/{groupId}`
+
+Confirmed examples:
+
+- `GET /api/content/project/phytozome`
+- `GET /api/content/project/home`
+- `GET /api/content/project/main`
+
+The `phytozome` project overview HTML includes many `/info/{jbrowseName}` links and can serve as a fallback source for candidate genomes if no cleaner search endpoint is found.
 
 ## Implementation order
 
 1. Lock this workflow spec
 2. Build command skeleton and data models
 3. Inspect live Phytozome requests for species search and BLAST submission
-4. Implement result-table parsing
-5. Implement row selection UX
-6. Implement Excel export
-7. Implement peptide fetch and text export
-8. Add non-interactive flags later
-
+4. Implement species candidate sourcing and local filtering
+5. Implement BLAST submit and result polling
+6. Implement result-table parsing
+7. Implement row selection UX
+8. Implement Excel export
+9. Implement peptide fetch and text export
+10. Add non-interactive flags later
