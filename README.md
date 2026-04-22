@@ -48,7 +48,10 @@ The repository currently contains:
 - a workflow spec in `AGENT.md`
 - live endpoint notes in `API_NOTES.md`
 - a minimal CLI entry point
-- a first interactive species-selection step for `blast wizard`
+- interactive species search and selection for `blast wizard`
+- BLAST job submission and polling
+- XML parsing for BLAST result rows
+- derived `gene_report_url` values for result rows
 
 Today the implemented path is:
 
@@ -56,5 +59,14 @@ Today the implemented path is:
 2. ask for a species keyword
 3. show matching candidates
 4. let the user choose one species
+5. accept pasted query sequence
+6. auto-detect DNA vs protein and choose `BLASTN` or `BLASTP`
+7. submit the BLAST job and poll until completion
+8. parse the BLAST XML into row records
+9. print the returned rows as a terminal table with `gene_report_url`
 
-The BLAST submit, result parsing, multi-select, and export stages are still pending.
+Still pending:
+
+- interactive multi-select with `select all` and `select none`
+- Excel export
+- peptide-sequence fetch and text export

@@ -9,17 +9,21 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/wangsychn/phytozome-batch-cli/internal/model"
 )
 
 const projectOverviewURL = "https://phytozome-next.jgi.doe.gov/api/content/project/phytozome"
+const homePageURL = "https://phytozome-next.jgi.doe.gov/"
 
 var (
 	rowPattern   = regexp.MustCompile(`(?is)<tr>\s*<td><a href="/info/([^"]+)">(.+?)</a></td>\s*<td>(.*?)</td>\s*<td[^>]*>(.*?)</td>\s*</tr>`)
 	tagPattern   = regexp.MustCompile(`(?is)<[^>]+>`)
 	spacePattern = regexp.MustCompile(`\s+`)
+	mainJSPathPattern = regexp.MustCompile(`(?is)<script src="(/main-[^"]+\.js)"`)
+	targetRecordPattern = regexp.MustCompile(`\{"attributes":\{.*?\},"name":".*?","proteomeId":\d+,"taxId":".*?"\}`)
 )
 
 type projectSection struct {
@@ -39,6 +43,11 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
+	targets, err := c.fetchTargetRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, projectOverviewURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -75,7 +84,7 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 		return nil, fmt.Errorf("project overview payload did not contain overview HTML")
 	}
 
-	candidates := parseSpeciesCandidates(overviewHTML)
+	candidates := parseSpeciesCandidates(overviewHTML, targets)
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no species candidates found in overview HTML")
 	}
@@ -98,7 +107,7 @@ func FilterSpeciesCandidates(candidates []model.SpeciesCandidate, keyword string
 	return filtered
 }
 
-func parseSpeciesCandidates(overviewHTML string) []model.SpeciesCandidate {
+func parseSpeciesCandidates(overviewHTML string, targets map[string]targetRecord) []model.SpeciesCandidate {
 	matches := rowPattern.FindAllStringSubmatch(overviewHTML, -1)
 	seen := make(map[string]struct{}, len(matches))
 	candidates := make([]model.SpeciesCandidate, 0, len(matches))
@@ -114,7 +123,19 @@ func parseSpeciesCandidates(overviewHTML string) []model.SpeciesCandidate {
 			CommonName:  cleanText(match[3]),
 			ReleaseDate: cleanText(match[4]),
 		}
+		if target, ok := targets[candidate.JBrowseName]; ok {
+			candidate.ProteomeID = target.ProteomeID
+			if candidate.CommonName == "" {
+				candidate.CommonName = target.Attributes.CommonName
+			}
+			if candidate.GenomeLabel == "" {
+				candidate.GenomeLabel = strings.TrimSpace(target.Attributes.DisplayName + " " + target.Attributes.DisplayVersion)
+			}
+		}
 		if candidate.JBrowseName == "" || candidate.GenomeLabel == "" {
+			continue
+		}
+		if candidate.ProteomeID == 0 {
 			continue
 		}
 		if _, exists := seen[candidate.JBrowseName]; exists {
@@ -137,4 +158,96 @@ func cleanText(raw string) string {
 	raw = strings.ReplaceAll(raw, "\u00a0", " ")
 	raw = spacePattern.ReplaceAllString(raw, " ")
 	return strings.TrimSpace(raw)
+}
+
+type targetRecord struct {
+	Attributes struct {
+		CommonName     string `json:"commonName"`
+		DisplayName    string `json:"displayName"`
+		DisplayVersion string `json:"displayVersion"`
+		JBrowseName    string `json:"jbrowseName"`
+	} `json:"attributes"`
+	Name       string `json:"name"`
+	ProteomeID int    `json:"proteomeId"`
+	TaxID      string `json:"taxId"`
+}
+
+func (c *Client) fetchTargetRecords(ctx context.Context) (map[string]targetRecord, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, homePageURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create homepage request: %w", err)
+	}
+
+	resp, err := c.baseHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch homepage: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch homepage: unexpected status %s", resp.Status)
+	}
+
+	homePage, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read homepage: %w", err)
+	}
+
+	match := mainJSPathPattern.FindStringSubmatch(string(homePage))
+	if len(match) < 2 {
+		return nil, fmt.Errorf("could not find main bundle path in homepage")
+	}
+
+	scriptURL := "https://phytozome-next.jgi.doe.gov" + match[1]
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, scriptURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create main bundle request: %w", err)
+	}
+
+	resp, err = c.baseHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch main bundle: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch main bundle: unexpected status %s", resp.Status)
+	}
+
+	bundle, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read main bundle: %w", err)
+	}
+
+	matches := targetRecordPattern.FindAll(bundle, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("did not find target records in main bundle")
+	}
+
+	targets := make(map[string]targetRecord, len(matches))
+	for _, match := range matches {
+		var target targetRecord
+		if err := json.Unmarshal(match, &target); err != nil {
+			continue
+		}
+		if target.Attributes.JBrowseName == "" || target.ProteomeID == 0 {
+			continue
+		}
+		targets[target.Attributes.JBrowseName] = target
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no valid target records parsed from main bundle")
+	}
+	return targets, nil
+}
+
+func ParseProteomeID(value string) (int, error) {
+	id, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("parse proteome id: %w", err)
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("parse proteome id: invalid id %d", id)
+	}
+	return id, nil
 }

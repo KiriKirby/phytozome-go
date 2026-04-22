@@ -33,7 +33,7 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 
 	for i, candidate := range candidates {
 		fmt.Fprintf(p.out, "%d. %s\n", i+1, candidate.DisplayLabel())
-		fmt.Fprintf(p.out, "   %s\n", candidate.JBrowseName)
+		fmt.Fprintf(p.out, "   %s (proteome %d)\n", candidate.JBrowseName, candidate.ProteomeID)
 	}
 
 	for {
@@ -49,6 +49,28 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 		}
 
 		return candidates[index-1], nil
+	}
+}
+
+func (p *Prompter) SequenceInput() (string, error) {
+	fmt.Fprintln(p.out, "Paste sequence lines. Finish with an empty line.")
+
+	lines := make([]string, 0, 8)
+	for {
+		line, err := p.in.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return strings.Join(lines, "\n"), nil
+		}
+
+		lines = append(lines, line)
+		if err == io.EOF {
+			return strings.Join(lines, "\n"), nil
+		}
 	}
 }
 

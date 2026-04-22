@@ -221,10 +221,10 @@ The final `gene_report_url` must be derived from stable row identifiers. Do not 
 
 Current finding:
 
-- the Phytozome frontend code builds gene-report links with:
-  - `/report/transcript/{jbrowseName}/{transcriptName}`
-- this is slightly different from the sample protein report URL provided by the user
-- we should verify which route is actually present in BLAST results before freezing the export column name and format
+- the general frontend contains transcript-report links in other flows
+- BLAST protein rows resolve to:
+  - `/report/protein/{jbrowseName}/{sequenceId}`
+- the export column should therefore use the protein-report URL for BLAST protein hits
 
 ### Large result sets
 
@@ -298,3 +298,23 @@ The `phytozome` project overview HTML includes many `/info/{jbrowseName}` links 
 8. Implement Excel export
 9. Implement peptide fetch and text export
 10. Add non-interactive flags later
+
+## Current implementation state
+
+Implemented:
+
+- candidate species fetch from project overview plus frontend target metadata
+- keyword filter and single-species selection
+- sequence paste input
+- automatic DNA/protein detection
+- BLAST submit via `/api/blast/submit/sequence`
+- polling via `/api/blast/results/{jobId}`
+- BLAST XML parsing into structured rows
+- terminal-table rendering for parsed BLAST rows
+- derived protein report URLs for parsed rows
+
+Pending:
+
+- multi-select interactions including `select all` and `select none`
+- `.xlsx` export
+- peptide-sequence retrieval and `.txt` export

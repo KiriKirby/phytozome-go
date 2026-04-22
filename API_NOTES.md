@@ -47,6 +47,28 @@ Observed submit fields:
 - optional `emailResults`
 - `sequence` or `sequenceInFile`
 
+## Confirmed live BLAST behavior
+
+Verified against the live site on April 22, 2026.
+
+- public BLAST submission works without a login for at least some targets
+- a real protein submission against target `725` returned HTTP-style code `201` and a numeric `job_id`
+- polling `GET /api/blast/results/{jobId}` returned:
+  - `202` while queued or running
+  - `200` with `data.results` containing BLAST XML when complete
+
+Observed BLAST XML `Hit_def` format:
+
+- `{jbrowseName}|{targetId}|{sequenceId}|{transcriptId}|{defline}`
+
+Example shape:
+
+- `T_aestivum_cv__ChineseSpring_v2_1|725|TraesCS7A03G0821400.1|TraesCS7A03G0821400.1|...`
+
+This is enough to derive BLAST protein report URLs:
+
+- `https://phytozome-next.jgi.doe.gov/report/protein/{jbrowseName}/{sequenceId}`
+
 ## Candidate species source
 
 Two viable approaches are visible right now.
@@ -79,18 +101,20 @@ Tradeoff:
 
 ## URL findings
 
-The frontend currently constructs a gene-report link as:
+The frontend contains multiple report-link patterns in different parts of the site.
 
-- `/report/transcript/{jbrowseName}/{transcriptName}`
+For the BLAST protein workflow, the current working link shape is:
 
-This should be verified against live BLAST result rows before the export column is finalized, because user examples used a protein-report URL shape.
+- `/report/protein/{jbrowseName}/{sequenceId}`
+
+Transcript report URLs may still matter in other flows, but they are not the correct default for the current BLAST export target.
 
 ## Next implementation target
 
 The next code step should be:
 
-1. source candidate species
-2. filter candidates by user-entered keyword
-3. let the user choose one candidate
+1. render the full parsed result table, not only a preview
+2. add interactive multi-select
+3. export selected rows to Excel and peptide text
 
 Only after that should we wire BLAST submission and polling.

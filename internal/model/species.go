@@ -4,6 +4,7 @@ import "strings"
 
 // SpeciesCandidate is the first-step selection unit for the BLAST workflow.
 type SpeciesCandidate struct {
+	ProteomeID  int
 	JBrowseName string
 	GenomeLabel string
 	CommonName  string
