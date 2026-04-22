@@ -2,6 +2,10 @@
 
 Cross-platform command-line tool for collecting BLAST results from `phytozome-next.jgi.doe.gov` and exporting selected rows to Excel and FASTA-style text.
 
+
+<img width="446" height="447" alt="image" src="https://github.com/user-attachments/assets/5ff97faf-5245-4ee8-8b47-2b3027052e53" />
+
+
 ## Scope
 
 The first supported workflow is the BLAST path shown in the Phytozome web UI:
