@@ -46,6 +46,15 @@ phytozome-batch-cli version
 The repository currently contains:
 
 - a workflow spec in `AGENT.md`
+- live endpoint notes in `API_NOTES.md`
 - a minimal CLI entry point
-- the initial repository scaffold
+- a first interactive species-selection step for `blast wizard`
 
+Today the implemented path is:
+
+1. fetch candidate species from `phytozome-next`
+2. ask for a species keyword
+3. show matching candidates
+4. let the user choose one species
+
+The BLAST submit, result parsing, multi-select, and export stages are still pending.

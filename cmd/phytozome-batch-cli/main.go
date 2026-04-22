@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+
+	"github.com/wangsychn/phytozome-batch-cli/internal/workflow"
 )
 
 const version = "dev"
@@ -44,8 +47,11 @@ func runBlast(args []string) {
 		fmt.Println("6. Multi-select rows")
 		fmt.Println("7. Export selected rows to .xlsx and .txt")
 	case "wizard":
-		fmt.Println("blast wizard is not implemented yet")
-		fmt.Println("See AGENT.md for the current workflow contract")
+		wizard := workflow.NewBlastWizard(os.Stdout)
+		if err := wizard.Run(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "blast wizard failed: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown blast subcommand: %s\n\n", args[0])
 		printBlastUsage()
@@ -67,4 +73,3 @@ func printBlastUsage() {
 	fmt.Println("  phytozome-batch-cli blast wizard")
 	fmt.Println("  phytozome-batch-cli blast plan")
 }
-
