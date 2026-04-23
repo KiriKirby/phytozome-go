@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -82,5 +83,17 @@ func TestPostRunActionKeywordMode(t *testing.T) {
 	}
 	if strings.Contains(output, "BLAST again") {
 		t.Fatalf("blast-specific prompt leaked into keyword mode: %q", output)
+	}
+}
+
+func TestSelectBlastRowsBack(t *testing.T) {
+	var out bytes.Buffer
+	p := New(strings.NewReader("back\n"), &out)
+
+	_, err := p.SelectBlastRows([]model.BlastResultRow{
+		{Protein: "AT1G01010.1", Species: "A.thaliana TAIR10", EValue: "0", PercentIdentity: 100, GeneReportURL: "https://example.com"},
+	})
+	if !errors.Is(err, ErrBackToModeSelection) {
+		t.Fatalf("expected ErrBackToModeSelection, got %v", err)
 	}
 }

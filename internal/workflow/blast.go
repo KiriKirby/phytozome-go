@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -104,6 +105,15 @@ func (w *BlastWizard) Run(ctx context.Context) error {
 
 			selectedRows, err := w.selectBlastRows(results.Rows)
 			if err != nil {
+				if errors.Is(err, prompt.ErrBackToModeSelection) {
+					selected = model.SpeciesCandidate{}
+					needSelect = true
+					mode, err = w.chooseMode()
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				return err
 			}
 
@@ -112,6 +122,15 @@ func (w *BlastWizard) Run(ctx context.Context) error {
 			}
 		case ModeKeyword:
 			if err := w.runKeywordMode(ctx, selected); err != nil {
+				if errors.Is(err, prompt.ErrBackToModeSelection) {
+					selected = model.SpeciesCandidate{}
+					needSelect = true
+					mode, err = w.chooseMode()
+					if err != nil {
+						return err
+					}
+					continue
+				}
 				return err
 			}
 		default:
@@ -227,6 +246,9 @@ func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.Species
 
 		selectedRows, err := w.selectKeywordRows(groups)
 		if err != nil {
+			if errors.Is(err, prompt.ErrBackToModeSelection) {
+				return err
+			}
 			if !w.retryWorkflowStep(fmt.Sprintf("select keyword rows: %v", err)) {
 				return err
 			}

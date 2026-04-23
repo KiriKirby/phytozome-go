@@ -12,7 +12,7 @@ import (
 var version = "dev"
 
 const displayName = "phytozome GO"
-const author = "王舒扬"
+const author = "wangsychn"
 const repoURL = "https://github.com/KiriKirby/phytozome-go"
 
 func main() {

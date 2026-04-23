@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -20,6 +21,7 @@ type Prompter struct {
 }
 
 var invalidFileNameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
+var ErrBackToModeSelection = errors.New("back to mode selection")
 
 func New(in io.Reader, out io.Writer) *Prompter {
 	return &Prompter{
@@ -283,6 +285,7 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 		fmt.Fprintln(p.out, "  on up 12 | off up 12")
 		fmt.Fprintln(p.out, "  on down 12 | off down 12")
 		fmt.Fprintln(p.out, "  done")
+		fmt.Fprintln(p.out, "  back")
 
 		input, err := p.readLine("Selection command: ")
 		if err != nil {
@@ -344,6 +347,8 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 				continue
 			}
 			return chosen, nil
+		case "back":
+			return nil, ErrBackToModeSelection
 		default:
 			fmt.Fprintln(p.out, "Unknown command.")
 		}
@@ -392,6 +397,7 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 		fmt.Fprintln(p.out, "  on up 12 | off up 12")
 		fmt.Fprintln(p.out, "  on down 12 | off down 12")
 		fmt.Fprintln(p.out, "  done")
+		fmt.Fprintln(p.out, "  back")
 
 		input, err := p.readLine("Selection command: ")
 		if err != nil {
@@ -464,6 +470,8 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 				continue
 			}
 			return chosen, nil
+		case "back":
+			return nil, ErrBackToModeSelection
 		default:
 			fmt.Fprintln(p.out, "Unknown command.")
 		}
@@ -819,6 +827,7 @@ func (p *Prompter) printBlastSelectionHelp() {
 	fmt.Fprintln(p.out, " on up 12 | off up 12")
 	fmt.Fprintln(p.out, " on down 12 | off down 12")
 	fmt.Fprintln(p.out, " done")
+	fmt.Fprintln(p.out, " back")
 	fmt.Fprintln(p.out, " All row numbers are based on the current visible order.")
 }
 
@@ -831,6 +840,7 @@ func (p *Prompter) printKeywordSelectionHelp() {
 	fmt.Fprintln(p.out, " on up 12 | off up 12")
 	fmt.Fprintln(p.out, " on down 12 | off down 12")
 	fmt.Fprintln(p.out, " done")
+	fmt.Fprintln(p.out, " back")
 	fmt.Fprintln(p.out, " The first result under each search term is selected by default.")
 }
 
