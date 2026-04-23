@@ -1,26 +1,42 @@
 package export
 
 import (
+	"bufio"
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/wangsychn/phytozome-batch-cli/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/model"
 )
 
 func WriteProteinSequencesText(path string, records []model.ProteinSequenceRecord) error {
-	var builder strings.Builder
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create text file: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	writer := bufio.NewWriterSize(file, 64*1024)
 	for idx, record := range records {
 		if idx > 0 {
-			builder.WriteString("\n\n")
+			if _, err := writer.WriteString("\n\n"); err != nil {
+				return fmt.Errorf("write text separator: %w", err)
+			}
 		}
-		builder.WriteString(record.Header)
-		builder.WriteString("\n")
-		builder.WriteString(record.Sequence)
+		if _, err := writer.WriteString(record.Header); err != nil {
+			return fmt.Errorf("write text header: %w", err)
+		}
+		if _, err := writer.WriteString("\n"); err != nil {
+			return fmt.Errorf("write text newline: %w", err)
+		}
+		if _, err := writer.WriteString(record.Sequence); err != nil {
+			return fmt.Errorf("write text sequence: %w", err)
+		}
 	}
 
-	if err := os.WriteFile(path, []byte(builder.String()), 0644); err != nil {
-		return fmt.Errorf("write text file: %w", err)
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("flush text file: %w", err)
 	}
 	return nil
 }

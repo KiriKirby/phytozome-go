@@ -1,24 +1,29 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 
-	"github.com/wangsychn/phytozome-batch-cli/internal/workflow"
+	"github.com/KiriKirby/phytozome-go/internal/workflow"
 )
 
-const version = "dev"
+var version = "dev"
+
+const displayName = "phytozome GO"
+const author = "王舒扬"
+const repoURL = "https://github.com/KiriKirby/phytozome-go"
 
 func main() {
 	if len(os.Args) < 2 {
-		printUsage()
+		runDesktopWizard()
 		return
 	}
 
 	switch os.Args[1] {
 	case "version", "--version", "-version":
-		fmt.Println("phytozome-batch-cli", version)
+		printVersion()
 	case "blast":
 		runBlast(os.Args[2:])
 	case "help", "--help", "-h":
@@ -28,6 +33,21 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+func runDesktopWizard() {
+	printHeader()
+	fmt.Println("Desktop mode: starting interactive wizard.")
+	fmt.Println()
+
+	wizard := workflow.NewBlastWizard(os.Stdout)
+	if err := wizard.Run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "blast wizard failed: %v\n", err)
+		pauseForExit()
+		os.Exit(1)
+	}
+
+	pauseForExit()
 }
 
 func runBlast(args []string) {
@@ -60,16 +80,33 @@ func runBlast(args []string) {
 }
 
 func printUsage() {
-	fmt.Println("phytozome-batch-cli")
+	printHeader()
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  phytozome-batch-cli blast wizard")
-	fmt.Println("  phytozome-batch-cli blast plan")
-	fmt.Println("  phytozome-batch-cli version")
+	fmt.Println("  phytozome-go blast wizard")
+	fmt.Println("  phytozome-go blast plan")
+	fmt.Println("  phytozome-go version")
 }
 
 func printBlastUsage() {
 	fmt.Println("Usage:")
-	fmt.Println("  phytozome-batch-cli blast wizard")
-	fmt.Println("  phytozome-batch-cli blast plan")
+	fmt.Println("  phytozome-go blast wizard")
+	fmt.Println("  phytozome-go blast plan")
+}
+
+func pauseForExit() {
+	fmt.Println()
+	fmt.Print("Press Enter to exit...")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+}
+
+func printHeader() {
+	fmt.Printf("%s %s\n", displayName, version)
+	fmt.Printf("Author: %s\n", author)
+	fmt.Printf("Repo:   %s\n", repoURL)
+}
+
+func printVersion() {
+	// A compact version output for machine-friendly calls
+	fmt.Printf("%s %s\nAuthor: %s\nRepo: %s\n", displayName, version, author, repoURL)
 }

@@ -1,83 +1,64 @@
-# phytozome-batch-cli
+# phytozome GO
 
-Cross-platform command-line tool for collecting BLAST results from `phytozome-next.jgi.doe.gov` and exporting selected rows to Excel and FASTA-style text.
-
+`phytozome GO` is a cross-platform Go CLI for running interactive Phytozome searches from the terminal.
 
 <img width="446" height="447" alt="image" src="https://github.com/user-attachments/assets/5ff97faf-5245-4ee8-8b47-2b3027052e53" />
 
+It currently supports:
 
-## Scope
+- BLAST workflow against a selected species
+- keyword gene search within a selected species
+- interactive row selection
+- export to Excel
+- export to peptide FASTA-style text
 
-The first supported workflow is the BLAST path shown in the Phytozome web UI:
+The command name is `phytozome-go`. The product display name is `phytozome GO`.
 
-1. Search species by keyword
-2. Let the user choose one candidate species
-3. Submit a BLAST query
-4. Fetch the full BLAST results table
-5. Add a derived `gene_report_url` column for each row
-6. Let the user multi-select rows, with `select all` and `select none`
-7. Export only selected rows to:
-   - `.xlsx`
-   - `.txt` containing peptide sequences in FASTA-like blocks
+## Install
 
-## Architecture
-
-- Language: Go
-- CLI shell: standard library plus thin internal command router
-- Network layer: `net/http`
-- Parsing layer: isolate all Phytozome-specific scraping and response parsing
-- Export layer: Excel writer plus FASTA text writer
-- Prompt layer: interactive single-select and multi-select
-
-The project should stay simple, but one detail matters: Phytozome is a JavaScript-heavy site and its UI may change. The scraper should therefore be written behind a narrow adapter so the rest of the CLI does not care whether data came from:
-
-- direct HTTP requests
-- parsed HTML responses
-- a future browser-automation fallback
-
-## Planned CLI
+Download a release asset for your platform from the GitHub Releases page, extract it, and run the binary:
 
 ```text
-phytozome-batch-cli blast wizard
-phytozome-batch-cli blast plan
-phytozome-batch-cli version
+phytozome-go blast wizard
+phytozome-go blast plan
+phytozome-go version
 ```
 
-`blast wizard` is the main interactive workflow.
+## Interactive workflows
 
-## Current status
+### BLAST mode
 
-The repository currently contains:
+1. Search species by keyword
+2. Choose one species
+3. Paste a sequence, FASTA entry, or Phytozome gene/transcript report URL
+4. Submit the BLAST job
+5. Review the returned rows
+6. Select rows interactively
+7. Export `.xlsx` and `.txt`
 
-- a workflow spec in `AGENT.md`
-- live endpoint notes in `API_NOTES.md`
-- a minimal CLI entry point
-- interactive species search and selection for `blast wizard`
-- BLAST job submission and polling
-- XML parsing for BLAST result rows
-- interactive row selection with `all` and `none`
-- Excel export for selected rows
-- peptide text export for selected rows
-- derived `gene_report_url` values for result rows
+### Keyword mode
 
-Today the implemented path is:
+1. Search species by keyword
+2. Choose one species
+3. Enter one or more identifiers or keywords
+4. Review grouped gene results
+5. Select rows interactively
+6. Export `.xlsx` and `.txt`
 
-1. fetch candidate species from `phytozome-next`
-2. ask for a species keyword
-3. show matching candidates
-4. let the user choose one species
-5. accept pasted query sequence
-6. auto-detect DNA vs protein and choose `BLASTN` or `BLASTP`
-7. submit the BLAST job and poll until completion
-8. parse the BLAST XML into row records
-9. print the returned rows as a terminal table with `gene_report_url`
-10. let the user select rows with `all`, `none`, `toggle`, and `done`
-11. ask for one export file name before writing files
-12. export selected rows to `应用目录/<name>.xlsx`
-13. fetch peptide sequences and export selected rows to `应用目录/<name>.txt`
+## Export files
 
-Still pending:
+The CLI writes output files next to the executable you run.
 
-- paging or a more compact selector for large result sets
-- better formatting of species labels in BLAST row output
-- optional non-interactive flags
+- `<name>.xlsx`
+- `<name>.txt`
+
+BLAST exports include the BLAST table plus derived URLs. Keyword exports include the gene report metadata shown in the selected result rows.
+
+## Project notes
+
+- Language: Go
+- Network layer: `net/http`
+- Excel export: `excelize`
+- Target site: `https://phytozome-next.jgi.doe.gov`
+
+The Phytozome frontend is JavaScript-heavy and subject to upstream changes. The repository keeps Phytozome-specific scraping and parsing isolated behind internal adapters so the CLI workflow remains stable as the site evolves.

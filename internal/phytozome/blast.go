@@ -10,11 +10,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/wangsychn/phytozome-batch-cli/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/model"
 )
 
 const (
@@ -92,13 +93,36 @@ type blastHSPXML struct {
 }
 
 type geneRecord struct {
-	ID          string `json:"_id"`
-	Proteome    string `json:"proteome"`
-	Transcripts []struct {
-		Protein           string `json:"protein"`
-		PrimaryIdentifier string `json:"primaryidentifier"`
-		SecondaryID       string `json:"secondaryidentifier"`
-	} `json:"transcripts"`
+	ID                string           `json:"_id"`
+	Proteome          string           `json:"proteome"`
+	PrimaryIdentifier string           `json:"primaryidentifier"`
+	Start             string           `json:"start"`
+	End               string           `json:"end"`
+	Strand            string           `json:"strand"`
+	Scaffold          string           `json:"scaffold"`
+	Symbols           []string         `json:"symbols"`
+	Synonyms          []string         `json:"synonyms"`
+	Comments          []string         `json:"comments"`
+	Deflines          []string         `json:"deflines"`
+	AutoDefline       string           `json:"auto_defline"`
+	Organism          geneOrganismInfo `json:"organism"`
+	Transcripts       []geneTranscript `json:"transcripts"`
+}
+
+type geneOrganismInfo struct {
+	TaxID             string `json:"tax_id"`
+	OrganismName      string `json:"organism_name"`
+	ShortName         string `json:"organism_shortname"`
+	AnnotationVersion string `json:"annotation_version"`
+	Proteome          int    `json:"proteome"`
+}
+
+type geneTranscript struct {
+	Protein             string   `json:"protein"`
+	PrimaryIdentifier   string   `json:"primaryidentifier"`
+	SecondaryIdentifier string   `json:"secondaryidentifier"`
+	IsPrimary           string   `json:"is_primary"`
+	Uniprot             []string `json:"uniprot"`
 }
 
 type proteinSequenceResponse []struct {
@@ -107,6 +131,44 @@ type proteinSequenceResponse []struct {
 	Organism   string `json:"organism"`
 	GenomeID   string `json:"phytozome_genome_id"`
 	Residues   string `json:"residues"`
+}
+
+type esSearchResponse struct {
+	Hits struct {
+		Hits []struct {
+			Source geneRecord `json:"_source"`
+		} `json:"hits"`
+	} `json:"hits"`
+}
+
+func (g geneRecord) PrimaryTranscript(preferredID string) (geneTranscript, error) {
+	preferredID = strings.TrimSpace(preferredID)
+	for _, transcript := range g.Transcripts {
+		if preferredID != "" && transcript.PrimaryIdentifier == preferredID {
+			return transcript, nil
+		}
+	}
+	for _, transcript := range g.Transcripts {
+		if transcript.IsPrimary == "1" {
+			return transcript, nil
+		}
+	}
+	if len(g.Transcripts) == 0 {
+		return geneTranscript{}, fmt.Errorf("gene record %s has no transcripts", g.PrimaryIdentifier)
+	}
+	return g.Transcripts[0], nil
+}
+
+func (g geneRecord) OrganismShortName() string {
+	return strings.TrimSpace(g.Organism.ShortName)
+}
+
+func (g geneRecord) AnnotationVersion() string {
+	return strings.TrimSpace(g.Organism.AnnotationVersion)
+}
+
+func (g geneRecord) ProteomeID() int {
+	return g.Organism.Proteome
 }
 
 func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
@@ -223,6 +285,9 @@ func (c *Client) fetchBlastResult(ctx context.Context, jobID string) (model.Blas
 	if results.Code == http.StatusAccepted {
 		return model.BlastResult{JobID: jobID, Message: results.Message}, false, nil
 	}
+	if blastResultsPending(results.Code, results.Message) {
+		return model.BlastResult{JobID: jobID, Message: results.Message}, false, nil
+	}
 	if results.Code != http.StatusOK {
 		return model.BlastResult{}, false, fmt.Errorf("blast results: code %d message %s", results.Code, results.Message)
 	}
@@ -241,6 +306,18 @@ func (c *Client) fetchBlastResult(ctx context.Context, jobID string) (model.Blas
 		ZUID:        results.Data.ZUID,
 		Rows:        parsedRows,
 	}, true, nil
+}
+
+func blastResultsPending(code int, message string) bool {
+	if code == http.StatusAccepted {
+		return true
+	}
+	if code != http.StatusInternalServerError {
+		return false
+	}
+
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "incomplete") || strings.Contains(message, "couldn't find those results")
 }
 
 func parseBlastRows(rawXML string) ([]model.BlastResultRow, error) {
@@ -378,39 +455,73 @@ func writeSequenceField(writer *multipart.Writer, sequence string) error {
 }
 
 func (c *Client) FetchGeneByProtein(ctx context.Context, proteomeID int, proteinID string) (geneRecord, error) {
-	url := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?protein=%s", proteomeID, proteinID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?protein=%s", proteomeID, url.QueryEscape(strings.TrimSpace(proteinID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("protein %s in proteome %d", proteinID, proteomeID))
+}
+
+func (c *Client) FetchGeneByGeneID(ctx context.Context, proteomeID int, geneID string) (geneRecord, error) {
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?gene=%s", proteomeID, url.QueryEscape(strings.TrimSpace(geneID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("gene %s in proteome %d", geneID, proteomeID))
+}
+
+func (c *Client) FetchGeneByTranscript(ctx context.Context, proteomeID int, transcriptID string) (geneRecord, error) {
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?transcript=%s", proteomeID, url.QueryEscape(strings.TrimSpace(transcriptID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("transcript %s in proteome %d", transcriptID, proteomeID))
+}
+
+func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, description string) (geneRecord, error) {
+	c.mu.RLock()
+	if cached, ok := c.geneRecordCache[requestURL]; ok {
+		c.mu.RUnlock()
+		return cached, nil
+	}
+	c.mu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return geneRecord{}, fmt.Errorf("create gene request: %w", err)
 	}
 
 	resp, err := c.baseHTTP.Do(req)
 	if err != nil {
-		return geneRecord{}, fmt.Errorf("fetch gene by protein: %w", err)
+		return geneRecord{}, fmt.Errorf("fetch gene record for %s: %w", description, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent {
-		return geneRecord{}, fmt.Errorf("no gene record for protein %s in proteome %d", proteinID, proteomeID)
+		return geneRecord{}, fmt.Errorf("no gene record for %s", description)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return geneRecord{}, fmt.Errorf("fetch gene by protein: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
+		return geneRecord{}, fmt.Errorf("fetch gene record for %s: status %s body %s", description, resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var gene geneRecord
 	if err := json.NewDecoder(resp.Body).Decode(&gene); err != nil {
-		return geneRecord{}, fmt.Errorf("decode gene by protein response: %w", err)
+		return geneRecord{}, fmt.Errorf("decode gene response for %s: %w", description, err)
 	}
 	if gene.ID == "" {
-		return geneRecord{}, fmt.Errorf("gene by protein response missing _id for %s", proteinID)
+		return geneRecord{}, fmt.Errorf("gene response missing _id for %s", description)
 	}
+
+	c.mu.Lock()
+	c.geneRecordCache[requestURL] = gene
+	c.mu.Unlock()
+
 	return gene, nil
 }
 
 func (c *Client) FetchProteinSequence(ctx context.Context, transcriptInternalID string) (string, error) {
-	url := "https://phytozome-next.jgi.doe.gov/api/db/sequence/protein/" + transcriptInternalID
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	transcriptInternalID = strings.TrimSpace(transcriptInternalID)
+	c.mu.RLock()
+	if cached, ok := c.proteinSequenceCache[transcriptInternalID]; ok {
+		c.mu.RUnlock()
+		return cached, nil
+	}
+	c.mu.RUnlock()
+
+	requestURL := "https://phytozome-next.jgi.doe.gov/api/db/sequence/protein/" + url.PathEscape(transcriptInternalID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("create protein sequence request: %w", err)
 	}
@@ -436,5 +547,307 @@ func (c *Client) FetchProteinSequence(ctx context.Context, transcriptInternalID 
 	if len(payload) == 0 || strings.TrimSpace(payload[0].Residues) == "" {
 		return "", fmt.Errorf("protein sequence response empty for transcript id %s", transcriptInternalID)
 	}
-	return strings.TrimSpace(payload[0].Residues), nil
+	residues := strings.TrimSpace(payload[0].Residues)
+
+	c.mu.Lock()
+	c.proteinSequenceCache[transcriptInternalID] = residues
+	c.mu.Unlock()
+
+	return residues, nil
+}
+
+func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"size": limit,
+		"query": map[string]any{
+			"bool": map[string]any{
+				"must": []any{
+					map[string]any{
+						"query_string": map[string]any{
+							"query":            keyword,
+							"default_operator": "AND",
+							"fields": []string{
+								"primaryidentifier^5",
+								"transcripts.primaryidentifier^5",
+								"transcripts.protein^4",
+								"symbols^4",
+								"synonyms^3",
+								"deflines^2",
+								"auto_defline^2",
+								"comments",
+							},
+						},
+					},
+				},
+				"filter": []any{
+					map[string]any{
+						"term": map[string]any{
+							"organism.proteome": proteomeID,
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode keyword search body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://phytozome-next.jgi.doe.gov/api/essearch/gene/_search/", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create keyword search request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.baseHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("search genes by keyword: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
+
+	var payload esSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode keyword search response: %w", err)
+	}
+
+	results := make([]geneRecord, 0, len(payload.Hits.Hits))
+	for _, hit := range payload.Hits.Hits {
+		if strings.TrimSpace(hit.Source.PrimaryIdentifier) == "" {
+			continue
+		}
+		results = append(results, hit.Source)
+	}
+	return results, nil
+}
+
+func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	keyword = strings.TrimSpace(keyword)
+	cacheKey := strconv.Itoa(species.ProteomeID) + "|" + keyword
+	c.mu.RLock()
+	if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+		rows := append([]model.KeywordResultRow(nil), cached...)
+		c.mu.RUnlock()
+		return rows, nil
+	}
+	c.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	genes := make([]geneRecord, 0, 8)
+
+	addGene := func(gene geneRecord) {
+		key := strings.TrimSpace(gene.PrimaryIdentifier) + "|" + strconv.Itoa(gene.ProteomeID())
+		if key == "|" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		genes = append(genes, gene)
+	}
+
+	if looksLikeSpecificGeneIdentifier(keyword) {
+		for _, variant := range specificIdentifierVariants(keyword) {
+			if gene, err := c.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
+				addGene(gene)
+			}
+			if gene, err := c.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
+				addGene(gene)
+			}
+			if gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
+				addGene(gene)
+			}
+		}
+	}
+
+	if len(genes) == 0 {
+		matches, err := c.SearchGenesByKeyword(ctx, species.ProteomeID, keyword, 20)
+		if err != nil {
+			return nil, err
+		}
+		for _, gene := range matches {
+			addGene(gene)
+		}
+	}
+
+	rows := make([]model.KeywordResultRow, 0, len(genes))
+	for _, gene := range genes {
+		row, err := buildKeywordResultRow(keyword, species, gene)
+		if err != nil {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	c.mu.Lock()
+	c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
+	c.mu.Unlock()
+	return rows, nil
+}
+
+func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, gene geneRecord) (model.KeywordResultRow, error) {
+	transcript, err := gene.PrimaryTranscript("")
+	if err != nil {
+		return model.KeywordResultRow{}, err
+	}
+
+	geneID := strings.TrimSpace(gene.PrimaryIdentifier)
+	internalID := strings.TrimSpace(gene.ID)
+	geneIdentifier := geneID
+	if internalID != "" {
+		geneIdentifier += " (" + internalID + ")"
+	}
+
+	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
+	uniprotValues := make([]string, 0, len(transcript.Uniprot))
+	for _, value := range transcript.Uniprot {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		uniprotValues = append(uniprotValues, transcript.PrimaryIdentifier+": "+value)
+	}
+
+	return model.KeywordResultRow{
+		SearchTerm:          searchTerm,
+		TranscriptID:        strings.TrimSpace(transcript.PrimaryIdentifier),
+		GeneIdentifier:      geneIdentifier,
+		Genome:              formatKeywordGenome(gene),
+		Location:            formatKeywordLocation(gene),
+		Aliases:             strings.Join(aliases, "; "),
+		UniProt:             strings.Join(uniprotValues, "; "),
+		Description:         firstNonEmpty(gene.Deflines...),
+		Comments:            strings.Join(gene.Comments, "\n"),
+		AutoDefine:          strings.TrimSpace(gene.AutoDefline),
+		GeneReportURL:       fmt.Sprintf("https://phytozome-next.jgi.doe.gov/report/gene/%s/%s", species.JBrowseName, geneID),
+		SequenceHeaderLabel: strings.TrimSpace(gene.Organism.OrganismName + " " + gene.Organism.AnnotationVersion),
+		SequenceID:          strings.TrimSpace(transcript.SecondaryIdentifier),
+	}, nil
+}
+
+func formatKeywordGenome(gene geneRecord) string {
+	organism := strings.TrimSpace(gene.Organism.OrganismName)
+	annotation := strings.TrimSpace(gene.Organism.AnnotationVersion)
+	proteome := gene.Organism.Proteome
+	taxID := strings.TrimSpace(gene.Organism.TaxID)
+
+	parts := make([]string, 0, 2)
+	if organism != "" || annotation != "" {
+		parts = append(parts, strings.TrimSpace(organism+" "+annotation))
+	}
+	details := make([]string, 0, 2)
+	if proteome != 0 {
+		details = append(details, fmt.Sprintf("Phytozome genome ID: %d", proteome))
+	}
+	if taxID != "" {
+		details = append(details, "NCBI taxonomy ID: "+taxID)
+	}
+	if len(details) > 0 {
+		parts = append(parts, "("+strings.Join(details, " · ")+")")
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatKeywordLocation(gene geneRecord) string {
+	strand := "forward"
+	if strings.TrimSpace(gene.Strand) == "-1" {
+		strand = "reverse"
+	}
+	return fmt.Sprintf("%s:%s..%s %s", strings.TrimSpace(gene.Scaffold), strings.TrimSpace(gene.Start), strings.TrimSpace(gene.End), strand)
+}
+
+func looksLikeSpecificGeneIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, " \t") {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, ch := range value {
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z':
+			hasLetter = true
+		case ch >= '0' && ch <= '9':
+			hasDigit = true
+		case ch == '.' || ch == '_' || ch == '-' || ch == ':':
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+func specificIdentifierVariants(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	variants := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		variants = append(variants, candidate)
+	}
+
+	add(value)
+	add(strings.ToUpper(value))
+	add(strings.ToLower(value))
+	return variants
+}
+
+func dedupePreserveOrder(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func copyStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, len(values))
+	copy(result, values)
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

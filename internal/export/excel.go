@@ -5,7 +5,7 @@ import (
 
 	"github.com/xuri/excelize/v2"
 
-	"github.com/wangsychn/phytozome-batch-cli/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/model"
 )
 
 var blastResultHeaders = []string{
@@ -37,7 +37,26 @@ var blastResultHeaders = []string{
 	"gene_report_url",
 }
 
+var keywordResultHeaders = []string{
+	"row",
+	"search_term",
+	"transcript",
+	"gene_identifier",
+	"genome",
+	"location",
+	"alias",
+	"uniprot",
+	"description",
+	"comments",
+	"auto_define",
+	"gene_report_url",
+}
+
 func WriteBlastResultsExcel(path string, rows []model.BlastResultRow) error {
+	return WriteBlastResultsExcelWithMetadata(path, rows, nil)
+}
+
+func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow, metadata *model.ExportMetadata) error {
 	file := excelize.NewFile()
 	defer func() {
 		_ = file.Close()
@@ -46,8 +65,30 @@ func WriteBlastResultsExcel(path string, rows []model.BlastResultRow) error {
 	const sheet = "BLAST Results"
 	file.SetSheetName(file.GetSheetName(0), sheet)
 
+	headerRow := 1
+	dataStartRow := 2
+
+	if metadata != nil && (metadata.GeneName != "" || metadata.GeneID != "" || metadata.GeneReportURL != "") {
+		metaValues := []any{
+			"gene_name", metadata.GeneName,
+			"gene_id", metadata.GeneID,
+			"gene_report_url", metadata.GeneReportURL,
+		}
+		for col, value := range metaValues {
+			cell, err := excelize.CoordinatesToCellName(col+1, 1)
+			if err != nil {
+				return fmt.Errorf("build metadata cell: %w", err)
+			}
+			if err := file.SetCellValue(sheet, cell, value); err != nil {
+				return fmt.Errorf("write metadata col %d: %w", col+1, err)
+			}
+		}
+		headerRow = 2
+		dataStartRow = 3
+	}
+
 	for col, header := range blastResultHeaders {
-		cell, err := excelize.CoordinatesToCellName(col+1, 1)
+		cell, err := excelize.CoordinatesToCellName(col+1, headerRow)
 		if err != nil {
 			return fmt.Errorf("build header cell: %w", err)
 		}
@@ -85,15 +126,73 @@ func WriteBlastResultsExcel(path string, rows []model.BlastResultRow) error {
 			row.Defline,
 			row.GeneReportURL,
 		}
+		cell, err := excelize.CoordinatesToCellName(1, idx+dataStartRow)
+		if err != nil {
+			return fmt.Errorf("build data row start cell: %w", err)
+		}
+		if err := file.SetSheetRow(sheet, cell, &values); err != nil {
+			return fmt.Errorf("write data row %d: %w", idx+dataStartRow, err)
+		}
+	}
 
-		for col, value := range values {
-			cell, err := excelize.CoordinatesToCellName(col+1, idx+2)
-			if err != nil {
-				return fmt.Errorf("build data cell: %w", err)
-			}
-			if err := file.SetCellValue(sheet, cell, value); err != nil {
-				return fmt.Errorf("write row %d col %d: %w", idx+2, col+1, err)
-			}
+	if err := file.SetPanes(sheet, &excelize.Panes{
+		Freeze:      true,
+		Split:       false,
+		XSplit:      0,
+		YSplit:      headerRow,
+		TopLeftCell: fmt.Sprintf("A%d", dataStartRow),
+		ActivePane:  "bottomLeft",
+	}); err != nil {
+		return fmt.Errorf("freeze header row: %w", err)
+	}
+
+	if err := file.SaveAs(path); err != nil {
+		return fmt.Errorf("save excel file: %w", err)
+	}
+
+	return nil
+}
+
+func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error {
+	file := excelize.NewFile()
+	defer func() {
+		_ = file.Close()
+	}()
+
+	const sheet = "Keyword Results"
+	file.SetSheetName(file.GetSheetName(0), sheet)
+
+	for col, header := range keywordResultHeaders {
+		cell, err := excelize.CoordinatesToCellName(col+1, 1)
+		if err != nil {
+			return fmt.Errorf("build keyword header cell: %w", err)
+		}
+		if err := file.SetCellValue(sheet, cell, header); err != nil {
+			return fmt.Errorf("write keyword header %q: %w", header, err)
+		}
+	}
+
+	for idx, row := range rows {
+		values := []any{
+			idx + 1,
+			row.SearchTerm,
+			row.TranscriptID,
+			row.GeneIdentifier,
+			row.Genome,
+			row.Location,
+			row.Aliases,
+			row.UniProt,
+			row.Description,
+			row.Comments,
+			row.AutoDefine,
+			row.GeneReportURL,
+		}
+		cell, err := excelize.CoordinatesToCellName(1, idx+2)
+		if err != nil {
+			return fmt.Errorf("build keyword data row start cell: %w", err)
+		}
+		if err := file.SetSheetRow(sheet, cell, &values); err != nil {
+			return fmt.Errorf("write keyword row %d: %w", idx+2, err)
 		}
 	}
 
@@ -105,11 +204,11 @@ func WriteBlastResultsExcel(path string, rows []model.BlastResultRow) error {
 		TopLeftCell: "A2",
 		ActivePane:  "bottomLeft",
 	}); err != nil {
-		return fmt.Errorf("freeze header row: %w", err)
+		return fmt.Errorf("freeze keyword header row: %w", err)
 	}
 
 	if err := file.SaveAs(path); err != nil {
-		return fmt.Errorf("save excel file: %w", err)
+		return fmt.Errorf("save keyword excel file: %w", err)
 	}
 
 	return nil

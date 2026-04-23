@@ -9,10 +9,16 @@ type SpeciesCandidate struct {
 	GenomeLabel string
 	CommonName  string
 	ReleaseDate string
+	SearchAlias string
 }
 
 func (s SpeciesCandidate) DisplayLabel() string {
-	parts := []string{s.GenomeLabel}
+	label := s.GenomeLabel
+	if s.SearchAlias != "" {
+		label = s.SearchAlias
+	}
+
+	parts := []string{label}
 	if s.CommonName != "" {
 		parts = append(parts, "("+s.CommonName+")")
 	}
@@ -27,5 +33,6 @@ func (s SpeciesCandidate) SearchText() string {
 		s.JBrowseName,
 		s.GenomeLabel,
 		s.CommonName,
+		s.SearchAlias,
 	}, " "))
 }

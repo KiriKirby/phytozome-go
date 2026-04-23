@@ -1,4 +1,4 @@
-module github.com/wangsychn/phytozome-batch-cli
+module github.com/KiriKirby/phytozome-go
 
 go 1.24.0
 
