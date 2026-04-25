@@ -52,6 +52,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - executable suffixes `-en`, `-cn`, and `-jp` should select the default language on startup
   - if no suffix or runtime override is present, default to English
   - keep language-specific prompt text and help text aligned across the whole wizard
+  - when adding or changing a prompt, update the English text and both translated variants in the same change
+  - do not leave new prompt text untranslated in one locale while adding it in another
+  - for blank/Enter-only branches, return an explicit placeholder value when the caller expects a slice or list, rather than returning `nil` and relying on downstream indexing
 - Prefer descriptive labels over terse jargon:
   - `File name` is preferred over localized or ambiguous labels
   - query input prompts should say exactly what kinds of inputs are accepted

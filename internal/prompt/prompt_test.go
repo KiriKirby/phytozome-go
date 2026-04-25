@@ -148,8 +148,11 @@ func TestBlastProteinIdentificationsOptionalSkip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BlastProteinIdentifications returned error: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("expected nil result for skipped optional label, got %v", got)
+	if len(got) != 1 {
+		t.Fatalf("expected a single blank label, got %d values: %v", len(got), got)
+	}
+	if got[0] != "" {
+		t.Fatalf("expected a blank label for skipped optional input, got %q", got[0])
 	}
 }
 
@@ -292,5 +295,21 @@ func TestBlastPlusInstallActionInstall(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected prompt to contain %q, got %q", want, output)
 		}
+	}
+}
+
+func TestBlastProteinIdentificationsSingleBlankAllowed(t *testing.T) {
+	var out bytes.Buffer
+	p := New(strings.NewReader("\n"), &out, locale.English)
+
+	got, err := p.BlastProteinIdentifications(1, false)
+	if err != nil {
+		t.Fatalf("BlastProteinIdentifications returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("unexpected length: got %d want 1", len(got))
+	}
+	if got[0] != "" {
+		t.Fatalf("unexpected label: got %q want empty", got[0])
 	}
 }

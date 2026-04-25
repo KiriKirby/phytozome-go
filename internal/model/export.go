@@ -12,21 +12,21 @@ type ExportMetadata struct {
 }
 
 type KeywordResultRow struct {
-	SearchTerm          string
+	SearchTerm            string
 	ProteinIdentification string
-	TranscriptID        string
-	GeneIdentifier      string
-	Genome              string
-	Location            string
-	Aliases             string
-	UniProt             string
-	Description         string
-	Comments            string
-	AutoDefine          string
-	GeneReportURL       string
-	SequenceHeaderLabel string
-	SequenceID          string
-	ExtraColumns        map[string]string
+	TranscriptID          string
+	GeneIdentifier        string
+	Genome                string
+	Location              string
+	Aliases               string
+	UniProt               string
+	Description           string
+	Comments              string
+	AutoDefine            string
+	GeneReportURL         string
+	SequenceHeaderLabel   string
+	SequenceID            string
+	ExtraColumns          map[string]string
 }
 
 type KeywordSearchGroup struct {

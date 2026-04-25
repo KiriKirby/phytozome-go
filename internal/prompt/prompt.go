@@ -504,7 +504,7 @@ func (p *Prompter) BlastProteinIdentifications(itemCount int, required bool) ([]
 					fmt.Fprintln(p.out, p.t("Protein Identification is required for this input. Please enter one label per query."))
 					break
 				}
-				return nil, nil
+				return []string{""}, nil
 			}
 			if line == "" {
 				break

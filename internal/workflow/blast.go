@@ -917,8 +917,13 @@ func (w *BlastWizard) collectBlastQueryItems() ([]blastQueryItem, string, error)
 			if err != nil {
 				return nil, "", err
 			}
-			for i := range items {
-				items[i].ProteinIdentification = labels[i]
+			if len(labels) > 0 {
+				if len(labels) != len(items) {
+					return nil, "", fmt.Errorf("unexpected Protein Identification count: got %d want %d", len(labels), len(items))
+				}
+				for i := range items {
+					items[i].ProteinIdentification = labels[i]
+				}
 			}
 		}
 
