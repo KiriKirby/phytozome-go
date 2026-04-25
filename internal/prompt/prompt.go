@@ -12,56 +12,367 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/KiriKirby/phytozome-go/internal/locale"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 )
 
 type Prompter struct {
-	in  *bufio.Reader
-	out io.Writer
+	in   *bufio.Reader
+	out  io.Writer
+	lang locale.Language
 }
 
-var invalidFileNameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
-var ErrBackToModeSelection = errors.New("back to mode selection")
+var activeLanguage = locale.English
 
-func New(in io.Reader, out io.Writer) *Prompter {
+var invalidFileNameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
+var errBackCommand = errors.New("global back command")
+var errSpawnCommand = errors.New("global spawn command")
+var errLobbyCommand = errors.New("global lobby command")
+var ErrBackToDatabaseSelection = errors.New("back to database selection")
+var ErrBackToModeSelection = errors.New("back to mode selection")
+var ErrBackToSpeciesSelection = errors.New("back to species selection")
+var ErrBackToQueryInput = errors.New("back to query input")
+var ErrBackToBlastProgram = errors.New("back to BLAST program selection")
+var ErrBackToRowSelection = errors.New("back to row selection")
+var ErrExitRequested = errors.New("exit requested")
+
+func New(in io.Reader, out io.Writer, lang locale.Language) *Prompter {
+	activeLanguage = lang
 	return &Prompter{
-		in:  bufio.NewReader(in),
-		out: out,
+		in:   bufio.NewReader(in),
+		out:  out,
+		lang: lang,
+	}
+}
+
+func (p *Prompter) Language() locale.Language {
+	return p.lang
+}
+
+func (p *Prompter) SetLanguage(lang locale.Language) {
+	p.lang = lang
+	activeLanguage = lang
+}
+
+func (p *Prompter) t(text string) string {
+	return locale.Text(p.lang, text)
+}
+
+func (p *Prompter) tf(text string, args ...any) string {
+	return fmt.Sprintf(p.t(text), args...)
+}
+
+func printGlobalCommandHint(out io.Writer) {
+	fmt.Fprintln(out, locale.Text(activeLanguage, "Global navigation: back - previous page | spawn - mode selection | lobby - database selection | exit - quit the wizard"))
+}
+
+func printSelectionCommands(out io.Writer, includeList bool) {
+	fmt.Fprintln(out, locale.Text(activeLanguage, "Selection commands:"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  all - select every row"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  none - clear all selections"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  toggle 1 2 3 5~8 - flip the selected state for the listed rows or ranges"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  on 5~8 | off 5~8 - select or clear an explicit row range"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  on up 12 | off up 12 - select or clear rows from the start through row 12"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  on down 12 | off down 12 - select or clear rows from row 12 through the end"))
+	if includeList {
+		fmt.Fprintln(out, locale.Text(activeLanguage, "  list - preview the currently selected rows and optionally write a _list file"))
+	}
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  done - confirm the current selection"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  back - return to the previous page"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  spawn - jump back to mode selection"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  lobby - jump back to database selection"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  exit - quit the program"))
+}
+
+func printListOutputCommands(out io.Writer) {
+	fmt.Fprintln(out, locale.Text(activeLanguage, "List output actions:"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  back - return to the selection table without changing the current selection"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  txt - write the _list text file now"))
+	fmt.Fprintln(out, locale.Text(activeLanguage, "  exit - quit the program"))
+}
+
+func printBlastSelectionTable(out io.Writer, rows []model.BlastResultRow, selected []bool) {
+	writer := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "sel\trow\tprotein\tspecies\te_value\tpercent_identity\talign_len\tstrands\tquery_id\tquery_from\tquery_to\ttarget_from\ttarget_to\tbitscore\tidentical\tpositives\tgaps\tquery_length\ttarget_length\tgene_report_url")
+	for i, row := range rows {
+		marker := "[ ]"
+		if i < len(selected) && selected[i] {
+			marker = "[x]"
+		}
+		fmt.Fprintf(
+			writer,
+			"%s\t%d\t%s\t%s\t%s\t%.2f\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%.2f\t%d\t%d\t%d\t%d\t%d\t%s\n",
+			marker,
+			i+1,
+			row.Protein,
+			row.Species,
+			row.EValue,
+			row.PercentIdentity,
+			row.AlignLength,
+			row.Strands,
+			row.QueryID,
+			row.QueryFrom,
+			row.QueryTo,
+			row.TargetFrom,
+			row.TargetTo,
+			row.Bitscore,
+			row.Identical,
+			row.Positives,
+			row.Gaps,
+			row.QueryLength,
+			row.TargetLength,
+			row.GeneReportURL,
+		)
+	}
+	_ = writer.Flush()
+}
+
+func mapNavigationError(err error, backTarget error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errBackCommand):
+		if backTarget != nil {
+			return backTarget
+		}
+		return nil
+	case errors.Is(err, errSpawnCommand):
+		return ErrBackToModeSelection
+	case errors.Is(err, errLobbyCommand):
+		return ErrBackToDatabaseSelection
+	case errors.Is(err, ErrExitRequested):
+		return ErrExitRequested
+	default:
+		return err
+	}
+}
+
+func (p *Prompter) ChooseDatabase() (string, error) {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, p.t("Database selection:"))
+		fmt.Fprintln(p.out, p.t(" 1) phytozome - original Phytozome workflow"))
+		fmt.Fprintln(p.out, p.t(" 2) lemna     - lemna.org download-backed workflow"))
+		printGlobalCommandHint(p.out)
+
+		value, err := p.readLine(p.t("Select 1 or 2 (or 'phytozome'/'lemna'): "))
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToDatabaseSelection); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(value) {
+			p.printDatabaseHelp()
+			continue
+		}
+
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "phytozome", "p":
+			return "phytozome", nil
+		case "2", "lemna", "l":
+			return "lemna", nil
+		default:
+			fmt.Fprintln(p.out, p.t("Please enter one of: 1, 2, 'phytozome', or 'lemna'."))
+		}
 	}
 }
 
 func (p *Prompter) ChooseMode() (string, error) {
 	for {
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Choose mode:")
-		fmt.Fprintln(p.out, " 1) blast   - sequence / FASTA / URL query against one species")
-		fmt.Fprintln(p.out, " 2) keyword - keyword gene search within one species")
+		fmt.Fprintln(p.out, p.t("Mode selection:"))
+		fmt.Fprintln(p.out, p.t(" 1) blast   - sequence / FASTA / URL query against one species"))
+		fmt.Fprintln(p.out, p.t(" 2) keyword - keyword gene search within one species"))
+		printGlobalCommandHint(p.out)
 
-		value, err := p.readLine("Choose 1 or 2 (or 'blast'/'keyword'): ")
+		mode, err := p.readLine(p.t("Select 1 or 2 (or 'blast'/'keyword'): "))
 		if err != nil {
-			return "", err
+			if mapped := mapNavigationError(err, ErrBackToDatabaseSelection); mapped != nil {
+				return "", mapped
+			}
+			continue
 		}
-		if isHelpCommand(value) {
+		if isHelpCommand(mode) {
 			p.printModeHelp()
 			continue
 		}
 
-		switch strings.ToLower(strings.TrimSpace(value)) {
+		switch strings.ToLower(strings.TrimSpace(mode)) {
 		case "1", "blast", "b":
 			return "blast", nil
 		case "2", "keyword", "k":
 			return "keyword", nil
 		default:
-			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 'blast', or 'keyword'.")
+			fmt.Fprintln(p.out, p.t("Please enter one of: 1, 2, 'blast', or 'keyword'."))
+		}
+	}
+}
+
+// ChooseBlastProgram prompts the user to pick one BLAST program from the
+// provided list of program names. The prompt accepts either a program number
+// (1-based) or the program name (case-insensitive). Returns the selected
+// program string as given in the `programs` slice.
+func (p *Prompter) ChooseBlastProgram(programs []string) (string, error) {
+	if len(programs) == 0 {
+		return "", fmt.Errorf("no BLAST programs available")
+	}
+
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, p.t("BLAST program selection:"))
+		printBlastProgramGroups(p.out, programs)
+		printGlobalCommandHint(p.out)
+		value, err := p.readLine(p.t("Select a program by number or name (type help for details): "))
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToQueryInput); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(value) {
+			fmt.Fprintln(p.out, p.t("Programs are grouped by query type."))
+			fmt.Fprintln(p.out, p.t("Use the nucleotide-query programs for DNA/RNA input."))
+			fmt.Fprintln(p.out, p.t("Use the protein-query programs for amino-acid input."))
+			fmt.Fprintln(p.out, p.t("Examples: '1', 'blastn', or 'blastp'."))
+			continue
+		}
+
+		trim := strings.TrimSpace(value)
+		// Try numeric selection first.
+		if idx, err := strconv.Atoi(trim); err == nil {
+			if idx >= 1 && idx <= len(programs) {
+				return programs[idx-1], nil
+			}
+			fmt.Fprintln(p.out, "Number out of range. Choose one of the listed numbers.")
+			continue
+		}
+
+		// Try exact name match (case-insensitive).
+		lower := strings.ToLower(trim)
+		for _, prog := range programs {
+			if strings.ToLower(prog) == lower {
+				return prog, nil
+			}
+		}
+
+		// Try prefix or contains match to be user friendly.
+		matches := make([]string, 0, len(programs))
+		for _, prog := range programs {
+			if strings.Contains(strings.ToLower(prog), lower) || strings.HasPrefix(strings.ToLower(prog), lower) {
+				matches = append(matches, prog)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
+		}
+		if len(matches) > 1 {
+			fmt.Fprintln(p.out, p.t("Ambiguous program name; multiple candidates match:"))
+			for _, m := range matches {
+				fmt.Fprintf(p.out, "  - %s\n", m)
+			}
+			fmt.Fprintln(p.out, p.t("Please enter a number or a more specific program name."))
+			continue
+		}
+
+		fmt.Fprintln(p.out, p.t("Unknown program. Enter a listed number or program name."))
+	}
+}
+
+func printBlastProgramGroups(out io.Writer, programs []string) {
+	numbered := make([]string, 0, len(programs))
+	for i, prog := range programs {
+		numbered = append(numbered, fmt.Sprintf(" %d) %s - %s", i+1, prog, locale.Text(activeLanguage, blastProgramDescription(prog))))
+	}
+
+	printed := make(map[string]bool, len(programs))
+	printGroup := func(title string, wanted ...string) {
+		groupPrinted := false
+		for i, prog := range programs {
+			for _, want := range wanted {
+				if strings.EqualFold(prog, want) {
+					if !groupPrinted {
+						fmt.Fprintf(out, " %s:\n", title)
+						groupPrinted = true
+					}
+					fmt.Fprintln(out, numbered[i])
+					printed[strings.ToLower(prog)] = true
+				}
+			}
+		}
+	}
+
+	printGroup(locale.Text(activeLanguage, "Nucleotide query starts here"), "blastn", "blastx")
+	printGroup(locale.Text(activeLanguage, "Protein query starts here"), "tblastn", "blastp")
+
+	for i, prog := range programs {
+		if !printed[strings.ToLower(prog)] {
+			fmt.Fprintln(out, numbered[i])
+		}
+	}
+}
+
+func blastProgramDescription(program string) string {
+	switch strings.ToLower(strings.TrimSpace(program)) {
+	case "blastn":
+		return "nucleotide query -> nucleotide/genome database"
+	case "blastx":
+		return "nucleotide query -> translated protein -> protein database"
+	case "tblastn":
+		return "protein query -> translated nucleotide/genome database"
+	case "blastp":
+		return "protein query -> protein database"
+	default:
+		return "BLAST search program"
+	}
+}
+
+// ChooseBlastExecution asks whether to run the BLAST job on the server or
+// locally. Returns \"server\" or \"local\". Accepts numeric choice or name.
+func (p *Prompter) ChooseBlastExecution() (string, error) {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, p.t("BLAST execution target:"))
+		fmt.Fprintln(p.out, p.t(" 1) server - try the remote lemna.org BLAST service first"))
+		fmt.Fprintln(p.out, p.t(" 2) local  - download the lemna FASTA files automatically and run BLAST on this computer"))
+		fmt.Fprintln(p.out, p.t("      Local mode does not require you to prepare the FASTA files yourself."))
+		fmt.Fprintln(p.out, p.t("      It does require NCBI BLAST+ on PATH, including makeblastdb."))
+		printGlobalCommandHint(p.out)
+
+		value, err := p.readLine(p.t("Select 1 or 2 (or 'server'/'local'): "))
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToBlastProgram); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(value) {
+			fmt.Fprintln(p.out, p.t("server: use the lemna.org website if the needed database is exposed there."))
+			fmt.Fprintln(p.out, p.t("local: the CLI downloads FASTA files from lemna.org into a local cache, builds a BLAST database, and runs BLAST on your machine."))
+			fmt.Fprintln(p.out, p.t("You do not need to prepare the data files yourself, but BLAST+ must be installed."))
+			continue
+		}
+
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "server", "s":
+			return "server", nil
+		case "2", "local", "l":
+			return "local", nil
+		default:
+			fmt.Fprintln(p.out, p.t("Please enter one of: 1, 2, 'server', or 'local'."))
 		}
 	}
 }
 
 func (p *Prompter) SpeciesKeyword() (string, error) {
 	for {
-		value, err := p.readLine("Search species keyword: ")
+		printGlobalCommandHint(p.out)
+		value, err := p.readLine(p.t("Enter a species keyword: "))
 		if err != nil {
-			return "", err
+			if mapped := mapNavigationError(err, ErrBackToModeSelection); mapped != nil {
+				return "", mapped
+			}
+			continue
 		}
 		if isHelpCommand(value) {
 			p.printSpeciesSearchHelp()
@@ -78,13 +389,17 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 
 	for i, candidate := range candidates {
 		fmt.Fprintf(p.out, "%d. %s\n", i+1, candidate.DisplayLabel())
-		fmt.Fprintf(p.out, "   %s (proteome %d)\n", candidate.JBrowseName, candidate.ProteomeID)
+		fmt.Fprintf(p.out, "   %s%s\n", candidate.JBrowseName, targetIDLabel(candidate.ProteomeID))
 	}
+	printGlobalCommandHint(p.out)
 
 	for {
-		value, err := p.readLine("Choose one species by number: ")
+		value, err := p.readLine(p.t("Select one species by number: "))
 		if err != nil {
-			return model.SpeciesCandidate{}, err
+			if mapped := mapNavigationError(err, ErrBackToModeSelection); mapped != nil {
+				return model.SpeciesCandidate{}, mapped
+			}
+			continue
 		}
 		if isHelpCommand(value) {
 			p.printSpeciesChooseHelp()
@@ -93,11 +408,202 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 
 		index, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || index < 1 || index > len(candidates) {
-			fmt.Fprintln(p.out, "Invalid selection. Enter one of the numbers above.")
+			fmt.Fprintln(p.out, p.t("Invalid selection. Enter one of the numbers above."))
 			continue
 		}
 
 		return candidates[index-1], nil
+	}
+}
+
+func (p *Prompter) KeywordProteinIdentifications(termCount int) ([]string, error) {
+	if termCount <= 0 {
+		return nil, nil
+	}
+
+	for {
+		fmt.Fprintln(p.out, p.t("Protein identification labels:"))
+		fmt.Fprintln(p.out, p.t(" Enter one label per search term."))
+		fmt.Fprintln(p.out, p.t(" Use ~ for a blank label."))
+		fmt.Fprintln(p.out, p.t(" Press Enter on the first line to skip all labels."))
+		printGlobalCommandHint(p.out)
+
+		lines := make([]string, 0, termCount)
+		for {
+			line, err := p.in.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return nil, err
+			}
+
+			line = strings.TrimSpace(line)
+			if p.applyLanguageCommand(line) {
+				continue
+			}
+			if len(lines) == 0 && line == "" {
+				return nil, nil
+			}
+			if line == "" {
+				break
+			}
+			if len(lines) == 0 {
+				switch strings.ToLower(line) {
+				case "back":
+					return nil, ErrBackToSpeciesSelection
+				case "spawn":
+					return nil, ErrBackToModeSelection
+				case "lobby":
+					return nil, ErrBackToDatabaseSelection
+				case "exit":
+					return nil, ErrExitRequested
+				}
+			}
+			lines = append(lines, line)
+			if err == io.EOF {
+				break
+			}
+		}
+
+		values := parseKeywordIdentityValues(lines)
+		if len(values) != termCount {
+			fmt.Fprintf(p.out, p.t("Need exactly %d Protein Identification values, got %d. Please re-enter.\n"), termCount, len(values))
+			continue
+		}
+		return values, nil
+	}
+}
+
+func (p *Prompter) BlastProteinIdentifications(itemCount int, required bool) ([]string, error) {
+	if itemCount <= 0 {
+		return nil, nil
+	}
+
+	for {
+		fmt.Fprintln(p.out, p.t("Protein identification labels:"))
+		if itemCount == 1 {
+			fmt.Fprintln(p.out, p.t(" Enter one label for this BLAST query, or press Enter to skip."))
+		} else {
+			fmt.Fprintln(p.out, locale.Sprintf(p.lang, " Enter exactly %d labels, one per line.\n", itemCount))
+			fmt.Fprintln(p.out, p.t(" Use ~ for a blank label."))
+		}
+		fmt.Fprintln(p.out, p.t(" Finish with an empty line."))
+		printGlobalCommandHint(p.out)
+
+		lines := make([]string, 0, itemCount)
+		for {
+			line, err := p.in.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return nil, err
+			}
+
+			line = strings.TrimSpace(line)
+			if p.applyLanguageCommand(line) {
+				continue
+			}
+			if len(lines) == 0 && line == "" {
+				if required {
+					fmt.Fprintln(p.out, p.t("Protein Identification is required for this input. Please enter one label per query."))
+					break
+				}
+				return nil, nil
+			}
+			if line == "" {
+				break
+			}
+			if len(lines) == 0 {
+				switch strings.ToLower(line) {
+				case "back":
+					return nil, ErrBackToSpeciesSelection
+				case "spawn":
+					return nil, ErrBackToModeSelection
+				case "lobby":
+					return nil, ErrBackToDatabaseSelection
+				case "exit":
+					return nil, ErrExitRequested
+				}
+			}
+			lines = append(lines, line)
+			if err == io.EOF {
+				break
+			}
+		}
+
+		values := parseBlastIdentityValues(lines)
+		if len(values) != itemCount {
+			fmt.Fprintf(p.out, p.t("Need exactly %d Protein Identification values, got %d. Please re-enter.\n"), itemCount, len(values))
+			continue
+		}
+		return values, nil
+	}
+}
+
+func (p *Prompter) OutputFolderName() (string, error) {
+	for {
+		fmt.Fprintln(p.out, p.t("Output folder (optional)."))
+		fmt.Fprintln(p.out, p.t(" Leave blank to write next to the program."))
+		printGlobalCommandHint(p.out)
+
+		value, err := p.readLine(p.t("Enter a folder name or press Enter: "))
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToQueryInput); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(value) {
+			fmt.Fprintln(p.out, p.t("A folder name keeps all generated files together."))
+			fmt.Fprintln(p.out, p.t("Leave it blank to write files next to the program."))
+			continue
+		}
+
+		return strings.TrimSpace(value), nil
+	}
+}
+
+func (p *Prompter) ConfirmReportPreview() error {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, p.t("Review the summary and press Enter to continue."))
+		printGlobalCommandHint(p.out)
+		value, err := p.readLine(p.t("Press Enter to continue: "))
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		if isHelpCommand(value) {
+			fmt.Fprintln(p.out, p.t("Press Enter to continue."))
+			fmt.Fprintln(p.out, p.t("Or use back, spawn, lobby, or exit to navigate away."))
+			continue
+		}
+		fmt.Fprintln(p.out, p.t("Press Enter to continue."))
+	}
+}
+
+func (p *Prompter) DetailedReportAction() (string, error) {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintln(p.out, p.t("Detailed run log?"))
+		fmt.Fprintln(p.out, p.t(" 1) yes - write a timestamped log next to the generated files"))
+		fmt.Fprintln(p.out, p.t(" 2) no  - skip the detailed log"))
+		printGlobalCommandHint(p.out)
+		value, err := p.readLine(p.t("Select 1 or 2 (or 'yes'/'no'): "))
+		if err != nil {
+			return "", err
+		}
+		if isHelpCommand(value) {
+			fmt.Fprintln(p.out, p.t("yes writes a detailed log after file generation."))
+			fmt.Fprintln(p.out, p.t("no skips the extra log."))
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "yes", "y":
+			return "yes", nil
+		case "2", "no", "n":
+			return "no", nil
+		default:
+			fmt.Fprintln(p.out, p.t("Please enter one of: 1, 2, yes, or no."))
+		}
 	}
 }
 
@@ -115,7 +621,7 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 
 		filtered := searchFn(keyword)
 		if len(filtered) == 0 {
-			fmt.Fprintf(p.out, "No species candidates matched %q.\n", keyword)
+			fmt.Fprintf(p.out, p.t("No species candidates matched %q.\n"), keyword)
 			keyword = ""
 			continue
 		}
@@ -125,18 +631,22 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 		}
 
 		fmt.Fprintln(p.out)
-		fmt.Fprintf(p.out, "Candidate species for %q:\n", keyword)
+		fmt.Fprintf(p.out, p.t("Candidate species for %q:\n"), keyword)
 		for i, candidate := range filtered {
 			fmt.Fprintf(p.out, "%d. %s\n", i+1, candidate.DisplayLabel())
-			fmt.Fprintf(p.out, "   %s (proteome %d)\n", candidate.JBrowseName, candidate.ProteomeID)
+			fmt.Fprintf(p.out, "   %s%s\n", candidate.JBrowseName, targetIDLabel(candidate.ProteomeID))
 		}
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Enter a number to choose one candidate.")
-		fmt.Fprintln(p.out, "Or type another keyword to search again.")
+		fmt.Fprintln(p.out, p.t("Enter a number to choose one candidate."))
+		fmt.Fprintln(p.out, p.t("Or enter another keyword to search again."))
+		printGlobalCommandHint(p.out)
 
-		value, err := p.readLine("Choose species or search again: ")
+		value, err := p.readLine(p.t("Select a species or search again: "))
 		if err != nil {
-			return model.SpeciesCandidate{}, err
+			if mapped := mapNavigationError(err, ErrBackToModeSelection); mapped != nil {
+				return model.SpeciesCandidate{}, mapped
+			}
+			continue
 		}
 		if isHelpCommand(value) {
 			p.printSpeciesSearchHelp()
@@ -150,7 +660,7 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 		}
 
 		if strings.TrimSpace(value) == "" {
-			fmt.Fprintln(p.out, "Please enter a number or another keyword.")
+			fmt.Fprintln(p.out, p.t("Please enter a number or another keyword."))
 			continue
 		}
 
@@ -159,8 +669,10 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 }
 
 func (p *Prompter) SequenceInput() (string, error) {
-	fmt.Fprintln(p.out, "Paste sequence lines, a FASTA-style header plus sequence, or a Phytozome gene report URL.")
-	fmt.Fprintln(p.out, "Finish sequence input with an empty line.")
+	fmt.Fprintln(p.out, p.t("Paste one or more BLAST queries, one per line, or paste a FASTA entry / Phytozome gene or transcript report URL."))
+	fmt.Fprintln(p.out, p.t("You can also paste a keyword-mode list preview with ~~ in the middle, or type load \"file.txt\" to read from the program directory."))
+	fmt.Fprintln(p.out, p.t("Finish sequence input with an empty line."))
+	printGlobalCommandHint(p.out)
 
 	lines := make([]string, 0, 8)
 	for {
@@ -170,6 +682,21 @@ func (p *Prompter) SequenceInput() (string, error) {
 		}
 
 		line = strings.TrimSpace(line)
+		if p.applyLanguageCommand(line) {
+			continue
+		}
+		if len(lines) == 0 {
+			switch strings.ToLower(line) {
+			case "back":
+				return "", ErrBackToSpeciesSelection
+			case "spawn":
+				return "", ErrBackToModeSelection
+			case "lobby":
+				return "", ErrBackToDatabaseSelection
+			case "exit":
+				return "", ErrExitRequested
+			}
+		}
 		if line == "" {
 			return strings.Join(lines, "\n"), nil
 		}
@@ -189,9 +716,17 @@ func (p *Prompter) SequenceInput() (string, error) {
 	}
 }
 
+func targetIDLabel(targetID int) string {
+	if targetID == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (target id %d)", targetID)
+}
+
 func (p *Prompter) KeywordInput() (string, error) {
-	fmt.Fprintln(p.out, "Enter one or more keywords separated by spaces or new lines.")
-	fmt.Fprintln(p.out, "Finish keyword input with an empty line.")
+	fmt.Fprintln(p.out, p.t("Paste one or more keywords for the selected species."))
+	fmt.Fprintln(p.out, p.t("Separate them by spaces or new lines, then finish with an empty line."))
+	printGlobalCommandHint(p.out)
 
 	lines := make([]string, 0, 4)
 	for {
@@ -201,6 +736,21 @@ func (p *Prompter) KeywordInput() (string, error) {
 		}
 
 		line = strings.TrimSpace(line)
+		if p.applyLanguageCommand(line) {
+			continue
+		}
+		if len(lines) == 0 {
+			switch strings.ToLower(line) {
+			case "back":
+				return "", ErrBackToSpeciesSelection
+			case "spawn":
+				return "", ErrBackToModeSelection
+			case "lobby":
+				return "", ErrBackToDatabaseSelection
+			case "exit":
+				return "", ErrExitRequested
+			}
+		}
 		if len(lines) == 0 && isHelpCommand(line) {
 			p.printKeywordInputHelp()
 			continue
@@ -216,7 +766,7 @@ func (p *Prompter) KeywordInput() (string, error) {
 	}
 }
 
-func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model.KeywordResultRow, error) {
+func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup, listPath string, writeListFn func(string, []model.KeywordResultRow) error) ([]model.KeywordResultRow, error) {
 	totalRows := 0
 	for _, group := range groups {
 		totalRows += len(group.Rows)
@@ -239,8 +789,8 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 
 	for {
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Keyword results:")
-		fmt.Fprintln(p.out, "sel\trow\ttranscript\tgene_identifier\tgenome\tlocation\talias\tuniprot\tdescription\tauto_define\tgene_report_url")
+		fmt.Fprintln(p.out, p.t("Keyword results:"))
+		fmt.Fprintln(p.out, "sel\trow\tsearch_term\tprotein_identification\ttranscript\tgene_identifier\tgenome\tlocation\talias\tuniprot\tdescription\tauto_define\tgene_report_url")
 
 		writer := tabwriter.NewWriter(p.out, 0, 4, 2, ' ', 0)
 		displayIndex := 0
@@ -257,9 +807,11 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 				}
 				fmt.Fprintf(
 					writer,
-					"%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+					"%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 					marker,
 					displayIndex+1,
+					row.SearchTerm,
+					row.ProteinIdentification,
 					row.TranscriptID,
 					row.GeneIdentifier,
 					row.Genome,
@@ -278,18 +830,15 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 		}
 
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Commands:")
-		fmt.Fprintln(p.out, "  all | none")
-		fmt.Fprintln(p.out, "  toggle 1 2 3 5~8")
-		fmt.Fprintln(p.out, "  on 5~8 | off 5~8")
-		fmt.Fprintln(p.out, "  on up 12 | off up 12")
-		fmt.Fprintln(p.out, "  on down 12 | off down 12")
-		fmt.Fprintln(p.out, "  done")
-		fmt.Fprintln(p.out, "  back")
+		printSelectionCommands(p.out, true)
+		printGlobalCommandHint(p.out)
 
-		input, err := p.readLine("Selection command: ")
+		input, err := p.readLine(p.t("Selection command (all/none/toggle/on/off/done, plus back/spawn/lobby/exit): "))
 		if err != nil {
-			return nil, err
+			if mapped := mapNavigationError(err, ErrBackToQueryInput); mapped != nil {
+				return nil, mapped
+			}
+			continue
 		}
 		if isHelpCommand(input) {
 			p.printKeywordSelectionHelp()
@@ -347,8 +896,60 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 				continue
 			}
 			return chosen, nil
+		case "list":
+			chosen := make([]model.KeywordResultRow, 0, totalRows)
+			displayIndex := 0
+			for _, group := range groups {
+				for _, row := range group.Rows {
+					if selected[displayIndex] {
+						chosen = append(chosen, row)
+					}
+					displayIndex++
+				}
+			}
+			if len(chosen) == 0 {
+				fmt.Fprintln(p.out, "No rows selected.")
+				continue
+			}
+			printKeywordListPreview(p.out, chosen)
+			for {
+				printListOutputCommands(p.out)
+				printGlobalCommandHint(p.out)
+				action, err := p.readLine("List action (back - return to the table, txt - write the _list file, exit - quit): ")
+				if err != nil {
+					if mapped := mapNavigationError(err, ErrBackToQueryInput); mapped != nil {
+						return nil, mapped
+					}
+					continue
+				}
+				switch strings.ToLower(strings.TrimSpace(action)) {
+				case "back":
+					goto CONTINUE_SELECTION
+				case "txt":
+					if writeListFn != nil {
+						if err := writeListFn(listPath, chosen); err != nil {
+							fmt.Fprintf(p.out, "Failed to write list text file: %v\n", err)
+							continue
+						}
+						fmt.Fprintf(p.out, "List text file written: %s\n", listPath)
+					}
+					goto CONTINUE_SELECTION
+				case "exit":
+					return nil, ErrExitRequested
+				default:
+					fmt.Fprintln(p.out, "Please enter 'back', 'txt', or 'exit'.")
+				}
+			}
+		CONTINUE_SELECTION:
+			continue
 		case "back":
+			return nil, ErrBackToQueryInput
+		case "spawn":
 			return nil, ErrBackToModeSelection
+		case "lobby":
+			return nil, ErrBackToDatabaseSelection
+		case "exit":
+			return nil, ErrExitRequested
 		default:
 			fmt.Fprintln(p.out, "Unknown command.")
 		}
@@ -356,8 +957,17 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) ([]model
 }
 
 func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastResultRow, error) {
+	selectedRows, _, err := p.selectBlastRows(rows, false)
+	return selectedRows, err
+}
+
+func (p *Prompter) SelectBlastRowsBatch(rows []model.BlastResultRow) ([]model.BlastResultRow, bool, error) {
+	return p.selectBlastRows(rows, true)
+}
+
+func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll bool) ([]model.BlastResultRow, bool, error) {
 	if len(rows) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	selected := make([]bool, len(rows))
@@ -365,46 +975,37 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 		selected[i] = true
 	}
 	order := defaultRowOrder(len(rows))
-	sortMode := "default"
 
 	for {
 		fmt.Fprintln(p.out)
-		fmt.Fprintf(p.out, "Selected BLAST rows (sort: %s):\n", sortMode)
-		for displayIndex, rowIndex := range order {
-			row := rows[rowIndex]
-			marker := " "
-			if selected[rowIndex] {
-				marker = "x"
-			}
-			fmt.Fprintf(
-				p.out,
-				"[%s] %d. %s | %s | e=%s | id=%.2f%% | %s\n",
-				marker,
-				displayIndex+1,
-				row.Protein,
-				row.Species,
-				row.EValue,
-				row.PercentIdentity,
-				row.GeneReportURL,
-			)
-		}
+		fmt.Fprintf(p.out, "BLAST row selection: %d/%d rows currently selected.\n", countSelected(selected), len(rows))
+		fmt.Fprintln(p.out, "Use the table below to review and change the current selection.")
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "Commands:")
-		fmt.Fprintln(p.out, "  sort default | sort identity")
-		fmt.Fprintln(p.out, "  all | none")
-		fmt.Fprintln(p.out, "  toggle 1 2 3 5~8")
-		fmt.Fprintln(p.out, "  on 5~8 | off 5~8")
-		fmt.Fprintln(p.out, "  on up 12 | off up 12")
-		fmt.Fprintln(p.out, "  on down 12 | off down 12")
-		fmt.Fprintln(p.out, "  done")
-		fmt.Fprintln(p.out, "  back")
+		printBlastSelectionTable(p.out, rows, selected)
+		fmt.Fprintln(p.out)
+		printSelectionCommands(p.out, false)
+		if allowDoneAll {
+			fmt.Fprintln(p.out, "  done all | doneall - confirm this selection and auto-approve the remaining BLAST queries")
+		}
+		printGlobalCommandHint(p.out)
 
-		input, err := p.readLine("Selection command: ")
+		promptLabel := "Selection command (all/none/toggle/on/off/done, done all, plus back/spawn/lobby/exit): "
+		if allowDoneAll {
+			promptLabel = "Selection command (all/none/toggle/on/off/done, done all/doneall, plus back/spawn/lobby/exit): "
+		}
+		input, err := p.readLine(promptLabel)
 		if err != nil {
-			return nil, err
+			if mapped := mapNavigationError(err, ErrBackToQueryInput); mapped != nil {
+				return nil, false, mapped
+			}
+			continue
 		}
 		if isHelpCommand(input) {
-			p.printBlastSelectionHelp()
+			if allowDoneAll {
+				p.printBlastBatchSelectionHelp()
+			} else {
+				p.printBlastSelectionHelp()
+			}
 			continue
 		}
 
@@ -413,31 +1014,32 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 			continue
 		}
 
-		switch fields[0] {
-		case "sort":
-			if len(fields) != 2 {
-				fmt.Fprintln(p.out, "Use 'sort default' or 'sort identity'.")
+		switch {
+		case len(fields) == 2 && fields[0] == "done" && fields[1] == "all", len(fields) == 1 && fields[0] == "doneall":
+			if !allowDoneAll {
+				fmt.Fprintln(p.out, "Unknown command.")
 				continue
 			}
-			switch fields[1] {
-			case "default":
-				order = defaultRowOrder(len(rows))
-				sortMode = "default"
-			case "identity":
-				order = identityRowOrder(rows)
-				sortMode = "identity"
-			default:
-				fmt.Fprintln(p.out, "Use 'sort default' or 'sort identity'.")
+			chosen := make([]model.BlastResultRow, 0, len(rows))
+			for _, rowIndex := range order {
+				if selected[rowIndex] {
+					chosen = append(chosen, rows[rowIndex])
+				}
 			}
-		case "all":
+			if len(chosen) == 0 {
+				fmt.Fprintln(p.out, "No rows selected.")
+				continue
+			}
+			return chosen, true, nil
+		case fields[0] == "all":
 			for i := range selected {
 				selected[i] = true
 			}
-		case "none":
+		case fields[0] == "none":
 			for i := range selected {
 				selected[i] = false
 			}
-		case "toggle":
+		case fields[0] == "toggle":
 			if len(fields) == 1 {
 				fmt.Fprintln(p.out, "Provide one or more row numbers or ranges after 'toggle'.")
 				continue
@@ -445,7 +1047,7 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 			if err := toggleSelections(selected, order, fields[1:]); err != nil {
 				fmt.Fprintf(p.out, "Invalid toggle command: %v\n", err)
 			}
-		case "on", "off", "select", "unselect":
+		case fields[0] == "on", fields[0] == "off", fields[0] == "select", fields[0] == "unselect":
 			targetValue, ok := commandTargetValue(fields[0])
 			if !ok {
 				fmt.Fprintln(p.out, "Unknown selection command.")
@@ -458,7 +1060,7 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 			if err := applySelectionCommand(selected, order, fields[1:], targetValue); err != nil {
 				fmt.Fprintf(p.out, "Invalid selection command: %v\n", err)
 			}
-		case "done":
+		case fields[0] == "done":
 			chosen := make([]model.BlastResultRow, 0, len(rows))
 			for _, rowIndex := range order {
 				if selected[rowIndex] {
@@ -469,20 +1071,34 @@ func (p *Prompter) SelectBlastRows(rows []model.BlastResultRow) ([]model.BlastRe
 				fmt.Fprintln(p.out, "No rows selected.")
 				continue
 			}
-			return chosen, nil
-		case "back":
-			return nil, ErrBackToModeSelection
+			return chosen, false, nil
+		case fields[0] == "back":
+			return nil, false, ErrBackToQueryInput
+		case fields[0] == "spawn":
+			return nil, false, ErrBackToModeSelection
+		case fields[0] == "lobby":
+			return nil, false, ErrBackToDatabaseSelection
+		case fields[0] == "exit":
+			return nil, false, ErrExitRequested
 		default:
 			fmt.Fprintln(p.out, "Unknown command.")
 		}
 	}
 }
 
-func (p *Prompter) ExportBaseName() (string, error) {
+func (p *Prompter) ExportBaseName(label string, backTarget error) (string, error) {
 	for {
-		value, err := p.readLine("Export file name (without extension): ")
+		promptLabel := strings.TrimSpace(label)
+		if promptLabel == "" {
+			promptLabel = "Export file name"
+		}
+		printGlobalCommandHint(p.out)
+		value, err := p.readLine(promptLabel + " (without extension): ")
 		if err != nil {
-			return "", err
+			if mapped := mapNavigationError(err, backTarget); mapped != nil {
+				return "", mapped
+			}
+			continue
 		}
 		if isHelpCommand(value) {
 			p.printExportNameHelp()
@@ -491,7 +1107,7 @@ func (p *Prompter) ExportBaseName() (string, error) {
 
 		name := sanitizeFileName(value)
 		if name == "" {
-			fmt.Fprintln(p.out, "File name cannot be empty.")
+			fmt.Fprintln(p.out, p.t("File name cannot be empty."))
 			continue
 		}
 
@@ -514,15 +1130,26 @@ func (p *Prompter) PostRunAction(mode string) (string, error) {
 
 	for {
 		fmt.Fprintln(p.out)
-		fmt.Fprintln(p.out, "What would you like to do next?")
-		fmt.Fprintf(p.out, " 1) Run %s again with the same species\n", modeLabel)
-		fmt.Fprintf(p.out, " 2) Change species and run %s\n", modeLabel)
-		fmt.Fprintln(p.out, " 3) Switch mode")
-		fmt.Fprintln(p.out, " 4) Exit")
+		fmt.Fprintln(p.out, p.t("What would you like to do next?"))
+		fmt.Fprintf(p.out, p.t(" 1) Run %s again with the same species\n"), modeLabel)
+		fmt.Fprintf(p.out, p.t(" 2) Change species and run %s\n"), modeLabel)
+		fmt.Fprintln(p.out, p.t(" 3) Switch mode"))
+		fmt.Fprintln(p.out, p.t(" 4) Exit"))
 
-		input, err := p.readLine("Choose 1, 2, 3, or 4 (or 'repeat'/'change'/'mode'/'exit'): ")
+		input, err := p.readLine(p.t("Choose 1, 2, 3, or 4 (or 'repeat'/'change'/'mode'/'exit'): "))
 		if err != nil {
-			return "", err
+			switch {
+			case errors.Is(err, errBackCommand):
+				return "change_species", nil
+			case errors.Is(err, errSpawnCommand):
+				return "change_mode", nil
+			case errors.Is(err, errLobbyCommand):
+				return "", ErrBackToDatabaseSelection
+			case errors.Is(err, ErrExitRequested):
+				return "exit", nil
+			default:
+				continue
+			}
 		}
 		if isHelpCommand(input) {
 			p.printPostRunHelp(modeLabel)
@@ -538,8 +1165,17 @@ func (p *Prompter) PostRunAction(mode string) (string, error) {
 			return "change_mode", nil
 		case "4", "exit", "e", "q":
 			return "exit", nil
+		case "back", "spawn", "lobby":
+			switch val {
+			case "back":
+				return "change_species", nil
+			case "spawn":
+				return "change_mode", nil
+			case "lobby":
+				return "exit", nil
+			}
 		default:
-			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, 4, or 'repeat', 'change', 'mode', 'exit'.")
+			fmt.Fprintln(p.out, p.t("Please enter one of: 1, 2, 3, 4, or 'repeat', 'change', 'mode', 'exit', 'back', 'spawn', 'lobby'."))
 		}
 	}
 }
@@ -609,6 +1245,16 @@ func setDisplayIndexes(selected []bool, order []int, indexes []int, value bool) 
 		rowIndex := order[displayIndex-1]
 		selected[rowIndex] = value
 	}
+}
+
+func countSelected(selected []bool) int {
+	total := 0
+	for _, value := range selected {
+		if value {
+			total++
+		}
+	}
+	return total
 }
 
 func parseRowSpec(spec string, max int) ([]int, error) {
@@ -688,18 +1334,24 @@ func identityRowOrder(rows []model.BlastResultRow) []int {
 // It returns one of:
 //   - "retry" : attempt the fetch again
 //   - "skip"  : skip this record and continue
-//   - "abort" : abort the wizard entirely
-func (p *Prompter) FetchErrorAction(description string) (string, error) {
+//   - "back"  : return to the caller-provided previous page
+//   - "exit"  : stop the wizard entirely
+func (p *Prompter) FetchErrorAction(description string, backTarget error) (string, error) {
 	for {
 		fmt.Fprintln(p.out)
 		fmt.Fprintf(p.out, "Failed to fetch: %s\n", description)
 		fmt.Fprintln(p.out, "Options:")
 		fmt.Fprintln(p.out, " 1) retry  - try again now")
 		fmt.Fprintln(p.out, " 2) skip   - skip this record and continue")
-		fmt.Fprintln(p.out, " 3) abort  - abort the wizard")
-		input, err := p.readLine("Choose 1,2,3 (or 'retry'/'skip'/'abort'): ")
+		fmt.Fprintln(p.out, " 3) back   - return to the previous page")
+		fmt.Fprintln(p.out, " 4) exit   - stop the wizard")
+		printGlobalCommandHint(p.out)
+		input, err := p.readLine("Choose 1, 2, 3, or 4 (or 'retry'/'skip'/'back'/'exit'): ")
 		if err != nil {
-			return "", err
+			if mapped := mapNavigationError(err, backTarget); mapped != nil {
+				return "", mapped
+			}
+			continue
 		}
 		if isHelpCommand(input) {
 			p.printFetchErrorHelp()
@@ -711,10 +1363,12 @@ func (p *Prompter) FetchErrorAction(description string) (string, error) {
 			return "retry", nil
 		case "2", "skip", "s":
 			return "skip", nil
-		case "3", "abort", "a":
-			return "abort", nil
+		case "3", "back", "b":
+			return "back", nil
+		case "4", "exit", "e", "q":
+			return "exit", nil
 		default:
-			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, or 'retry', 'skip', 'abort'.")
+			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, 4, or 'retry', 'skip', 'back', 'exit'.")
 		}
 	}
 }
@@ -723,16 +1377,21 @@ func (p *Prompter) FetchErrorAction(description string) (string, error) {
 // It returns one of:
 //   - "retry" : attempt the step again
 //   - "exit"  : stop the wizard
-func (p *Prompter) WorkflowErrorAction(description string) (string, error) {
+func (p *Prompter) WorkflowErrorAction(description string, backTarget error) (string, error) {
 	for {
 		fmt.Fprintln(p.out)
 		fmt.Fprintf(p.out, "Step failed: %s\n", description)
 		fmt.Fprintln(p.out, "Options:")
 		fmt.Fprintln(p.out, " 1) retry - try this step again")
-		fmt.Fprintln(p.out, " 2) exit  - stop the wizard")
-		input, err := p.readLine("Choose 1 or 2 (or 'retry'/'exit'): ")
+		fmt.Fprintln(p.out, " 2) back  - return to the previous page")
+		fmt.Fprintln(p.out, " 3) exit  - stop the wizard")
+		printGlobalCommandHint(p.out)
+		input, err := p.readLine("Select 1, 2, or 3 (or 'retry'/'back'/'exit'): ")
 		if err != nil {
-			return "", err
+			if mapped := mapNavigationError(err, backTarget); mapped != nil {
+				return "", mapped
+			}
+			continue
 		}
 		if isHelpCommand(input) {
 			p.printWorkflowErrorHelp()
@@ -742,10 +1401,91 @@ func (p *Prompter) WorkflowErrorAction(description string) (string, error) {
 		switch val {
 		case "1", "retry", "r":
 			return "retry", nil
-		case "2", "exit", "e", "q":
+		case "2", "back", "b":
+			return "back", nil
+		case "3", "exit", "e", "q":
 			return "exit", nil
 		default:
-			fmt.Fprintln(p.out, "Please enter one of: 1, 2, or 'retry', 'exit'.")
+			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, 'retry', 'back', or 'exit'.")
+		}
+	}
+}
+
+// BlastSubmitErrorAction prompts the user after a BLAST submission failure.
+// It returns:
+//   - "retry" : retry the same program/execution path
+//   - "back"  : return to BLAST program selection
+//   - "exit"  : stop the wizard
+func (p *Prompter) BlastSubmitErrorAction(description string) (string, error) {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintf(p.out, "Step failed: %s\n", description)
+		fmt.Fprintln(p.out, "Options:")
+		fmt.Fprintln(p.out, " 1) retry - try the same BLAST submission again")
+		fmt.Fprintln(p.out, " 2) back  - choose BLAST program / execution target again")
+		fmt.Fprintln(p.out, " 3) exit  - stop the wizard")
+		printGlobalCommandHint(p.out)
+		input, err := p.readLine("Choose 1, 2, or 3 (or 'retry'/'back'/'exit'): ")
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToBlastProgram); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(input) {
+			fmt.Fprintln(p.out, "retry keeps the current program and execution target.")
+			fmt.Fprintln(p.out, "back returns to BLAST program selection without re-entering the query sequence.")
+			fmt.Fprintln(p.out, "exit stops the wizard.")
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "1", "retry", "r":
+			return "retry", nil
+		case "2", "back", "b":
+			return "back", nil
+		case "3", "exit", "e", "q":
+			return "exit", nil
+		default:
+			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, 'retry', 'back', or 'exit'.")
+		}
+	}
+}
+
+// BlastPlusInstallAction prompts the user when local BLAST needs BLAST+.
+// It returns:
+//   - "install" : download and install managed BLAST+ for this app
+//   - "back"    : return to BLAST program selection
+//   - "exit"    : stop the wizard
+func (p *Prompter) BlastPlusInstallAction(description string) (string, error) {
+	for {
+		fmt.Fprintln(p.out)
+		fmt.Fprintf(p.out, "BLAST+ is required for local BLAST: %s\n", description)
+		fmt.Fprintln(p.out, "Options:")
+		fmt.Fprintln(p.out, " 1) install - download official NCBI BLAST+ for this app now")
+		fmt.Fprintln(p.out, " 2) back    - choose BLAST program / execution target again")
+		fmt.Fprintln(p.out, " 3) exit    - stop the wizard")
+		printGlobalCommandHint(p.out)
+		input, err := p.readLine("Choose 1, 2, or 3 (or 'install'/'back'/'exit'): ")
+		if err != nil {
+			if mapped := mapNavigationError(err, ErrBackToBlastProgram); mapped != nil {
+				return "", mapped
+			}
+			continue
+		}
+		if isHelpCommand(input) {
+			fmt.Fprintln(p.out, "install downloads the official BLAST+ archive into a blastplus/ directory next to the running executable.")
+			fmt.Fprintln(p.out, "You do not need to prepare FASTA files yourself; the app already downloads those from lemna.org when needed.")
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "1", "install", "i":
+			return "install", nil
+		case "2", "back", "b":
+			return "back", nil
+		case "3", "exit", "e", "q":
+			return "exit", nil
+		default:
+			fmt.Fprintln(p.out, "Please enter one of: 1, 2, 3, 'install', 'back', or 'exit'.")
 		}
 	}
 }
@@ -755,11 +1495,53 @@ func (p *Prompter) readLine(label string) (string, error) {
 	line, err := p.in.ReadString('\n')
 	if err != nil {
 		if err == io.EOF {
-			return strings.TrimSpace(line), nil
+			line = strings.TrimSpace(line)
+			if p.applyLanguageCommand(line) {
+				return "", nil
+			}
+			switch strings.ToLower(line) {
+			case "back":
+				return "", errBackCommand
+			case "spawn":
+				return "", errSpawnCommand
+			case "lobby":
+				return "", errLobbyCommand
+			case "exit":
+				return "", ErrExitRequested
+			}
+			return line, nil
 		}
 		return "", err
 	}
-	return strings.TrimSpace(line), nil
+	line = strings.TrimSpace(line)
+	if p.applyLanguageCommand(line) {
+		return "", nil
+	}
+	switch strings.ToLower(line) {
+	case "back":
+		return "", errBackCommand
+	case "spawn":
+		return "", errSpawnCommand
+	case "lobby":
+		return "", errLobbyCommand
+	case "exit":
+		return "", ErrExitRequested
+	}
+	return line, nil
+}
+
+func (p *Prompter) applyLanguageCommand(line string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(strings.ToLower(line), "lang=") {
+		return false
+	}
+	if lang, ok := locale.Parse(strings.TrimSpace(line[5:])); ok {
+		p.SetLanguage(lang)
+		fmt.Fprintln(p.out, p.t("Language switched for subsequent prompts."))
+		return true
+	}
+	fmt.Fprintln(p.out, p.t("Unknown language. Use lang=en, lang=cn, or lang=jp."))
+	return true
 }
 
 func sanitizeFileName(value string) string {
@@ -776,104 +1558,202 @@ func isHelpCommand(value string) bool {
 
 func (p *Prompter) printSpeciesSearchHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: species search")
-	fmt.Fprintln(p.out, " Enter a partial species keyword such as 'spiro', 'wheat', or 'arabidopsis'.")
-	fmt.Fprintln(p.out, " You can search by abbreviated name, full scientific name, or common name.")
-	fmt.Fprintln(p.out, " Type 'help' or '?' at this prompt to see this message again.")
+	fmt.Fprintln(p.out, p.t("Help - species search"))
+	fmt.Fprintln(p.out, p.t(" Enter a partial species keyword such as 'spiro', 'wheat', or 'arabidopsis'."))
+	fmt.Fprintln(p.out, p.t(" You can search by abbreviated name, full scientific name, or common name."))
+	fmt.Fprintln(p.out, p.t(" Type 'help' or '?' at this prompt to see this message again."))
+}
+
+func (p *Prompter) printDatabaseHelp() {
+	fmt.Fprintln(p.out)
+	fmt.Fprintln(p.out, p.t("Help - database selection"))
+	fmt.Fprintln(p.out, p.t(" phytozome: keeps the existing Phytozome behavior."))
+	fmt.Fprintln(p.out, p.t(" lemna: uses lemna.org species releases and GFF3/FASTA files from the Download area."))
+	fmt.Fprintln(p.out, p.t(" The chosen database stays active for the current session."))
+	printGlobalCommandHint(p.out)
 }
 
 func (p *Prompter) printModeHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: mode selection")
-	fmt.Fprintln(p.out, " blast: current main workflow for sequence / FASTA / URL based search")
-	fmt.Fprintln(p.out, " keyword: keyword gene search and export within one selected species")
-	fmt.Fprintln(p.out, " The chosen mode stays active for the current session.")
+	fmt.Fprintln(p.out, p.t("Help - mode selection"))
+	fmt.Fprintln(p.out, p.t(" blast: sequence / FASTA / URL-based search workflow"))
+	fmt.Fprintln(p.out, p.t(" keyword: keyword gene search and export workflow"))
+	fmt.Fprintln(p.out, p.t(" The chosen mode stays active for the current session."))
+	printGlobalCommandHint(p.out)
 }
 
 func (p *Prompter) printSpeciesChooseHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: species selection")
-	fmt.Fprintln(p.out, " Enter a numbered candidate to choose that species.")
-	fmt.Fprintln(p.out, " Or type another keyword to run a new search.")
-	fmt.Fprintln(p.out, " Type 'help' or '?' at this prompt to see this message again.")
+	fmt.Fprintln(p.out, p.t("Help - species selection"))
+	fmt.Fprintln(p.out, p.t(" Enter a numbered candidate to choose that species."))
+	fmt.Fprintln(p.out, p.t(" Or enter another keyword to run a new search."))
+	fmt.Fprintln(p.out, p.t(" Type 'help' or '?' at this prompt to see this message again."))
+	printGlobalCommandHint(p.out)
 }
 
 func (p *Prompter) printSequenceInputHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: query input")
-	fmt.Fprintln(p.out, " Accepted inputs:")
-	fmt.Fprintln(p.out, "  1) plain sequence")
-	fmt.Fprintln(p.out, "  2) FASTA-style header plus sequence")
-	fmt.Fprintln(p.out, "  3) Phytozome gene/transcript report URL")
-	fmt.Fprintln(p.out, " Finish sequence entry with an empty line.")
-	fmt.Fprintln(p.out, " Single-line FASTA entries and trailing labels like '(AtC4H)' are accepted.")
+	fmt.Fprintln(p.out, p.t("Help - BLAST input"))
+	fmt.Fprintln(p.out, p.t(" Accepted inputs:"))
+	fmt.Fprintln(p.out, p.t("  1) one query per line for batch BLAST runs"))
+	fmt.Fprintln(p.out, p.t("  2) plain sequence"))
+	fmt.Fprintln(p.out, p.t("  3) FASTA-style header plus sequence"))
+	fmt.Fprintln(p.out, p.t("  4) supported Phytozome gene/transcript report URL"))
+	fmt.Fprintln(p.out, p.t("  5) a keyword-mode list preview copied from the list command, with ~~ between labels and links"))
+	fmt.Fprintln(p.out, p.t("  6) load \"file.txt\" to read the same kinds of inputs from the program directory"))
+	fmt.Fprintln(p.out, p.t(" Finish with an empty line."))
+	fmt.Fprintln(p.out, p.t(" Single-line FASTA entries and trailing labels like '(AtC4H)' are accepted."))
+	printGlobalCommandHint(p.out)
 }
 
 func (p *Prompter) printKeywordInputHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: keyword input")
-	fmt.Fprintln(p.out, " Enter one or more keywords within the selected species.")
-	fmt.Fprintln(p.out, " You can separate them by spaces or by new lines.")
-	fmt.Fprintln(p.out, " Finish the whole input with an empty line.")
+	fmt.Fprintln(p.out, p.t("Help - keyword input"))
+	fmt.Fprintln(p.out, p.t(" Enter one or more keywords for the selected species."))
+	fmt.Fprintln(p.out, p.t(" You can separate them by spaces or by new lines."))
+	fmt.Fprintln(p.out, p.t(" Finish with an empty line."))
+	printGlobalCommandHint(p.out)
 }
 
 func (p *Prompter) printBlastSelectionHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: BLAST row selection")
-	fmt.Fprintln(p.out, " sort default | sort identity")
-	fmt.Fprintln(p.out, " all | none")
-	fmt.Fprintln(p.out, " toggle 1 2 3 5~8")
-	fmt.Fprintln(p.out, " on 5~8 | off 5~8")
-	fmt.Fprintln(p.out, " on up 12 | off up 12")
-	fmt.Fprintln(p.out, " on down 12 | off down 12")
-	fmt.Fprintln(p.out, " done")
-	fmt.Fprintln(p.out, " back")
-	fmt.Fprintln(p.out, " All row numbers are based on the current visible order.")
+	fmt.Fprintln(p.out, p.t("Help - BLAST row selection"))
+	fmt.Fprintln(p.out, p.t(" all - select every row"))
+	fmt.Fprintln(p.out, p.t(" none - clear all selections"))
+	fmt.Fprintln(p.out, p.t(" toggle 1 2 3 5~8 - flip the selection state for the listed rows or ranges"))
+	fmt.Fprintln(p.out, p.t(" on 5~8 | off 5~8 - select or clear a specific row range"))
+	fmt.Fprintln(p.out, p.t(" on up 12 | off up 12 - select or clear rows from the top through row 12"))
+	fmt.Fprintln(p.out, p.t(" on down 12 | off down 12 - select or clear rows from row 12 through the bottom"))
+	fmt.Fprintln(p.out, p.t(" done - confirm the current row selection"))
+	fmt.Fprintln(p.out, p.t(" back - return to the previous page"))
+	fmt.Fprintln(p.out, p.t(" spawn - jump back to mode selection"))
+	fmt.Fprintln(p.out, p.t(" lobby - jump back to database selection"))
+	fmt.Fprintln(p.out, p.t(" exit - quit the program"))
+	fmt.Fprintln(p.out, p.t(" All row numbers refer to the BLAST results table shown below."))
+}
+
+func (p *Prompter) printBlastBatchSelectionHelp() {
+	p.printBlastSelectionHelp()
+	fmt.Fprintln(p.out, p.t(" done all | doneall - confirm this selection and auto-approve the remaining BLAST queries"))
 }
 
 func (p *Prompter) printKeywordSelectionHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: keyword row selection")
-	fmt.Fprintln(p.out, " all | none")
-	fmt.Fprintln(p.out, " toggle 1 2 3 5~8")
-	fmt.Fprintln(p.out, " on 5~8 | off 5~8")
-	fmt.Fprintln(p.out, " on up 12 | off up 12")
-	fmt.Fprintln(p.out, " on down 12 | off down 12")
-	fmt.Fprintln(p.out, " done")
-	fmt.Fprintln(p.out, " back")
-	fmt.Fprintln(p.out, " The first result under each search term is selected by default.")
+	fmt.Fprintln(p.out, p.t("Help - keyword row selection"))
+	fmt.Fprintln(p.out, p.t(" all - select every row"))
+	fmt.Fprintln(p.out, p.t(" none - clear all selections"))
+	fmt.Fprintln(p.out, p.t(" toggle 1 2 3 5~8 - flip the selection state for the listed rows or ranges"))
+	fmt.Fprintln(p.out, p.t(" on 5~8 | off 5~8 - select or clear a specific row range"))
+	fmt.Fprintln(p.out, p.t(" on up 12 | off up 12 - select or clear rows from the top through row 12"))
+	fmt.Fprintln(p.out, p.t(" on down 12 | off down 12 - select or clear rows from row 12 through the bottom"))
+	fmt.Fprintln(p.out, p.t(" list - preview the currently selected rows and optionally write a _list file"))
+	fmt.Fprintln(p.out, p.t(" done - confirm the current row selection"))
+	fmt.Fprintln(p.out, p.t(" back - return to the previous page"))
+	fmt.Fprintln(p.out, p.t(" spawn - jump back to mode selection"))
+	fmt.Fprintln(p.out, p.t(" lobby - jump back to database selection"))
+	fmt.Fprintln(p.out, p.t(" exit - quit the program"))
+	fmt.Fprintln(p.out, p.t(" The first result under each search term is selected by default."))
+}
+
+func parseKeywordIdentityValues(lines []string) []string {
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		for _, token := range strings.Fields(line) {
+			if token == "~" {
+				values = append(values, "")
+				continue
+			}
+			values = append(values, token)
+		}
+	}
+	return values
+}
+
+func parseBlastIdentityValues(lines []string) []string {
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "~" {
+			values = append(values, "")
+			continue
+		}
+		values = append(values, strings.TrimSpace(line))
+	}
+	return values
+}
+
+func printKeywordListPreview(out io.Writer, rows []model.KeywordResultRow) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, locale.Text(activeLanguage, "Keyword list preview:"))
+	for _, line := range buildKeywordPreviewLines(rows) {
+		fmt.Fprintln(out, line)
+	}
+	fmt.Fprintln(out)
+}
+
+func buildKeywordPreviewLines(rows []model.KeywordResultRow) []string {
+	countByTerm := make(map[string]int, len(rows))
+	for _, row := range rows {
+		countByTerm[strings.TrimSpace(row.SearchTerm)]++
+	}
+
+	lines := make([]string, 0, len(rows)*2+1)
+	for _, row := range rows {
+		label := strings.TrimSpace(row.ProteinIdentification)
+		if label == "" {
+			label = "~"
+		}
+		term := strings.TrimSpace(row.SearchTerm)
+		if countByTerm[term] > 1 && term != "" {
+			label += " (" + term + ")"
+		}
+		lines = append(lines, label)
+	}
+	lines = append(lines, "~~")
+	for _, row := range rows {
+		link := strings.TrimSpace(row.GeneReportURL)
+		if link == "" {
+			link = "~"
+		}
+		lines = append(lines, link)
+	}
+	return lines
 }
 
 func (p *Prompter) printExportNameHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: export file name")
-	fmt.Fprintln(p.out, " Enter one base name without extension.")
-	fmt.Fprintln(p.out, " The program will create both '<name>.xlsx' and '<name>.txt'.")
-	fmt.Fprintln(p.out, " Invalid Windows filename characters will be replaced automatically.")
+	fmt.Fprintln(p.out, p.t("Help - export file name"))
+	fmt.Fprintln(p.out, p.t(" Enter one base name without extension."))
+	fmt.Fprintln(p.out, p.t(" The program will create both '<name>.xlsx' and '<name>.txt'."))
+	fmt.Fprintln(p.out, p.t(" Invalid Windows filename characters will be replaced automatically."))
 }
 
 func (p *Prompter) printPostRunHelp(modeLabel string) {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: next action")
-	fmt.Fprintf(p.out, " repeat: run %s again with the same species\n", modeLabel)
-	fmt.Fprintf(p.out, " change: go back to species search for %s\n", modeLabel)
-	fmt.Fprintln(p.out, " mode: switch between blast and keyword")
-	fmt.Fprintln(p.out, " exit: quit the wizard")
+	fmt.Fprintln(p.out, p.t("Help - next action"))
+	fmt.Fprintf(p.out, p.t(" repeat - run %s again with the same species\n"), modeLabel)
+	fmt.Fprintf(p.out, p.t(" change - go back to species search for %s\n"), modeLabel)
+	fmt.Fprintln(p.out, p.t(" mode - switch between blast and keyword"))
+	fmt.Fprintln(p.out, p.t(" exit - quit the wizard"))
+	fmt.Fprintln(p.out, p.t(" back - same as change"))
+	fmt.Fprintln(p.out, p.t(" spawn - same as mode"))
+	fmt.Fprintln(p.out, p.t(" lobby - go back to database selection"))
+	fmt.Fprintln(p.out, p.t(" Each option is also available as a global command with the same meaning."))
 }
 
 func (p *Prompter) printFetchErrorHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: fetch error options")
-	fmt.Fprintln(p.out, " retry: try the same remote fetch again")
-	fmt.Fprintln(p.out, " skip: omit this record and continue")
-	fmt.Fprintln(p.out, " abort: stop the current export/workflow")
+	fmt.Fprintln(p.out, p.t("Help - fetch error options"))
+	fmt.Fprintln(p.out, p.t(" retry - try the same remote fetch again"))
+	fmt.Fprintln(p.out, p.t(" skip - omit this record and continue"))
+	fmt.Fprintln(p.out, p.t(" back - return to the previous page"))
+	fmt.Fprintln(p.out, p.t(" exit - stop the current export/workflow"))
 }
 
 func (p *Prompter) printWorkflowErrorHelp() {
 	fmt.Fprintln(p.out)
-	fmt.Fprintln(p.out, "Help: workflow error options")
-	fmt.Fprintln(p.out, " retry: try the current step again")
-	fmt.Fprintln(p.out, " exit: stop the wizard")
+	fmt.Fprintln(p.out, p.t("Help - workflow error options"))
+	fmt.Fprintln(p.out, p.t(" retry - try the current step again"))
+	fmt.Fprintln(p.out, p.t(" exit - stop the wizard"))
 }
 
 func looksLikeURL(value string) bool {

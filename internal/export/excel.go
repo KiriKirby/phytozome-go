@@ -2,6 +2,7 @@ package export
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/xuri/excelize/v2"
 
@@ -40,6 +41,7 @@ var blastResultHeaders = []string{
 var keywordResultHeaders = []string{
 	"row",
 	"search_term",
+	"protein_identification",
 	"transcript",
 	"gene_identifier",
 	"genome",
@@ -162,7 +164,10 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 	const sheet = "Keyword Results"
 	file.SetSheetName(file.GetSheetName(0), sheet)
 
-	for col, header := range keywordResultHeaders {
+	headers := append([]string(nil), keywordResultHeaders...)
+	headers = append(headers, keywordExtraHeaders(rows)...)
+
+	for col, header := range headers {
 		cell, err := excelize.CoordinatesToCellName(col+1, 1)
 		if err != nil {
 			return fmt.Errorf("build keyword header cell: %w", err)
@@ -176,6 +181,7 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 		values := []any{
 			idx + 1,
 			row.SearchTerm,
+			row.ProteinIdentification,
 			row.TranscriptID,
 			row.GeneIdentifier,
 			row.Genome,
@@ -186,6 +192,9 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 			row.Comments,
 			row.AutoDefine,
 			row.GeneReportURL,
+		}
+		for _, header := range headers[len(keywordResultHeaders):] {
+			values = append(values, row.ExtraColumns[header])
 		}
 		cell, err := excelize.CoordinatesToCellName(1, idx+2)
 		if err != nil {
@@ -212,4 +221,25 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 	}
 
 	return nil
+}
+
+func keywordExtraHeaders(rows []model.KeywordResultRow) []string {
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		for key := range row.ExtraColumns {
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+	}
+	headers := make([]string, 0, len(seen))
+	for key := range seen {
+		headers = append(headers, key)
+	}
+	sort.Strings(headers)
+	return headers
 }

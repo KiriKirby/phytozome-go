@@ -9,23 +9,43 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
+	"github.com/KiriKirby/phytozome-go/internal/appfs"
+	"github.com/KiriKirby/phytozome-go/internal/blastplus"
 	"github.com/KiriKirby/phytozome-go/internal/export"
+	"github.com/KiriKirby/phytozome-go/internal/lemna"
+	"github.com/KiriKirby/phytozome-go/internal/locale"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/phytozome"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
+	"github.com/KiriKirby/phytozome-go/internal/source"
 	"github.com/KiriKirby/phytozome-go/internal/ui"
 )
 
 type BlastWizard struct {
-	phytozome *phytozome.Client
-	prompt    *prompt.Prompter
-	out       io.Writer
+	httpClient *http.Client
+	source     source.DataSource
+	prompt     *prompt.Prompter
+	out        io.Writer
+
+	speciesCandidatesMu    sync.Mutex
+	speciesCandidatesCache map[string][]model.SpeciesCandidate
 }
+
+const (
+	keywordSearchTimeout   = 30 * time.Second
+	queryResolveTimeout    = 30 * time.Second
+	proteinFetchTimeout    = 30 * time.Second
+	maxParallelKeywordJobs = 6
+	maxParallelQueryJobs   = 6
+	maxParallelFetchJobs   = 8
+)
 
 type QueryMode string
 
@@ -34,7 +54,37 @@ const (
 	ModeKeyword QueryMode = "keyword"
 )
 
-func NewBlastWizard(out io.Writer) *BlastWizard {
+type blastQueryItem struct {
+	RawInput              string
+	ProteinIdentification string
+	Sequence              string
+	QuerySource           *model.QuerySequenceSource
+}
+
+type blastBatchSettings struct {
+	OutputDir      string
+	ApproveAll     bool
+	ReportPath     string
+	AutoMode       bool
+	AutoSelections bool
+}
+
+type blastQueryRun struct {
+	Index        int
+	Item         blastQueryItem
+	Request      model.BlastRequest
+	Results      model.BlastResult
+	SelectedRows []model.BlastResultRow
+	ExcelPath    string
+	TextPath     string
+}
+
+type sequenceFetchResult struct {
+	sequence string
+	err      error
+}
+
+func NewBlastWizard(out io.Writer, lang locale.Language) *BlastWizard {
 	httpClient := &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -49,121 +99,152 @@ func NewBlastWizard(out io.Writer) *BlastWizard {
 	}
 
 	return &BlastWizard{
-		phytozome: phytozome.NewClient(httpClient),
-		prompt:    prompt.New(os.Stdin, out),
-		out:       out,
+		httpClient:             httpClient,
+		prompt:                 prompt.New(os.Stdin, out, lang),
+		out:                    out,
+		speciesCandidatesCache: make(map[string][]model.SpeciesCandidate),
 	}
 }
 
 func (w *BlastWizard) Run(ctx context.Context) error {
-	candidates, err := w.loadSpeciesCandidates(ctx)
-	if err != nil {
-		return err
-	}
-
-	mode, err := w.chooseMode()
-	if err != nil {
-		return err
-	}
-
-	var selected model.SpeciesCandidate
-	needSelect := true
-
+databaseLoop:
 	for {
-		if needSelect || selected.JBrowseName == "" {
-			selected, err = w.selectSpecies(candidates)
-			if err != nil {
-				return err
-			}
-			if err := w.printSelection(selected); err != nil {
-				return err
-			}
+		dataSource, err := w.chooseDataSource()
+		if errors.Is(err, prompt.ErrExitRequested) {
+			return nil
 		}
-
-		switch mode {
-		case ModeBlast:
-			sequence, querySource, err := w.collectQuerySequence(ctx, candidates)
-			if err != nil {
-				return err
-			}
-
-			request := buildBlastRequest(selected, sequence)
-			job, err := w.submitBlastWithRetry(ctx, request)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(w.out, "Job submitted: %s\n", job.JobID)
-
-			results, err := w.waitForBlastResultsWithRetry(ctx, job.JobID)
-			if err != nil {
-				return err
-			}
-
-			if err := w.printResults(results); err != nil {
-				return err
-			}
-
-			selectedRows, err := w.selectBlastRows(results.Rows)
-			if err != nil {
-				if errors.Is(err, prompt.ErrBackToModeSelection) {
-					selected = model.SpeciesCandidate{}
-					needSelect = true
-					mode, err = w.chooseMode()
-					if err != nil {
-						return err
-					}
-					continue
-				}
-				return err
-			}
-
-			if err := w.exportSelectionsWithRetry(ctx, selectedRows, querySource); err != nil {
-				return err
-			}
-		case ModeKeyword:
-			if err := w.runKeywordMode(ctx, selected); err != nil {
-				if errors.Is(err, prompt.ErrBackToModeSelection) {
-					selected = model.SpeciesCandidate{}
-					needSelect = true
-					mode, err = w.chooseMode()
-					if err != nil {
-						return err
-					}
-					continue
-				}
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported mode %q", mode)
+		if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+			continue
 		}
+		if err != nil {
+			return err
+		}
+		w.source = dataSource
 
-		action, err := w.prompt.PostRunAction(string(mode))
+		candidates, err := w.loadSpeciesCandidates(ctx)
+		if errors.Is(err, prompt.ErrExitRequested) {
+			return nil
+		}
+		if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+			continue databaseLoop
+		}
 		if err != nil {
 			return err
 		}
 
-		switch action {
-		case "repeat":
-			// Run another BLAST with the same species
-			needSelect = false
-			continue
-		case "change_species":
-			// Force re-selection of species next loop
-			selected = model.SpeciesCandidate{}
-			needSelect = true
-			continue
-		case "change_mode":
-			mode, err = w.chooseMode()
+	modeLoop:
+		for {
+			mode, err := w.chooseMode()
+			if errors.Is(err, prompt.ErrExitRequested) {
+				return nil
+			}
+			if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+				continue databaseLoop
+			}
 			if err != nil {
 				return err
 			}
-			needSelect = false
-			continue
-		case "exit":
-			return nil
-		default:
-			// Unknown action: exit to be safe
-			return nil
+
+			selected := model.SpeciesCandidate{}
+			needSelect := true
+
+		speciesLoop:
+			for {
+				if needSelect || selected.JBrowseName == "" {
+					selected, err = w.selectSpecies(candidates)
+					if errors.Is(err, prompt.ErrExitRequested) {
+						return nil
+					}
+					if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+						continue databaseLoop
+					}
+					if errors.Is(err, prompt.ErrBackToModeSelection) {
+						continue modeLoop
+					}
+					if err != nil {
+						return err
+					}
+					if err := w.printSelection(selected); err != nil {
+						return err
+					}
+				}
+
+				switch mode {
+				case ModeBlast:
+					if err := w.runBlastMode(ctx, selected, candidates); err != nil {
+						if errors.Is(err, prompt.ErrExitRequested) {
+							return nil
+						}
+						if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+							continue databaseLoop
+						}
+						if errors.Is(err, prompt.ErrBackToModeSelection) {
+							continue modeLoop
+						}
+						if errors.Is(err, prompt.ErrBackToSpeciesSelection) {
+							selected = model.SpeciesCandidate{}
+							needSelect = true
+							continue speciesLoop
+						}
+						return err
+					}
+				case ModeKeyword:
+					if err := w.runKeywordMode(ctx, selected); err != nil {
+						if errors.Is(err, prompt.ErrExitRequested) {
+							return nil
+						}
+						if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+							continue databaseLoop
+						}
+						if errors.Is(err, prompt.ErrBackToModeSelection) {
+							continue modeLoop
+						}
+						if errors.Is(err, prompt.ErrBackToSpeciesSelection) {
+							selected = model.SpeciesCandidate{}
+							needSelect = true
+							continue speciesLoop
+						}
+						return err
+					}
+				default:
+					return fmt.Errorf("unsupported mode %q", mode)
+				}
+
+				action, err := w.prompt.PostRunAction(string(mode))
+				if errors.Is(err, prompt.ErrExitRequested) {
+					return nil
+				}
+				if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+					continue databaseLoop
+				}
+				if errors.Is(err, prompt.ErrBackToModeSelection) {
+					continue modeLoop
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) {
+					selected = model.SpeciesCandidate{}
+					needSelect = true
+					continue speciesLoop
+				}
+				if err != nil {
+					return err
+				}
+
+				switch action {
+				case "repeat":
+					needSelect = false
+					continue speciesLoop
+				case "change_species":
+					selected = model.SpeciesCandidate{}
+					needSelect = true
+					continue speciesLoop
+				case "change_mode":
+					continue modeLoop
+				case "exit":
+					return nil
+				default:
+					return nil
+				}
+			}
 		}
 	}
 }
@@ -174,35 +255,231 @@ func (w *BlastWizard) chooseMode() (QueryMode, error) {
 		if err == nil {
 			return QueryMode(mode), nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("choose mode: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return "", err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("choose mode: %v", err), prompt.ErrBackToDatabaseSelection)
+		if navErr != nil {
+			return "", navErr
+		}
+		if !retry {
 			return "", err
 		}
 	}
 }
 
+func (w *BlastWizard) chooseDataSource() (source.DataSource, error) {
+	for {
+		name, err := w.prompt.ChooseDatabase()
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return nil, err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("choose database: %v", err), prompt.ErrBackToDatabaseSelection)
+			if navErr != nil {
+				return nil, navErr
+			}
+			if !retry {
+				return nil, err
+			}
+			continue
+		}
+		switch name {
+		case "phytozome":
+			return phytozome.NewClient(w.httpClient), nil
+		case "lemna":
+			return lemna.NewClient(w.httpClient), nil
+		default:
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("choose database: unsupported database %q", name), prompt.ErrBackToDatabaseSelection)
+			if navErr != nil {
+				return nil, navErr
+			}
+			if !retry {
+				return nil, fmt.Errorf("unsupported database %q", name)
+			}
+		}
+	}
+}
+
+func (w *BlastWizard) configureBlastRequest(ctx context.Context, selected model.SpeciesCandidate, baseRequest model.BlastRequest) (model.BlastRequest, error) {
+	request := baseRequest
+	lc, ok := w.source.(*lemna.Client)
+	if !ok {
+		return request, nil
+	}
+
+	progs := lc.AvailableBlastPrograms(selected)
+	if len(progs) == 0 {
+		return model.BlastRequest{}, fmt.Errorf("no BLAST programs are available for %s based on detected lemna.org capabilities", selected.DisplayLabel())
+	}
+	chosenProg, err := w.prompt.ChooseBlastProgram(progs)
+	if err != nil {
+		return model.BlastRequest{}, err
+	}
+
+	applyBlastProgram(&request, chosenProg)
+	execChoice, err := w.chooseLemnaBlastExecution(ctx, lc, selected, chosenProg)
+	if err != nil {
+		return model.BlastRequest{}, err
+	}
+	if execChoice == "local" {
+		request.Program = "local:" + request.Program
+	}
+	return request, nil
+}
+
+func applyBlastProgram(request *model.BlastRequest, program string) {
+	switch strings.ToLower(strings.TrimSpace(program)) {
+	case "blastn":
+		request.Program = "BLASTN"
+		request.SequenceKind = model.SequenceDNA
+		request.TargetType = "genome"
+	case "blastx":
+		request.Program = "BLASTX"
+		request.SequenceKind = model.SequenceDNA
+		request.TargetType = "proteome"
+	case "tblastn":
+		request.Program = "TBLASTN"
+		request.SequenceKind = model.SequenceProtein
+		request.TargetType = "genome"
+	case "blastp":
+		request.Program = "BLASTP"
+		request.SequenceKind = model.SequenceProtein
+		request.TargetType = "proteome"
+	}
+}
+
+func (w *BlastWizard) chooseLemnaBlastExecution(ctx context.Context, lc *lemna.Client, selected model.SpeciesCandidate, program string) (string, error) {
+	cap, err := lc.DetectBlastCapabilities(ctx, selected)
+	if err != nil {
+		return "", err
+	}
+	serverOK := false
+	localOK := false
+	switch strings.ToLower(strings.TrimSpace(program)) {
+	case "blastn", "tblastn":
+		serverOK = cap.HasServerNucleotideDB
+		localOK = cap.HasNucleotideFasta
+	case "blastx", "blastp":
+		serverOK = cap.HasServerProteinDB
+		localOK = cap.HasProteinFasta
+	}
+
+	if serverOK && !localOK {
+		fmt.Fprintln(w.out, "Execution target: server (local fallback not detected for this program).")
+		return "server", nil
+	}
+	if !serverOK && localOK {
+		fmt.Fprintln(w.out, "Execution target: local (lemna.org does not expose the required server DB for this program).")
+		return "local", nil
+	}
+	if !serverOK && !localOK {
+		return "", fmt.Errorf("no server or local execution target is available for %s on %s", program, selected.DisplayLabel())
+	}
+	return w.prompt.ChooseBlastExecution()
+}
+
 func (w *BlastWizard) loadSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
 	for {
-		candidates, err := withSpinnerValue(w.out, "Loading species candidates from Phytozome...", func() ([]model.SpeciesCandidate, error) {
-			return w.phytozome.FetchSpeciesCandidates(ctx)
+		candidates, err := withSpinnerValue(w.out, fmt.Sprintf("Loading species candidates from %s...", w.source.Name()), func() ([]model.SpeciesCandidate, error) {
+			return w.source.FetchSpeciesCandidates(ctx)
 		})
 		if err == nil {
+			w.cacheSpeciesCandidates(w.source.Name(), candidates)
 			return candidates, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("load species candidates: %v", err)) {
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("load species candidates: %v", err), prompt.ErrBackToDatabaseSelection)
+		if navErr != nil {
+			return nil, navErr
+		}
+		if !retry {
 			return nil, err
 		}
 	}
 }
 
+func (w *BlastWizard) cacheSpeciesCandidates(sourceName string, candidates []model.SpeciesCandidate) {
+	w.speciesCandidatesMu.Lock()
+	defer w.speciesCandidatesMu.Unlock()
+	if w.speciesCandidatesCache == nil {
+		w.speciesCandidatesCache = make(map[string][]model.SpeciesCandidate)
+	}
+	copyCandidates := make([]model.SpeciesCandidate, len(candidates))
+	copy(copyCandidates, candidates)
+	w.speciesCandidatesCache[strings.ToLower(strings.TrimSpace(sourceName))] = copyCandidates
+}
+
+func (w *BlastWizard) speciesCandidatesForSource(ctx context.Context, src source.DataSource, current []model.SpeciesCandidate) ([]model.SpeciesCandidate, error) {
+	key := strings.ToLower(strings.TrimSpace(src.Name()))
+	if key == "" {
+		return nil, fmt.Errorf("source name is empty")
+	}
+	if key == strings.ToLower(strings.TrimSpace(w.source.Name())) && len(current) > 0 {
+		w.cacheSpeciesCandidates(src.Name(), current)
+		return current, nil
+	}
+
+	w.speciesCandidatesMu.Lock()
+	if cached, ok := w.speciesCandidatesCache[key]; ok {
+		copyCandidates := make([]model.SpeciesCandidate, len(cached))
+		copy(copyCandidates, cached)
+		w.speciesCandidatesMu.Unlock()
+		return copyCandidates, nil
+	}
+	w.speciesCandidatesMu.Unlock()
+
+	candidates, err := src.FetchSpeciesCandidates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	w.cacheSpeciesCandidates(src.Name(), candidates)
+	return candidates, nil
+}
+
 func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
+	// If lemna source and the candidate list is small, present the full list directly.
+	const smallListThreshold = 16
+
 	for {
+		// If running against lemna and the candidate list is small, avoid the search flow
+		// and present the full numbered list for direct selection.
+		if _, ok := w.source.(*lemna.Client); ok && len(candidates) <= smallListThreshold {
+			selected, err := w.prompt.SelectSpecies(candidates)
+			if err == nil {
+				return selected, nil
+			}
+			if errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return model.SpeciesCandidate{}, err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select species: %v", err), prompt.ErrBackToModeSelection)
+			if navErr != nil {
+				return model.SpeciesCandidate{}, navErr
+			}
+			if !retry {
+				return model.SpeciesCandidate{}, err
+			}
+			// If user chose to retry, continue the loop and re-show full list.
+			continue
+		}
+
+		// Otherwise use the existing search-and-select flow and appropriate filter.
 		selected, err := w.prompt.SearchAndSelectSpecies(candidates, func(keyword string) []model.SpeciesCandidate {
+			if _, ok := w.source.(*lemna.Client); ok {
+				return lemna.FilterSpeciesCandidates(candidates, keyword)
+			}
 			return phytozome.FilterSpeciesCandidates(candidates, keyword)
 		})
 		if err == nil {
 			return selected, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("select species: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return model.SpeciesCandidate{}, err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select species: %v", err), prompt.ErrBackToModeSelection)
+		if navErr != nil {
+			return model.SpeciesCandidate{}, navErr
+		}
+		if !retry {
 			return model.SpeciesCandidate{}, err
 		}
 	}
@@ -212,7 +489,14 @@ func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.Species
 	for {
 		keywordInput, err := w.prompt.KeywordInput()
 		if err != nil {
-			if !w.retryWorkflowStep(fmt.Sprintf("read keyword input: %v", err)) {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read keyword input: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
 				return err
 			}
 			continue
@@ -223,9 +507,49 @@ func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.Species
 			continue
 		}
 
-		groups, err := w.searchKeywordGroups(ctx, selected, keywords)
+		proteinIdentifications, err := w.prompt.KeywordProteinIdentifications(len(keywords))
 		if err != nil {
-			if !w.retryWorkflowStep(fmt.Sprintf("search keyword results: %v", err)) {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read keyword protein identifications: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return err
+			}
+			continue
+		}
+
+		baseName, err := w.prompt.ExportBaseName("File name", prompt.ErrBackToQueryInput)
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				continue
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read keyword file name: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return err
+			}
+			continue
+		}
+
+		groups, err := w.searchKeywordGroups(ctx, selected, keywords, proteinIdentifications)
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("search keyword results: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
 				return err
 			}
 			continue
@@ -233,7 +557,7 @@ func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.Species
 
 		totalRows := countKeywordRows(groups)
 		fmt.Fprintln(w.out)
-		fmt.Fprintf(w.out, "Keyword mode selected for %s.\n", selected.DisplayLabel())
+		fmt.Fprintf(w.out, "Keyword results for %s.\n", selected.DisplayLabel())
 		fmt.Fprintf(w.out, "Search terms: %d\n", len(keywords))
 		fmt.Fprintf(w.out, "Matched rows: %d\n", totalRows)
 		fmt.Fprintln(w.out)
@@ -244,29 +568,827 @@ func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.Species
 			return nil
 		}
 
-		selectedRows, err := w.selectKeywordRows(groups)
-		if err != nil {
-			if errors.Is(err, prompt.ErrBackToModeSelection) {
+	keywordRowLoop:
+		for {
+			outputDir, err := appfs.OutputDir()
+			if err != nil {
 				return err
 			}
-			if !w.retryWorkflowStep(fmt.Sprintf("select keyword rows: %v", err)) {
+			listPath := filepath.Join(outputDir, baseName+"_list.txt")
+
+			selectedRows, err := w.selectKeywordRows(groups, listPath)
+			if err != nil {
+				if errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
+				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select keyword rows: %v", err), prompt.ErrBackToQueryInput)
+				if navErr != nil {
+					return navErr
+				}
+				if !retry {
+					return err
+				}
+				continue keywordRowLoop
+			}
+
+			if err := w.exportKeywordSelectionsWithRetry(ctx, selectedRows, baseName); err != nil {
+				if errors.Is(err, prompt.ErrBackToRowSelection) {
+					continue keywordRowLoop
+				}
+				return err
+			}
+			return nil
+		}
+	}
+}
+
+func (w *BlastWizard) runBlastMode(ctx context.Context, selected model.SpeciesCandidate, candidates []model.SpeciesCandidate) error {
+	for {
+		items, outputDir, err := w.collectBlastQueryItems()
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				continue
+			}
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read BLAST input: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
 				return err
 			}
 			continue
 		}
-
-		if err := w.exportKeywordSelectionsWithRetry(ctx, selectedRows); err != nil {
-			return err
+		if len(items) == 0 {
+			fmt.Fprintln(w.out, "BLAST input was empty. Please paste one or more queries.")
+			continue
 		}
-		return nil
+
+		prepared, err := w.resolveBlastQueryItems(ctx, items, candidates)
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				continue
+			}
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("resolve BLAST input: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return err
+			}
+			continue
+		}
+		if len(prepared) == 0 {
+			return nil
+		}
+
+		rawOutputFolder := outputDir
+	batchConfigLoop:
+		for {
+			baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
+			configuredRequest, err := w.configureBlastRequest(ctx, selected, baseRequest)
+			if err != nil {
+				if errors.Is(err, prompt.ErrBackToQueryInput) {
+					continue
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
+				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure BLAST request: %v", err), prompt.ErrBackToSpeciesSelection)
+				if navErr != nil {
+					return navErr
+				}
+				if !retry {
+					return err
+				}
+				continue
+			}
+
+			resolvedOutputDir := ""
+			if rawOutputFolder == "" {
+				resolvedOutputDir, err = appfs.OutputDir()
+				if err != nil {
+					return err
+				}
+			} else {
+				appDir, err := appfs.OutputDir()
+				if err != nil {
+					return err
+				}
+				resolvedOutputDir = filepath.Join(appDir, sanitizeExportName(rawOutputFolder))
+				if err := os.MkdirAll(resolvedOutputDir, 0o755); err != nil {
+					return fmt.Errorf("create output folder: %w", err)
+				}
+			}
+
+			preview := w.buildBlastRunPreview(selected, prepared, configuredRequest, resolvedOutputDir)
+			fmt.Fprintln(w.out)
+			fmt.Fprintln(w.out, preview)
+			if err := w.prompt.ConfirmReportPreview(); err != nil {
+				return err
+			}
+
+			autoApproveRemaining := false
+			queryRuns := make([]blastQueryRun, 0, len(prepared))
+			for i, item := range prepared {
+				if autoApproveRemaining {
+					fmt.Fprintf(w.out, "Auto-approving query %d/%d with default selection because done all is active.\n", i+1, len(prepared))
+				}
+				request := configuredRequest
+				request.Sequence = item.Sequence
+				if item.QuerySource != nil {
+					request.Sequence = item.QuerySource.Sequence
+				}
+
+			submitLoop:
+				for {
+					job, err := w.submitBlastWithRetry(ctx, request)
+					if errors.Is(err, prompt.ErrBackToBlastProgram) {
+						continue batchConfigLoop
+					}
+					if errors.Is(err, prompt.ErrExitRequested) {
+						return err
+					}
+					if err != nil {
+						action, actionErr := w.prompt.FetchErrorAction(fmt.Sprintf("BLAST query %d/%d (%s): submit BLAST job failed: %v", i+1, len(prepared), oneLinePreview(reportQueryLabel(item)), err), prompt.ErrBackToQueryInput)
+						if actionErr != nil {
+							return actionErr
+						}
+						switch action {
+						case "retry":
+							continue submitLoop
+						case "skip":
+							fmt.Fprintf(w.out, "Skipped BLAST query %d/%d after submission failed.\n", i+1, len(prepared))
+							queryRuns = append(queryRuns, blastQueryRun{
+								Index:   i + 1,
+								Item:    item,
+								Request: request,
+							})
+							break submitLoop
+						case "exit":
+							return prompt.ErrExitRequested
+						default:
+							return fmt.Errorf("unsupported submission recovery action %q", action)
+						}
+					}
+					fmt.Fprintf(w.out, "Job submitted: %s\n", job.JobID)
+
+				waitLoop:
+					for {
+						results, err := w.waitForBlastResultsWithRetry(ctx, job.JobID)
+						if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+							return err
+						}
+						if err != nil {
+							action, actionErr := w.prompt.FetchErrorAction(fmt.Sprintf("BLAST query %d/%d (%s): wait for results failed: %v", i+1, len(prepared), oneLinePreview(reportQueryLabel(item)), err), prompt.ErrBackToQueryInput)
+							if actionErr != nil {
+								return actionErr
+							}
+							switch action {
+							case "retry":
+								continue waitLoop
+							case "skip":
+								fmt.Fprintf(w.out, "Skipped BLAST query %d/%d after result retrieval failed.\n", i+1, len(prepared))
+								queryRuns = append(queryRuns, blastQueryRun{
+									Index:   i + 1,
+									Item:    item,
+									Request: request,
+								})
+								break submitLoop
+							case "exit":
+								return prompt.ErrExitRequested
+							default:
+								return fmt.Errorf("unsupported result recovery action %q", action)
+							}
+						}
+						if err := w.printResults(results); err != nil {
+							return err
+						}
+						if len(results.Rows) == 0 {
+							fmt.Fprintln(w.out, "No BLAST results were returned for this query.")
+							queryRuns = append(queryRuns, blastQueryRun{
+								Index:   i + 1,
+								Item:    item,
+								Request: request,
+								Results: results,
+							})
+							break submitLoop
+						}
+
+						var selectedRows []model.BlastResultRow
+						if autoApproveRemaining {
+							selectedRows = append(selectedRows, results.Rows...)
+						} else {
+							for {
+								rows, doneAll, err := w.prompt.SelectBlastRowsBatch(results.Rows)
+								if err != nil {
+									if errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+										return err
+									}
+									retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select BLAST rows: %v", err), prompt.ErrBackToQueryInput)
+									if navErr != nil {
+										return navErr
+									}
+									if !retry {
+										return err
+									}
+									continue
+								}
+								selectedRows = rows
+								autoApproveRemaining = doneAll
+								break
+							}
+						}
+
+						if len(selectedRows) == 0 {
+							fmt.Fprintln(w.out, "No rows selected for this query. Skipping export.")
+							queryRuns = append(queryRuns, blastQueryRun{
+								Index:        i + 1,
+								Item:         item,
+								Request:      request,
+								Results:      results,
+								SelectedRows: nil,
+							})
+							break submitLoop
+						}
+
+					exportLoop:
+						for {
+							displayName := buildBlastOutputDisplayName(item)
+							filePrefix := sanitizeExportName(displayName)
+							excelPath := filepath.Join(resolvedOutputDir, filePrefix+".xlsx")
+							textPath := filepath.Join(resolvedOutputDir, filePrefix+".txt")
+							if err := w.exportBlastSelectionsToDir(ctx, selectedRows, item.QuerySource, displayName, filePrefix, resolvedOutputDir); err != nil {
+								action, actionErr := w.prompt.FetchErrorAction(fmt.Sprintf("BLAST query %d/%d (%s): export failed: %v", i+1, len(prepared), oneLinePreview(reportQueryLabel(item)), err), prompt.ErrBackToRowSelection)
+								if actionErr != nil {
+									return actionErr
+								}
+								switch action {
+								case "retry":
+									continue exportLoop
+								case "skip":
+									fmt.Fprintf(w.out, "Skipped export for BLAST query %d/%d.\n", i+1, len(prepared))
+									queryRuns = append(queryRuns, blastQueryRun{
+										Index:        i + 1,
+										Item:         item,
+										Request:      request,
+										Results:      results,
+										SelectedRows: selectedRows,
+									})
+									break submitLoop
+								case "exit":
+									return prompt.ErrExitRequested
+								default:
+									return fmt.Errorf("unsupported export recovery action %q", action)
+								}
+							}
+							queryRuns = append(queryRuns, blastQueryRun{
+								Index:        i + 1,
+								Item:         item,
+								Request:      request,
+								Results:      results,
+								SelectedRows: selectedRows,
+								ExcelPath:    excelPath,
+								TextPath:     textPath,
+							})
+							break submitLoop
+						}
+					}
+				}
+			}
+
+			action, err := w.prompt.DetailedReportAction()
+			if err != nil {
+				return err
+			}
+			if action == "yes" {
+				reportPath := filepath.Join(resolvedOutputDir, time.Now().Format("20060102_150405")+"_blast_log.txt")
+				if err := withSpinner(w.out, "Writing detailed run log...", func() error {
+					return w.writeBlastDetailedReport(reportPath, selected, prepared, queryRuns, configuredRequest, resolvedOutputDir)
+				}); err != nil {
+					return err
+				}
+				fmt.Fprintf(w.out, "Detailed report written: %s\n", reportPath)
+			}
+
+			return nil
+		}
 	}
+}
+
+func (w *BlastWizard) collectBlastQueryItems() ([]blastQueryItem, string, error) {
+	for {
+		rawInput, err := w.prompt.SequenceInput()
+		if err != nil {
+			return nil, "", err
+		}
+		rawInput = strings.TrimSpace(rawInput)
+		if rawInput == "" {
+			return nil, "", nil
+		}
+
+		if loaded, ok, err := w.loadBlastInputFile(rawInput); err != nil {
+			return nil, "", err
+		} else if ok {
+			rawInput = loaded
+		}
+
+		items, err := parseBlastQueryItems(rawInput)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(items) == 0 {
+			return nil, "", nil
+		}
+
+		if len(items) > 1 && !allLabelsBlank(items) && !allLabelsPresent(items) {
+			fmt.Fprintln(w.out, "When you paste multiple BLAST queries, Protein Identification values must either be provided for all items or omitted for all items.")
+			fmt.Fprintln(w.out, "Please re-enter the batch input.")
+			continue
+		}
+
+		if allLabelsBlank(items) {
+			labels, err := w.prompt.BlastProteinIdentifications(len(items), len(items) > 1)
+			if err != nil {
+				return nil, "", err
+			}
+			for i := range items {
+				items[i].ProteinIdentification = labels[i]
+			}
+		}
+
+		if len(items) > 1 {
+			outputFolder, err := w.prompt.OutputFolderName()
+			if err != nil {
+				return nil, "", err
+			}
+			if strings.TrimSpace(outputFolder) != "" {
+				return items, outputFolder, nil
+			}
+			return items, "", nil
+		}
+
+		return items, "", nil
+	}
+}
+
+func allLabelsPresent(items []blastQueryItem) bool {
+	for _, item := range items {
+		if strings.TrimSpace(item.ProteinIdentification) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *BlastWizard) loadBlastInputFile(rawInput string) (string, bool, error) {
+	filename, ok := parseBlastLoadCommand(rawInput)
+	if !ok {
+		return "", false, nil
+	}
+
+	appDir, err := appfs.ApplicationDir()
+	if err != nil {
+		return "", false, err
+	}
+	path := filepath.Join(appDir, filename)
+	data, err := withSpinnerValue(w.out, "Loading BLAST input file...", func() ([]byte, error) {
+		return os.ReadFile(path)
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("load BLAST input file %q: %w", filename, err)
+	}
+	fmt.Fprintf(w.out, "Loaded BLAST input from %s.\n", path)
+	return string(data), true, nil
+}
+
+func parseBlastLoadCommand(rawInput string) (string, bool) {
+	value := strings.TrimSpace(rawInput)
+	if len(value) < 5 || !strings.EqualFold(value[:4], "load") {
+		return "", false
+	}
+	rest := strings.TrimSpace(value[4:])
+	if rest == "" {
+		return "", false
+	}
+	rest = strings.Trim(rest, "\"'")
+	rest = filepath.Base(rest)
+	if rest == "" || rest == "." || rest == ".." {
+		return "", false
+	}
+	if !strings.HasSuffix(strings.ToLower(rest), ".txt") {
+		return "", false
+	}
+	return rest, true
+}
+
+func parseBlastQueryItems(rawInput string) ([]blastQueryItem, error) {
+	text := strings.ReplaceAll(strings.TrimSpace(rawInput), "\r", "")
+	if text == "" {
+		return nil, nil
+	}
+
+	if items, ok, err := parseBlastClipboardItems(text); err != nil {
+		return nil, err
+	} else if ok {
+		return items, nil
+	}
+
+	if source, ok := parseFastaQuerySequenceInput(text); ok {
+		return []blastQueryItem{{RawInput: text, Sequence: source.Sequence, QuerySource: source}}, nil
+	}
+
+	lines := make([]string, 0, 8)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	items := make([]blastQueryItem, 0, len(lines))
+	for _, line := range lines {
+		items = append(items, blastQueryItem{RawInput: line})
+	}
+	return items, nil
+}
+
+func parseBlastClipboardItems(text string) ([]blastQueryItem, bool, error) {
+	lines := make([]string, 0, 8)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	marker := -1
+	for i, line := range lines {
+		if strings.Trim(line, "~") == "" && len(strings.TrimSpace(line)) >= 2 {
+			marker = i
+			break
+		}
+	}
+	if marker < 0 {
+		return nil, false, nil
+	}
+
+	left := lines[:marker]
+	right := lines[marker+1:]
+	if len(left) == 0 || len(right) == 0 {
+		return nil, true, fmt.Errorf("clipboard list format must contain labels above ~~ and links below ~~")
+	}
+	if len(left) != len(right) {
+		return nil, true, fmt.Errorf("clipboard list format mismatch: %d labels vs %d links", len(left), len(right))
+	}
+
+	items := make([]blastQueryItem, 0, len(right))
+	for i := range right {
+		items = append(items, blastQueryItem{
+			ProteinIdentification: strings.TrimSpace(strings.Trim(left[i], " ")),
+			RawInput:              right[i],
+		})
+	}
+	return items, true, nil
+}
+
+func allLabelsBlank(items []blastQueryItem) bool {
+	for _, item := range items {
+		if strings.TrimSpace(item.ProteinIdentification) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func buildBlastOutputDisplayName(item blastQueryItem) string {
+	label := strings.TrimSpace(item.ProteinIdentification)
+	if label == "" && item.QuerySource != nil {
+		label = firstNonEmpty(item.QuerySource.GeneID, item.QuerySource.TranscriptID, item.QuerySource.ProteinID)
+	}
+	if label == "" {
+		label = "query"
+	}
+	return label
+}
+
+func sanitizeExportName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "query"
+	}
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	value = replacer.Replace(value)
+	value = strings.Join(strings.Fields(value), "_")
+	value = strings.Trim(value, " ._")
+	if value == "" {
+		return "query"
+	}
+	return value
+}
+
+func reportQueryLabel(item blastQueryItem) string {
+	label := strings.TrimSpace(item.ProteinIdentification)
+	if label != "" {
+		return label
+	}
+	if item.QuerySource != nil {
+		return firstNonEmpty(item.QuerySource.GeneID, item.QuerySource.TranscriptID, item.QuerySource.ProteinID, "query")
+	}
+	return "query"
+}
+
+func reportQuerySource(source *model.QuerySequenceSource) string {
+	if source == nil {
+		return "raw sequence input"
+	}
+	if source.NormalizedURL != "" {
+		return source.NormalizedURL
+	}
+	if source.ProteinID != "" || source.TranscriptID != "" || source.GeneID != "" {
+		return firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID)
+	}
+	return "raw sequence input"
+}
+
+func blastExecutionLabel(program string) string {
+	if strings.HasPrefix(strings.ToLower(program), "local:") {
+		return "local"
+	}
+	return "server"
+}
+
+func (w *BlastWizard) resolveBlastQueryItems(ctx context.Context, items []blastQueryItem, candidates []model.SpeciesCandidate) ([]blastQueryItem, error) {
+	type queryResolveResult struct {
+		index       int
+		querySource *model.QuerySequenceSource
+		ok          bool
+		err         error
+	}
+
+	prepared := make([]blastQueryItem, 0, len(items))
+	progress := ui.NewProgressBar(w.out, "Resolving BLAST query inputs...", len(items))
+	completed := false
+	defer func() {
+		if completed {
+			progress.Finish("Resolved BLAST query inputs.")
+			return
+		}
+		progress.Finish("")
+	}()
+
+	results := make([]queryResolveResult, len(items))
+	jobs := make(chan int)
+	outcomes := make(chan queryResolveResult, len(items))
+	workerCount := parallelismFor(len(items), maxParallelQueryJobs)
+
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for idx := range jobs {
+				querySource, ok, err := w.resolveQuerySequenceInputBatchWithTimeout(ctx, candidates, items[idx].RawInput)
+				outcomes <- queryResolveResult{index: idx, querySource: querySource, ok: ok, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		for i := range items {
+			jobs <- i
+		}
+		close(jobs)
+		workers.Wait()
+		close(outcomes)
+	}()
+
+	doneCount := 0
+	for result := range outcomes {
+		results[result.index] = result
+		doneCount++
+		progress.Set(doneCount)
+	}
+
+	for i, item := range items {
+		querySource := results[i].querySource
+		ok := results[i].ok
+		err := results[i].err
+		for err != nil {
+			action, actionErr := w.prompt.FetchErrorAction(fmt.Sprintf("BLAST query %d/%d (%s): %v", i+1, len(items), oneLinePreview(reportQueryLabel(item)), err), prompt.ErrBackToQueryInput)
+			if actionErr != nil {
+				return nil, actionErr
+			}
+			switch action {
+			case "retry":
+				querySource, ok, err = w.resolveQuerySequenceInputBatchWithTimeout(ctx, candidates, item.RawInput)
+				continue
+			case "skip":
+				err = nil
+				ok = false
+				querySource = nil
+			case "exit":
+				return nil, prompt.ErrExitRequested
+			default:
+				return nil, fmt.Errorf("unsupported recovery action %q while resolving BLAST query input", action)
+			}
+		}
+		sequence := item.RawInput
+		if ok {
+			sequence = querySource.Sequence
+		}
+		if strings.TrimSpace(sanitizeSequence(sequence)) == "" {
+			fmt.Fprintf(w.out, "Skipped BLAST query %d/%d because no usable sequence could be resolved.\n", i+1, len(items))
+			continue
+		}
+		if querySource == nil {
+			querySource = &model.QuerySequenceSource{
+				Sequence:       sequence,
+				SourceDatabase: w.source.Name(),
+			}
+		}
+		item.Sequence = sequence
+		item.QuerySource = querySource
+		prepared = append(prepared, item)
+	}
+	progress.Set(len(items))
+	completed = true
+	return prepared, nil
+}
+
+func (w *BlastWizard) resolveQuerySequenceInputBatchWithTimeout(ctx context.Context, candidates []model.SpeciesCandidate, input string) (*model.QuerySequenceSource, bool, error) {
+	resolveCtx, cancel := context.WithTimeout(ctx, queryResolveTimeout)
+	defer cancel()
+	return w.resolveQuerySequenceInputBatch(resolveCtx, candidates, input)
+}
+
+func (w *BlastWizard) buildBlastRunPreview(selected model.SpeciesCandidate, items []blastQueryItem, request model.BlastRequest, outputDir string) string {
+	lines := make([]string, 0, len(items)+8)
+	lines = append(lines, "BLAST preview")
+	lines = append(lines, fmt.Sprintf("db=%s | species=%s | mode=blast | program=%s | exec=%s", databaseDisplayName(w.source.Name()), selected.DisplayLabel(), request.Program, blastExecutionLabel(request.Program)))
+	lines = append(lines, fmt.Sprintf("queries=%d | out=%s", len(items), outputDir))
+	lines = append(lines, "Review the summary and press Enter to continue.")
+	for i, item := range items {
+		lines = append(lines, fmt.Sprintf("[%d] id=%s | len=%d | src=%s", i+1, displayBlankAsTilde(item.ProteinIdentification), len(sanitizeSequence(item.Sequence)), oneLinePreview(reportQuerySource(item.QuerySource))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (w *BlastWizard) writeBlastDetailedReport(reportPath string, selected model.SpeciesCandidate, items []blastQueryItem, runs []blastQueryRun, request model.BlastRequest, outputDir string) error {
+	lines := make([]string, 0, 1024)
+	lines = append(lines, "Blast detailed log report")
+	lines = append(lines, fmt.Sprintf("Generated: %s", time.Now().Format(time.RFC3339)))
+	lines = append(lines, fmt.Sprintf("Database: %s", databaseDisplayName(w.source.Name())))
+	lines = append(lines, fmt.Sprintf("Species: %s", selected.DisplayLabel()))
+	lines = append(lines, fmt.Sprintf("Mode: blast"))
+	lines = append(lines, fmt.Sprintf("Program: %s", request.Program))
+	lines = append(lines, fmt.Sprintf("Sequence kind: %s", request.SequenceKind))
+	lines = append(lines, fmt.Sprintf("Target type: %s", request.TargetType))
+	lines = append(lines, fmt.Sprintf("E-value: %s", request.EValue))
+	lines = append(lines, fmt.Sprintf("Matrix: %s", request.ComparisonMatrix))
+	lines = append(lines, fmt.Sprintf("Word length: %s", request.WordLength))
+	lines = append(lines, fmt.Sprintf("Alignments to show: %d", request.AlignmentsToShow))
+	lines = append(lines, fmt.Sprintf("Allow gaps: %t", request.AllowGaps))
+	lines = append(lines, fmt.Sprintf("Filter query: %t", request.FilterQuery))
+	lines = append(lines, fmt.Sprintf("Output directory: %s", outputDir))
+	lines = append(lines, fmt.Sprintf("Query count: %d", len(items)))
+	lines = append(lines, fmt.Sprintf("Recorded runs: %d", len(runs)))
+	lines = append(lines, "")
+	for i, item := range items {
+		lines = append(lines, fmt.Sprintf("=== Query %d ===", i+1))
+		lines = append(lines, fmt.Sprintf("Label: %s", displayBlankAsTilde(item.ProteinIdentification)))
+		lines = append(lines, fmt.Sprintf("Raw input: %s", oneLinePreview(item.RawInput)))
+		lines = append(lines, fmt.Sprintf("Sequence length: %d", len(sanitizeSequence(item.Sequence))))
+		queryDatabase := w.source.Name()
+		if item.QuerySource != nil && strings.TrimSpace(item.QuerySource.SourceDatabase) != "" {
+			queryDatabase = item.QuerySource.SourceDatabase
+		}
+		lines = append(lines, fmt.Sprintf("Query source database: %s", databaseDisplayName(queryDatabase)))
+		lines = append(lines, fmt.Sprintf("Resolved source: %s", reportQuerySource(item.QuerySource)))
+		if i < len(runs) {
+			run := runs[i]
+			lines = append(lines, fmt.Sprintf("Submitted program: %s", run.Request.Program))
+			lines = append(lines, fmt.Sprintf("Selected rows: %d", len(run.SelectedRows)))
+			lines = append(lines, fmt.Sprintf("Result rows: %d", len(run.Results.Rows)))
+			lines = append(lines, fmt.Sprintf("Excel: %s", run.ExcelPath))
+			lines = append(lines, fmt.Sprintf("Text: %s", run.TextPath))
+			lines = append(lines, "Result table:")
+			lines = append(lines, "row\tprotein\tspecies\te_value\tpercent_identity\talign_len\tstrands\tquery_id\tquery_from\tquery_to\ttarget_from\ttarget_to\tbitscore\tidentical\tpositives\tgaps\tquery_length\ttarget_length\tgene_report_url")
+			for idx, row := range run.Results.Rows {
+				lines = append(lines, fmt.Sprintf("%d\t%s\t%s\t%s\t%.2f\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%.2f\t%d\t%d\t%d\t%d\t%d\t%s",
+					idx+1,
+					row.Protein,
+					row.Species,
+					row.EValue,
+					row.PercentIdentity,
+					row.AlignLength,
+					row.Strands,
+					row.QueryID,
+					row.QueryFrom,
+					row.QueryTo,
+					row.TargetFrom,
+					row.TargetTo,
+					row.Bitscore,
+					row.Identical,
+					row.Positives,
+					row.Gaps,
+					row.QueryLength,
+					row.TargetLength,
+					row.GeneReportURL,
+				))
+			}
+			lines = append(lines, "Selected rows:")
+			for _, row := range run.SelectedRows {
+				lines = append(lines, fmt.Sprintf("%s\t%s\t%s\t%s", row.Protein, row.Species, row.EValue, row.GeneReportURL))
+			}
+		}
+		lines = append(lines, "")
+	}
+	report := strings.Join(lines, "\n") + "\n"
+	return os.WriteFile(reportPath, []byte(report), 0o644)
+}
+
+func displayBlankAsTilde(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "~"
+	}
+	return value
+}
+
+func oneLinePreview(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\n", " "))
+	if len(value) > 120 {
+		return value[:117] + "..."
+	}
+	return value
+}
+
+func parallelismFor(total int, maxWorkers int) int {
+	if total <= 1 {
+		return total
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 2 {
+		workers = 2
+	}
+	if maxWorkers > 0 && workers > maxWorkers {
+		workers = maxWorkers
+	}
+	if workers > total {
+		workers = total
+	}
+	return workers
+}
+
+func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, rows []model.BlastResultRow, querySource *model.QuerySequenceSource, displayName string, fileBaseName string, outputDir string) error {
+	fmt.Fprintln(w.out)
+	fmt.Fprintf(w.out, "Preparing export for %d selected rows...\n", len(rows))
+
+	excelPath := filepath.Join(outputDir, fileBaseName+".xlsx")
+	textPath := filepath.Join(outputDir, fileBaseName+".txt")
+
+	exportMetadata := buildExportMetadata(displayName, querySource)
+	if err := withSpinner(w.out, "Writing Excel file...", func() error {
+		return export.WriteBlastResultsExcelWithMetadata(excelPath, rows, exportMetadata)
+	}); err != nil {
+		return err
+	}
+
+	records, err := w.fetchProteinSequenceRecords(ctx, rows)
+	if err != nil {
+		return err
+	}
+	records = prependQuerySequenceRecord(records, querySource, displayName)
+	if err := withSpinner(w.out, "Writing peptide text file...", func() error {
+		return export.WriteProteinSequencesText(textPath, records)
+	}); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(w.out, "Excel: %s\n", excelPath)
+	fmt.Fprintf(w.out, "Peptides: %s\n", textPath)
+	return nil
 }
 
 func (w *BlastWizard) collectQuerySequence(ctx context.Context, candidates []model.SpeciesCandidate) (string, *model.QuerySequenceSource, error) {
 	for {
 		sequenceInput, err := w.prompt.SequenceInput()
 		if err != nil {
-			if !w.retryWorkflowStep(fmt.Sprintf("read query input: %v", err)) {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return "", nil, err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read query input: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return "", nil, navErr
+			}
+			if !retry {
 				return "", nil, err
 			}
 			continue
@@ -279,14 +1401,21 @@ func (w *BlastWizard) collectQuerySequence(ctx context.Context, candidates []mod
 		sequence := sequenceInput
 		var querySource *model.QuerySequenceSource
 		if source, ok, err := w.resolveQuerySequenceInput(ctx, candidates, sequenceInput); err != nil {
-			if !w.retryWorkflowStep(fmt.Sprintf("resolve query input: %v", err)) {
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return "", nil, err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("resolve query input: %v", err), prompt.ErrBackToSpeciesSelection)
+			if navErr != nil {
+				return "", nil, navErr
+			}
+			if !retry {
 				return "", nil, err
 			}
 			continue
 		} else if ok {
 			querySource = source
 			sequence = source.Sequence
-			fmt.Fprintln(w.out, describeQuerySource(source))
+			fmt.Fprintln(w.out, describeQuerySource(source, w.source.Name()))
 			if source.GeneID != "" {
 				fmt.Fprintf(w.out, "  Gene ID: %s\n", source.GeneID)
 			}
@@ -306,13 +1435,43 @@ func (w *BlastWizard) collectQuerySequence(ctx context.Context, candidates []mod
 func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.BlastRequest) (model.BlastJob, error) {
 	for {
 		job, err := withSpinnerValue(w.out, "Submitting BLAST job...", func() (model.BlastJob, error) {
-			return w.phytozome.SubmitBlast(ctx, request)
+			return w.source.SubmitBlast(ctx, request)
 		})
 		if err == nil {
 			return job, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("submit BLAST job: %v", err)) {
-			return model.BlastJob{}, err
+		var missingTools *blastplus.MissingToolsError
+		if errors.As(err, &missingTools) {
+			action, actionErr := w.prompt.BlastPlusInstallAction(missingTools.Error())
+			if actionErr != nil {
+				return model.BlastJob{}, actionErr
+			}
+			switch action {
+			case "install":
+				if _, installErr := withSpinnerValue(w.out, "Installing BLAST+...", func() (string, error) {
+					return blastplus.InstallManaged(ctx, w.httpClient)
+				}); installErr != nil {
+					err = fmt.Errorf("install BLAST+: %w", installErr)
+				} else {
+					continue
+				}
+			case "back":
+				return model.BlastJob{}, prompt.ErrBackToBlastProgram
+			default:
+				return model.BlastJob{}, prompt.ErrExitRequested
+			}
+		}
+		action, actionErr := w.prompt.BlastSubmitErrorAction(fmt.Sprintf("submit BLAST job: %v", err))
+		if actionErr != nil {
+			return model.BlastJob{}, actionErr
+		}
+		switch action {
+		case "retry":
+			continue
+		case "back":
+			return model.BlastJob{}, prompt.ErrBackToBlastProgram
+		default:
+			return model.BlastJob{}, prompt.ErrExitRequested
 		}
 	}
 }
@@ -323,7 +1482,11 @@ func (w *BlastWizard) waitForBlastResultsWithRetry(ctx context.Context, jobID st
 		if err == nil {
 			return results, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("wait for BLAST results for job %s: %v", jobID, err)) {
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("wait for BLAST results for job %s: %v", jobID, err), prompt.ErrBackToQueryInput)
+		if navErr != nil {
+			return model.BlastResult{}, navErr
+		}
+		if !retry {
 			return model.BlastResult{}, err
 		}
 	}
@@ -335,54 +1498,94 @@ func (w *BlastWizard) selectBlastRows(rows []model.BlastResultRow) ([]model.Blas
 		if err == nil {
 			return selectedRows, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("select BLAST rows: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return nil, err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select BLAST rows: %v", err), prompt.ErrBackToQueryInput)
+		if navErr != nil {
+			return nil, navErr
+		}
+		if !retry {
 			return nil, err
 		}
 	}
 }
 
-func (w *BlastWizard) selectKeywordRows(groups []model.KeywordSearchGroup) ([]model.KeywordResultRow, error) {
+func (w *BlastWizard) selectKeywordRows(groups []model.KeywordSearchGroup, listPath string) ([]model.KeywordResultRow, error) {
 	for {
-		selectedRows, err := w.prompt.SelectKeywordRows(groups)
+		selectedRows, err := w.prompt.SelectKeywordRows(groups, listPath, export.WriteKeywordListText)
 		if err == nil {
 			return selectedRows, nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("select keyword rows: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return nil, err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select keyword rows: %v", err), prompt.ErrBackToQueryInput)
+		if navErr != nil {
+			return nil, navErr
+		}
+		if !retry {
 			return nil, err
 		}
 	}
 }
 
-func (w *BlastWizard) exportSelectionsWithRetry(ctx context.Context, rows []model.BlastResultRow, querySource *model.QuerySequenceSource) error {
+func (w *BlastWizard) exportSelectionsWithRetry(ctx context.Context, rows []model.BlastResultRow, querySource *model.QuerySequenceSource, baseName string) error {
 	for {
-		err := w.exportSelections(ctx, rows, querySource)
+		err := w.exportSelections(ctx, rows, querySource, baseName)
 		if err == nil {
 			return nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("export selections: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToRowSelection) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("export selections: %v", err), prompt.ErrBackToRowSelection)
+		if navErr != nil {
+			return navErr
+		}
+		if !retry {
 			return err
 		}
 	}
 }
 
-func (w *BlastWizard) exportKeywordSelectionsWithRetry(ctx context.Context, rows []model.KeywordResultRow) error {
+func (w *BlastWizard) exportKeywordSelectionsWithRetry(ctx context.Context, rows []model.KeywordResultRow, baseName string) error {
 	for {
-		err := w.exportKeywordSelections(ctx, rows)
+		err := w.exportKeywordSelections(ctx, rows, baseName)
 		if err == nil {
 			return nil
 		}
-		if !w.retryWorkflowStep(fmt.Sprintf("export keyword selections: %v", err)) {
+		if errors.Is(err, prompt.ErrBackToRowSelection) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("export keyword selections: %v", err), prompt.ErrBackToRowSelection)
+		if navErr != nil {
+			return navErr
+		}
+		if !retry {
 			return err
 		}
 	}
 }
 
-func (w *BlastWizard) retryWorkflowStep(description string) bool {
-	action, err := w.prompt.WorkflowErrorAction(description)
+func (w *BlastWizard) retryWorkflowStep(description string, backTarget error) (bool, error) {
+	action, err := w.prompt.WorkflowErrorAction(description, backTarget)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return action == "retry"
+	switch action {
+	case "retry":
+		return true, nil
+	case "back":
+		if backTarget != nil {
+			return false, backTarget
+		}
+		return false, prompt.ErrBackToQueryInput
+	case "exit":
+		return false, prompt.ErrExitRequested
+	default:
+		return false, nil
+	}
 }
 
 func (w *BlastWizard) printSelection(candidate model.SpeciesCandidate) error {
@@ -393,10 +1596,53 @@ func (w *BlastWizard) printSelection(candidate model.SpeciesCandidate) error {
 		fmt.Fprintf(w.out, "  Common name: %s\n", candidate.CommonName)
 	}
 	fmt.Fprintf(w.out, "  JBrowse name: %s\n", candidate.JBrowseName)
-	fmt.Fprintf(w.out, "  Proteome ID: %d\n", candidate.ProteomeID)
+	if candidate.ProteomeID != 0 {
+		fmt.Fprintf(w.out, "  Target ID: %d\n", candidate.ProteomeID)
+	}
 	if candidate.ReleaseDate != "" {
 		fmt.Fprintf(w.out, "  Release date: %s\n", candidate.ReleaseDate)
 	}
+
+	// If the selected data source is lemna, detect and print a concise capability summary
+	if c, ok := w.source.(*lemna.Client); ok {
+		// Best-effort detection; DetectBlastCapabilities is conservative and may rely
+		// on cached release metadata rather than fragile page parsing.
+		cap, err := c.DetectBlastCapabilities(context.Background(), candidate)
+		fmt.Fprintln(w.out)
+		fmt.Fprintln(w.out, "lemna.org capability summary:")
+		if err != nil {
+			fmt.Fprintf(w.out, "  Could not detect capabilities: %v\n", err)
+		} else {
+			// Show available programs as reported by the client helper.
+			progs := c.AvailableBlastPrograms(candidate)
+			if len(progs) > 0 {
+				fmt.Fprintf(w.out, "  Available programs: %s\n", strings.Join(progs, ", "))
+			} else {
+				fmt.Fprintln(w.out, "  Available programs: (none detected)")
+			}
+
+			// Server nucleotide DB capability
+			if cap.HasServerNucleotideDB {
+				fmt.Fprintf(w.out, "  Server BLASTn: available (DB id %d)\n", cap.BlastNDBID)
+			} else {
+				fmt.Fprintln(w.out, "  Server BLASTn: unavailable or no DB id exposed")
+			}
+			if cap.HasNucleotideFasta {
+				fmt.Fprintf(w.out, "  Nucleotide FASTA (local fallback): %s\n", cap.NucleotideFastaURL)
+			}
+
+			// Protein DB / FASTA capability
+			if cap.HasServerProteinDB {
+				fmt.Fprintf(w.out, "  Server protein DB: available (DB id %d)\n", cap.ProteinDBID)
+			} else if cap.HasProteinFasta {
+				fmt.Fprintf(w.out, "  Protein FASTA (local fallback): %s\n", cap.ProteinFastaURL)
+			} else {
+				fmt.Fprintln(w.out, "  Protein DB / FASTA: unavailable")
+			}
+		}
+		fmt.Fprintln(w.out)
+	}
+
 	fmt.Fprintln(w.out)
 	return nil
 }
@@ -530,16 +1776,11 @@ func normalizeBlastSequence(sequence string, kind model.SequenceKind) string {
 	return cleaned
 }
 
-func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastResultRow, querySource *model.QuerySequenceSource) error {
+func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastResultRow, querySource *model.QuerySequenceSource, baseName string) error {
 	fmt.Fprintln(w.out)
 	fmt.Fprintf(w.out, "Preparing export for %d selected rows...\n", len(rows))
 
-	baseName, err := w.prompt.ExportBaseName()
-	if err != nil {
-		return err
-	}
-
-	outputDir, err := applicationDir()
+	outputDir, err := appfs.OutputDir()
 	if err != nil {
 		return err
 	}
@@ -570,16 +1811,11 @@ func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastRe
 	return nil
 }
 
-func (w *BlastWizard) exportKeywordSelections(ctx context.Context, rows []model.KeywordResultRow) error {
+func (w *BlastWizard) exportKeywordSelections(ctx context.Context, rows []model.KeywordResultRow, baseName string) error {
 	fmt.Fprintln(w.out)
 	fmt.Fprintf(w.out, "Preparing keyword export for %d selected rows...\n", len(rows))
 
-	baseName, err := w.prompt.ExportBaseName()
-	if err != nil {
-		return err
-	}
-
-	outputDir, err := applicationDir()
+	outputDir, err := appfs.OutputDir()
 	if err != nil {
 		return err
 	}
@@ -621,75 +1857,110 @@ func (w *BlastWizard) resolveQuerySequenceInput(ctx context.Context, candidates 
 	return nil, false, nil
 }
 
+func (w *BlastWizard) resolveQuerySequenceInputBatch(ctx context.Context, candidates []model.SpeciesCandidate, input string) (*model.QuerySequenceSource, bool, error) {
+	normalizedURL, ok := normalizeGeneReportURL(input)
+	if ok {
+		return w.resolveURLQuerySequenceInputBatch(ctx, candidates, input, normalizedURL)
+	}
+
+	if source, ok := parseFastaQuerySequenceInput(input); ok {
+		return source, true, nil
+	}
+
+	return nil, false, nil
+}
+
 func (w *BlastWizard) resolveURLQuerySequenceInput(ctx context.Context, candidates []model.SpeciesCandidate, input string, normalizedURL string) (*model.QuerySequenceSource, bool, error) {
 	jbrowseName, reportType, identifier, err := parseGeneReportURL(normalizedURL)
 	if err != nil {
 		return nil, false, err
 	}
 
-	species, ok := findSpeciesCandidateByJBrowseName(candidates, jbrowseName)
-	if !ok {
-		return nil, false, fmt.Errorf("could not match gene report species %s to a known proteome", jbrowseName)
+	resolverSource := w.source
+	resolverCandidates, err := w.speciesCandidatesForSource(ctx, resolverSource, candidates)
+	if err != nil {
+		return nil, false, fmt.Errorf("load %s species list for URL resolution: %w", resolverSource.Name(), err)
 	}
 
-	gene, err := withSpinnerValue(w.out, "Resolving gene report URL...", func() (*model.QuerySequenceSource, error) {
-		var gene model.QuerySequenceSource
-		gene.OriginalInputURL = strings.TrimSpace(input)
-		gene.NormalizedURL = normalizedURL
-
-		switch reportType {
-		case "gene":
-			rawGene, err := w.phytozome.FetchGeneByGeneID(ctx, species.ProteomeID, identifier)
-			if err != nil {
-				return nil, err
+	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
+	if !ok {
+		phytozomeSource := phytozome.NewClient(w.httpClient)
+		phytozomeCandidates, loadErr := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
+		if loadErr == nil {
+			if phytozomeSpecies, phytozomeOK := findSpeciesCandidateByJBrowseName(phytozomeCandidates, jbrowseName); phytozomeOK {
+				resolverSource = phytozomeSource
+				species = phytozomeSpecies
+				ok = true
 			}
-			gene.GeneID = rawGene.PrimaryIdentifier
-			transcript, err := rawGene.PrimaryTranscript("")
-			if err != nil {
-				return nil, err
-			}
-			sequence, err := w.phytozome.FetchProteinSequence(ctx, transcript.SecondaryIdentifier)
-			if err != nil {
-				return nil, err
-			}
-			gene.Sequence = sequence
-			gene.TranscriptID = transcript.PrimaryIdentifier
-			gene.ProteinID = transcript.Protein
-			gene.OrganismShort = rawGene.OrganismShortName()
-			gene.Annotation = rawGene.AnnotationVersion()
-		case "transcript":
-			rawGene, err := w.phytozome.FetchGeneByTranscript(ctx, species.ProteomeID, identifier)
-			if err != nil {
-				return nil, err
-			}
-			gene.GeneID = rawGene.PrimaryIdentifier
-			transcript, err := rawGene.PrimaryTranscript(identifier)
-			if err != nil {
-				return nil, err
-			}
-			sequence, err := w.phytozome.FetchProteinSequence(ctx, transcript.SecondaryIdentifier)
-			if err != nil {
-				return nil, err
-			}
-			gene.Sequence = sequence
-			gene.TranscriptID = transcript.PrimaryIdentifier
-			gene.ProteinID = transcript.Protein
-			gene.OrganismShort = rawGene.OrganismShortName()
-			gene.Annotation = rawGene.AnnotationVersion()
-		default:
-			return nil, fmt.Errorf("unsupported report URL type %q", reportType)
 		}
-		if gene.GeneID == "" {
-			gene.GeneID = identifier
-		}
+	}
+	if !ok {
+		return nil, false, fmt.Errorf("could not match gene report species %s to a known species in %s or phytozome", jbrowseName, w.source.Name())
+	}
 
-		return &gene, nil
+	resolveLabel := databaseDisplayName(resolverSource.Name())
+	gene, err := withSpinnerValue(w.out, "Resolving "+resolveLabel+" gene report URL...", func() (*model.QuerySequenceSource, error) {
+		return w.resolveGeneReportSequence(ctx, resolverSource, species, reportType, identifier, input, normalizedURL)
 	})
 	if err != nil {
 		return nil, false, err
 	}
 
 	return gene, true, nil
+}
+
+func (w *BlastWizard) resolveURLQuerySequenceInputBatch(ctx context.Context, candidates []model.SpeciesCandidate, input string, normalizedURL string) (*model.QuerySequenceSource, bool, error) {
+	jbrowseName, reportType, identifier, err := parseGeneReportURL(normalizedURL)
+	if err != nil {
+		return nil, false, err
+	}
+
+	resolverSource := w.source
+	resolverCandidates, err := w.speciesCandidatesForSource(ctx, resolverSource, candidates)
+	if err != nil {
+		return nil, false, fmt.Errorf("load %s species list for URL resolution: %w", resolverSource.Name(), err)
+	}
+
+	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
+	if !ok {
+		phytozomeSource := phytozome.NewClient(w.httpClient)
+		phytozomeCandidates, loadErr := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
+		if loadErr == nil {
+			if phytozomeSpecies, phytozomeOK := findSpeciesCandidateByJBrowseName(phytozomeCandidates, jbrowseName); phytozomeOK {
+				resolverSource = phytozomeSource
+				species = phytozomeSpecies
+				ok = true
+			}
+		}
+	}
+	if !ok {
+		return nil, false, fmt.Errorf("could not match gene report species %s to a known species in %s or phytozome", jbrowseName, w.source.Name())
+	}
+
+	gene, err := w.resolveGeneReportSequence(ctx, resolverSource, species, reportType, identifier, input, normalizedURL)
+	if err != nil {
+		return nil, false, err
+	}
+	return gene, true, nil
+}
+
+func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSource source.DataSource, species model.SpeciesCandidate, reportType, identifier, input, normalizedURL string) (*model.QuerySequenceSource, error) {
+	switch reportType {
+	case "gene", "transcript":
+		resolved, err := resolverSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
+		if err != nil {
+			return nil, err
+		}
+		gene := *resolved
+		gene.OriginalInputURL = strings.TrimSpace(input)
+		gene.NormalizedURL = normalizedURL
+		if gene.GeneID == "" {
+			gene.GeneID = identifier
+		}
+		return &gene, nil
+	default:
+		return nil, fmt.Errorf("unsupported report URL type %q", reportType)
+	}
 }
 
 func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []model.BlastResultRow) ([]model.ProteinSequenceRecord, error) {
@@ -705,38 +1976,30 @@ func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []mo
 		progress.Finish("")
 	}()
 
-	for i, row := range rows {
-		progress.Set(i)
-		cacheKey := fmt.Sprintf("%d:%s", row.TargetID, row.Protein)
+	results := w.prefetchBlastSequences(ctx, rows, progress)
+
+	for _, row := range rows {
+		sequenceID := firstNonEmpty(row.SequenceID, row.TranscriptID, row.Protein)
+		cacheKey := fmt.Sprintf("%d:%s", row.TargetID, sequenceID)
 
 		sequence, ok := cache[cacheKey]
 		if !ok {
-			// If the parsed row contains an invalid TargetID (0), prompt the user before attempting any fetch.
-			if row.TargetID == 0 {
-				action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("row has invalid TargetID=0 for protein %s", row.Protein))
-				if aerr != nil {
-					return nil, aerr
-				}
-				switch action {
-				case "retry":
-					// User chose to retry: fall through to the normal fetch loop (it will likely fail and re-prompt).
-				case "skip":
-					// Skip this row entirely.
-					goto SKIP_ROW
-				case "abort":
-					return nil, fmt.Errorf("aborted by user due to invalid TargetID for protein %s", row.Protein)
-				default:
-					// Defensive: treat unknown as abort.
-					return nil, fmt.Errorf("aborted due to unknown action for invalid TargetID for protein %s", row.Protein)
-				}
+			if prefetched, exists := results[cacheKey]; exists && prefetched.err == nil {
+				sequence = prefetched.sequence
+				cache[cacheKey] = sequence
+				ok = true
 			}
+		}
 
-			// Interactive fetch loop: allow retry/skip/abort when remote fetch fails.
+		if !ok {
+			// Interactive fetch loop: allow retry/skip/back/exit when remote fetch fails.
 			for {
-				gene, err := w.phytozome.FetchGeneByProtein(ctx, row.TargetID, row.Protein)
-				if err != nil {
-					// Ask user what to do on gene fetch error
-					action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("gene for protein %s in proteome %d: %v", row.Protein, row.TargetID, err))
+				var fetchErr error
+				fetchCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
+				sequence, fetchErr = w.source.FetchProteinSequence(fetchCtx, row.TargetID, sequenceID)
+				cancel()
+				if fetchErr != nil {
+					action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("protein sequence for %s: %v", sequenceID, fetchErr), prompt.ErrBackToRowSelection)
 					if aerr != nil {
 						return nil, aerr
 					}
@@ -747,35 +2010,14 @@ func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []mo
 					case "skip":
 						// do not include this row
 						goto SKIP_ROW
-					case "abort":
-						return nil, fmt.Errorf("aborted by user after fetch gene error: %w", err)
+					case "back":
+						return nil, prompt.ErrBackToRowSelection
+					case "exit":
+						return nil, prompt.ErrExitRequested
 					default:
-						// defensive: treat unknown as abort
-						return nil, fmt.Errorf("aborted due to unknown action after fetch gene error: %w", err)
+						return nil, fmt.Errorf("exited due to unknown recovery action after fetch sequence error: %w", fetchErr)
 					}
 				}
-
-				// fetch protein sequence for the transcript id
-				sequence, err = w.phytozome.FetchProteinSequence(ctx, gene.ID)
-				if err != nil {
-					action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("protein sequence for transcript id %s: %v", gene.ID, err))
-					if aerr != nil {
-						return nil, aerr
-					}
-					switch action {
-					case "retry":
-						// try again (this will re-run gene fetch + sequence fetch)
-						continue
-					case "skip":
-						goto SKIP_ROW
-					case "abort":
-						return nil, fmt.Errorf("aborted by user after fetch sequence error: %w", err)
-					default:
-						return nil, fmt.Errorf("aborted due to unknown action after fetch sequence error: %w", err)
-					}
-				}
-
-				// success: cache and proceed
 				cache[cacheKey] = sequence
 				break
 			}
@@ -811,11 +2053,12 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 		progress.Finish("")
 	}()
 
-	for i, row := range rows {
-		progress.Set(i)
+	results := w.prefetchKeywordSequences(ctx, rows, progress)
+
+	for _, row := range rows {
 		sequenceID := strings.TrimSpace(row.SequenceID)
 		if sequenceID == "" {
-			action, err := w.prompt.FetchErrorAction(fmt.Sprintf("keyword row %s is missing sequence id", row.TranscriptID))
+			action, err := w.prompt.FetchErrorAction(fmt.Sprintf("keyword row %s is missing sequence id", row.TranscriptID), prompt.ErrBackToRowSelection)
 			if err != nil {
 				return nil, err
 			}
@@ -824,22 +2067,36 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 				continue
 			case "skip":
 				continue
+			case "back":
+				return nil, prompt.ErrBackToRowSelection
+			case "exit":
+				return nil, prompt.ErrExitRequested
 			default:
-				return nil, fmt.Errorf("aborted by user because keyword row %s is missing sequence id", row.TranscriptID)
+				return nil, fmt.Errorf("exited because keyword row %s is missing sequence id", row.TranscriptID)
 			}
 		}
 
 		sequence, ok := cache[sequenceID]
 		if !ok {
+			if prefetched, exists := results[sequenceID]; exists && prefetched.err == nil {
+				sequence = prefetched.sequence
+				cache[sequenceID] = sequence
+				ok = true
+			}
+		}
+
+		if !ok {
 			for {
 				var err error
-				sequence, err = w.phytozome.FetchProteinSequence(ctx, sequenceID)
+				fetchCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
+				sequence, err = w.source.FetchProteinSequence(fetchCtx, 0, sequenceID)
+				cancel()
 				if err == nil {
 					cache[sequenceID] = sequence
 					break
 				}
 
-				action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("protein sequence for keyword row %s: %v", row.TranscriptID, err))
+				action, aerr := w.prompt.FetchErrorAction(fmt.Sprintf("protein sequence for keyword row %s: %v", row.TranscriptID, err), prompt.ErrBackToRowSelection)
 				if aerr != nil {
 					return nil, aerr
 				}
@@ -848,8 +2105,12 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 					continue
 				case "skip":
 					goto NEXT_KEYWORD_ROW
+				case "back":
+					return nil, prompt.ErrBackToRowSelection
+				case "exit":
+					return nil, prompt.ErrExitRequested
 				default:
-					return nil, fmt.Errorf("aborted by user after keyword sequence fetch error: %w", err)
+					return nil, fmt.Errorf("exited after keyword sequence fetch error: %w", err)
 				}
 			}
 		}
@@ -867,20 +2128,129 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 	return records, nil
 }
 
-func applicationDir() (string, error) {
-	executablePath, err := os.Executable()
-	if err == nil {
-		executableDir := filepath.Dir(executablePath)
-		if !strings.Contains(strings.ToLower(executableDir), strings.ToLower(os.TempDir())) {
-			return executableDir, nil
-		}
+func (w *BlastWizard) prefetchBlastSequences(ctx context.Context, rows []model.BlastResultRow, progress *ui.ProgressBar) map[string]sequenceFetchResult {
+	type fetchTask struct {
+		key      string
+		targetID int
+		id       string
 	}
 
-	workingDir, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve application directory: %w", err)
+	taskByKey := make(map[string]fetchTask, len(rows))
+	for _, row := range rows {
+		sequenceID := firstNonEmpty(row.SequenceID, row.TranscriptID, row.Protein)
+		if sequenceID == "" {
+			continue
+		}
+		key := fmt.Sprintf("%d:%s", row.TargetID, sequenceID)
+		taskByKey[key] = fetchTask{key: key, targetID: row.TargetID, id: sequenceID}
 	}
-	return workingDir, nil
+
+	results := make(map[string]sequenceFetchResult, len(taskByKey))
+	if len(taskByKey) == 0 {
+		return results
+	}
+
+	tasks := make([]fetchTask, 0, len(taskByKey))
+	for _, task := range taskByKey {
+		tasks = append(tasks, task)
+	}
+
+	var mu sync.Mutex
+	jobs := make(chan fetchTask)
+	done := make(chan struct{}, len(tasks))
+	workerCount := parallelismFor(len(tasks), maxParallelFetchJobs)
+
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for task := range jobs {
+				fetchCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
+				sequence, err := w.source.FetchProteinSequence(fetchCtx, task.targetID, task.id)
+				cancel()
+				mu.Lock()
+				results[task.key] = sequenceFetchResult{sequence: sequence, err: err}
+				mu.Unlock()
+				done <- struct{}{}
+			}
+		}()
+	}
+
+	go func() {
+		for _, task := range tasks {
+			jobs <- task
+		}
+		close(jobs)
+		workers.Wait()
+		close(done)
+	}()
+
+	completedCount := 0
+	for range done {
+		completedCount++
+		progress.Set(completedCount)
+	}
+	return results
+}
+
+func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model.KeywordResultRow, progress *ui.ProgressBar) map[string]sequenceFetchResult {
+	taskIDs := make([]string, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		sequenceID := strings.TrimSpace(row.SequenceID)
+		if sequenceID == "" {
+			continue
+		}
+		if _, ok := seen[sequenceID]; ok {
+			continue
+		}
+		seen[sequenceID] = struct{}{}
+		taskIDs = append(taskIDs, sequenceID)
+	}
+
+	results := make(map[string]sequenceFetchResult, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return results
+	}
+
+	var mu sync.Mutex
+	jobs := make(chan string)
+	done := make(chan struct{}, len(taskIDs))
+	workerCount := parallelismFor(len(taskIDs), maxParallelFetchJobs)
+
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for sequenceID := range jobs {
+				fetchCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
+				sequence, err := w.source.FetchProteinSequence(fetchCtx, 0, sequenceID)
+				cancel()
+				mu.Lock()
+				results[sequenceID] = sequenceFetchResult{sequence: sequence, err: err}
+				mu.Unlock()
+				done <- struct{}{}
+			}
+		}()
+	}
+
+	go func() {
+		for _, sequenceID := range taskIDs {
+			jobs <- sequenceID
+		}
+		close(jobs)
+		workers.Wait()
+		close(done)
+	}()
+
+	completedCount := 0
+	for range done {
+		completedCount++
+		progress.Set(completedCount)
+	}
+	return results
 }
 
 func buildExportMetadata(baseName string, querySource *model.QuerySequenceSource) *model.ExportMetadata {
@@ -891,7 +2261,7 @@ func buildExportMetadata(baseName string, querySource *model.QuerySequenceSource
 	return &model.ExportMetadata{
 		GeneName:      baseName,
 		GeneID:        querySource.GeneID,
-		GeneReportURL: querySource.NormalizedURL,
+		GeneReportURL: firstNonEmpty(querySource.OriginalInputURL, querySource.NormalizedURL),
 	}
 }
 
@@ -919,7 +2289,7 @@ func buildQuerySequenceLabel(organismShort string, baseName string) string {
 	if baseName == "" {
 		return ""
 	}
-	if organismShort == "A.thaliana" && !strings.HasPrefix(strings.ToLower(baseName), "at") {
+	if strings.EqualFold(strings.TrimSpace(organismShort), "A.thaliana") && !strings.HasPrefix(strings.ToLower(baseName), "at") {
 		return "At" + baseName
 	}
 	return baseName
@@ -949,9 +2319,17 @@ func buildQuerySequenceHeaderID(querySource *model.QuerySequenceSource) string {
 	return parts[0] + "|" + id
 }
 
-func describeQuerySource(source *model.QuerySequenceSource) string {
+func describeQuerySource(source *model.QuerySequenceSource, targetDatabase string) string {
 	switch {
 	case source.NormalizedURL != "":
+		sourceDatabase := databaseDisplayName(firstNonEmpty(source.SourceDatabase, inferSourceDatabaseFromURL(source.NormalizedURL)))
+		targetDatabase = databaseDisplayName(targetDatabase)
+		if sourceDatabase != "" && targetDatabase != "" && !strings.EqualFold(sourceDatabase, targetDatabase) {
+			return fmt.Sprintf("Resolved peptide sequence from a %s gene report URL. The sequence will be fetched from %s and searched against the selected %s species.", sourceDatabase, sourceDatabase, targetDatabase)
+		}
+		if sourceDatabase != "" {
+			return fmt.Sprintf("Resolved peptide sequence from a %s gene report URL.", sourceDatabase)
+		}
 		return "Resolved peptide sequence from gene report URL."
 	case source.TranscriptID != "" || source.ProteinID != "" || source.GeneID != "":
 		return "Resolved query metadata from FASTA header."
@@ -990,6 +2368,32 @@ func normalizeGeneReportURL(input string) (string, bool) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), true
+}
+
+func inferSourceDatabaseFromURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(parsed.Host)) {
+	case "phytozome-next.jgi.doe.gov":
+		return "phytozome"
+	case "www.lemna.org", "lemna.org":
+		return "lemna"
+	default:
+		return ""
+	}
+}
+
+func databaseDisplayName(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "phytozome":
+		return "Phytozome"
+	case "lemna":
+		return "lemna.org"
+	default:
+		return strings.TrimSpace(name)
+	}
 }
 
 func parseGeneReportURL(rawURL string) (jbrowseName string, reportType string, identifier string, err error) {
@@ -1194,8 +2598,28 @@ func stripTranscriptSuffix(value string) string {
 	return value[:lastDot]
 }
 
-func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.SpeciesCandidate, keywords []string) ([]model.KeywordSearchGroup, error) {
-	groups := make([]model.KeywordSearchGroup, 0, len(keywords))
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string) ([]model.KeywordSearchGroup, error) {
+	if len(identifications) != 0 && len(identifications) != len(keywords) {
+		return nil, fmt.Errorf("keyword Protein Identification count %d does not match keyword count %d", len(identifications), len(keywords))
+	}
+
+	type keywordSearchResult struct {
+		index int
+		rows  []model.KeywordResultRow
+		err   error
+	}
+
+	groups := make([]model.KeywordSearchGroup, len(keywords))
 	progress := ui.NewProgressBar(w.out, "Searching keyword terms...", len(keywords))
 	completed := false
 	defer func() {
@@ -1205,20 +2629,84 @@ func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.Spe
 		}
 		progress.Finish("")
 	}()
-	for i, keyword := range keywords {
-		progress.Set(i)
-		rows, err := w.phytozome.SearchKeywordRows(ctx, species, keyword)
-		if err != nil {
-			return nil, err
+
+	results := make([]keywordSearchResult, len(keywords))
+	jobs := make(chan int)
+	outcomes := make(chan keywordSearchResult, len(keywords))
+	workerCount := parallelismFor(len(keywords), maxParallelKeywordJobs)
+
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for idx := range jobs {
+				rows, err := w.searchKeywordRowsWithTimeout(ctx, species, keywords[idx])
+				outcomes <- keywordSearchResult{index: idx, rows: rows, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		for i := range keywords {
+			jobs <- i
 		}
-		groups = append(groups, model.KeywordSearchGroup{
-			SearchTerm: keyword,
-			Rows:       rows,
-		})
+		close(jobs)
+		workers.Wait()
+		close(outcomes)
+	}()
+
+	doneCount := 0
+	for result := range outcomes {
+		results[result.index] = result
+		doneCount++
+		progress.Set(doneCount)
+	}
+
+	for i, keyword := range keywords {
+		rows := results[i].rows
+		err := results[i].err
+		for err != nil {
+			action, actionErr := w.prompt.FetchErrorAction(fmt.Sprintf("keyword %d/%d (%s): %v", i+1, len(keywords), keyword, err), prompt.ErrBackToQueryInput)
+			if actionErr != nil {
+				return nil, actionErr
+			}
+			switch action {
+			case "retry":
+				rows, err = w.searchKeywordRowsWithTimeout(ctx, species, keyword)
+				continue
+			case "skip":
+				rows = nil
+				err = nil
+			case "exit":
+				return nil, prompt.ErrExitRequested
+			default:
+				return nil, fmt.Errorf("unsupported keyword recovery action %q", action)
+			}
+		}
+		proteinIdentification := ""
+		if len(identifications) == len(keywords) {
+			proteinIdentification = identifications[i]
+		}
+		for idx := range rows {
+			rows[idx].SearchTerm = keyword
+			rows[idx].ProteinIdentification = proteinIdentification
+		}
+		groups[i] = model.KeywordSearchGroup{
+			SearchTerm:            keyword,
+			ProteinIdentification: proteinIdentification,
+			Rows:                  rows,
+		}
 	}
 	progress.Set(len(keywords))
 	completed = true
 	return groups, nil
+}
+
+func (w *BlastWizard) searchKeywordRowsWithTimeout(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	searchCtx, cancel := context.WithTimeout(ctx, keywordSearchTimeout)
+	defer cancel()
+	return w.source.SearchKeywordRows(searchCtx, species, keyword)
 }
 
 func (w *BlastWizard) waitForBlastResultsWithProgress(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
@@ -1229,7 +2717,7 @@ func (w *BlastWizard) waitForBlastResultsWithProgress(ctx context.Context, jobID
 
 	done := make(chan resultPayload, 1)
 	go func() {
-		result, err := w.phytozome.WaitForBlastResults(ctx, jobID, pollInterval, timeout)
+		result, err := w.source.WaitForBlastResults(ctx, jobID, pollInterval, timeout)
 		done <- resultPayload{result: result, err: err}
 	}()
 

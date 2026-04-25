@@ -1,5 +1,7 @@
 bin/
 dist/
+.cache/
+output/
 *.exe
 *.dll
 *.so

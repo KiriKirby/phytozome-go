@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"golang.org/x/sync/singleflight"
 )
 
 const projectOverviewURL = "https://phytozome-next.jgi.doe.gov/api/content/project/phytozome"
@@ -43,6 +44,7 @@ type Client struct {
 	geneRecordCache        map[string]geneRecord
 	proteinSequenceCache   map[string]string
 	keywordRowsCache       map[string][]model.KeywordResultRow
+	sf                     singleflight.Group
 }
 
 func NewClient(httpClient *http.Client) *Client {
@@ -57,6 +59,10 @@ func NewClient(httpClient *http.Client) *Client {
 	}
 }
 
+func (c *Client) Name() string {
+	return "Phytozome"
+}
+
 func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
 	c.mu.RLock()
 	if len(c.speciesCandidatesCache) > 0 {
@@ -66,46 +72,60 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 	}
 	c.mu.RUnlock()
 
-	type targetResult struct {
-		targets map[string]targetRecord
-		err     error
+	value, err, _ := c.sf.Do("species-candidates", func() (any, error) {
+		c.mu.RLock()
+		if len(c.speciesCandidatesCache) > 0 {
+			cached := append([]model.SpeciesCandidate(nil), c.speciesCandidatesCache...)
+			c.mu.RUnlock()
+			return cached, nil
+		}
+		c.mu.RUnlock()
+
+		type targetResult struct {
+			targets map[string]targetRecord
+			err     error
+		}
+		type releaseResult struct {
+			releaseDates map[string]string
+			err          error
+		}
+
+		targetCh := make(chan targetResult, 1)
+		releaseCh := make(chan releaseResult, 1)
+
+		go func() {
+			targets, err := c.fetchTargetRecords(ctx)
+			targetCh <- targetResult{targets: targets, err: err}
+		}()
+		go func() {
+			releaseDates, err := c.fetchReleaseDates(ctx)
+			releaseCh <- releaseResult{releaseDates: releaseDates, err: err}
+		}()
+
+		targetsResult := <-targetCh
+		if targetsResult.err != nil {
+			return nil, targetsResult.err
+		}
+		releaseResultValue := <-releaseCh
+		if releaseResultValue.err != nil {
+			return nil, releaseResultValue.err
+		}
+
+		candidates := candidatesFromTargets(targetsResult.targets, releaseResultValue.releaseDates)
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("no species candidates found in target records")
+		}
+
+		c.mu.Lock()
+		c.speciesCandidatesCache = append([]model.SpeciesCandidate(nil), candidates...)
+		c.mu.Unlock()
+
+		return append([]model.SpeciesCandidate(nil), candidates...), nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	type releaseResult struct {
-		releaseDates map[string]string
-		err          error
-	}
-
-	targetCh := make(chan targetResult, 1)
-	releaseCh := make(chan releaseResult, 1)
-
-	go func() {
-		targets, err := c.fetchTargetRecords(ctx)
-		targetCh <- targetResult{targets: targets, err: err}
-	}()
-	go func() {
-		releaseDates, err := c.fetchReleaseDates(ctx)
-		releaseCh <- releaseResult{releaseDates: releaseDates, err: err}
-	}()
-
-	targetsResult := <-targetCh
-	if targetsResult.err != nil {
-		return nil, targetsResult.err
-	}
-	releaseResultValue := <-releaseCh
-	if releaseResultValue.err != nil {
-		return nil, releaseResultValue.err
-	}
-
-	candidates := candidatesFromTargets(targetsResult.targets, releaseResultValue.releaseDates)
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no species candidates found in target records")
-	}
-
-	c.mu.Lock()
-	c.speciesCandidatesCache = append([]model.SpeciesCandidate(nil), candidates...)
-	c.mu.Unlock()
-
-	return append([]model.SpeciesCandidate(nil), candidates...), nil
+	return value.([]model.SpeciesCandidate), nil
 }
 
 func (c *Client) fetchReleaseDates(ctx context.Context) (map[string]string, error) {

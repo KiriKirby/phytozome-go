@@ -13,6 +13,7 @@ type ExportMetadata struct {
 
 type KeywordResultRow struct {
 	SearchTerm          string
+	ProteinIdentification string
 	TranscriptID        string
 	GeneIdentifier      string
 	Genome              string
@@ -25,17 +26,20 @@ type KeywordResultRow struct {
 	GeneReportURL       string
 	SequenceHeaderLabel string
 	SequenceID          string
+	ExtraColumns        map[string]string
 }
 
 type KeywordSearchGroup struct {
-	SearchTerm string
-	Rows       []KeywordResultRow
+	SearchTerm            string
+	ProteinIdentification string
+	Rows                  []KeywordResultRow
 }
 
 type QuerySequenceSource struct {
 	Sequence         string
 	OriginalInputURL string
 	NormalizedURL    string
+	SourceDatabase   string
 	GeneID           string
 	TranscriptID     string
 	ProteinID        string

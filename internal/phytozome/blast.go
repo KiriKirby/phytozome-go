@@ -476,42 +476,86 @@ func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, descrip
 		return cached, nil
 	}
 	c.mu.RUnlock()
+	if cached, ok := readCachedJSON[geneRecord]("gene-records", requestURL); ok && cached.ID != "" {
+		c.mu.Lock()
+		c.geneRecordCache[requestURL] = cached
+		c.mu.Unlock()
+		return cached, nil
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	value, err, _ := c.sf.Do("gene:"+requestURL, func() (any, error) {
+		c.mu.RLock()
+		if cached, ok := c.geneRecordCache[requestURL]; ok {
+			c.mu.RUnlock()
+			return cached, nil
+		}
+		c.mu.RUnlock()
+		if cached, ok := readCachedJSON[geneRecord]("gene-records", requestURL); ok && cached.ID != "" {
+			c.mu.Lock()
+			c.geneRecordCache[requestURL] = cached
+			c.mu.Unlock()
+			return cached, nil
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return geneRecord{}, fmt.Errorf("create gene request: %w", err)
+		}
+
+		resp, err := c.baseHTTP.Do(req)
+		if err != nil {
+			return geneRecord{}, fmt.Errorf("fetch gene record for %s: %w", description, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNoContent {
+			return geneRecord{}, fmt.Errorf("no gene record for %s", description)
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return geneRecord{}, fmt.Errorf("fetch gene record for %s: status %s body %s", description, resp.Status, strings.TrimSpace(string(body)))
+		}
+
+		var gene geneRecord
+		if err := json.NewDecoder(resp.Body).Decode(&gene); err != nil {
+			return geneRecord{}, fmt.Errorf("decode gene response for %s: %w", description, err)
+		}
+		if gene.ID == "" {
+			return geneRecord{}, fmt.Errorf("gene response missing _id for %s", description)
+		}
+
+		c.mu.Lock()
+		c.geneRecordCache[requestURL] = gene
+		c.mu.Unlock()
+		writeCachedJSON("gene-records", requestURL, gene)
+
+		return gene, nil
+	})
 	if err != nil {
-		return geneRecord{}, fmt.Errorf("create gene request: %w", err)
+		return geneRecord{}, err
 	}
-
-	resp, err := c.baseHTTP.Do(req)
-	if err != nil {
-		return geneRecord{}, fmt.Errorf("fetch gene record for %s: %w", description, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNoContent {
-		return geneRecord{}, fmt.Errorf("no gene record for %s", description)
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return geneRecord{}, fmt.Errorf("fetch gene record for %s: status %s body %s", description, resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	var gene geneRecord
-	if err := json.NewDecoder(resp.Body).Decode(&gene); err != nil {
-		return geneRecord{}, fmt.Errorf("decode gene response for %s: %w", description, err)
-	}
-	if gene.ID == "" {
-		return geneRecord{}, fmt.Errorf("gene response missing _id for %s", description)
-	}
-
-	c.mu.Lock()
-	c.geneRecordCache[requestURL] = gene
-	c.mu.Unlock()
-
-	return gene, nil
+	return value.(geneRecord), nil
 }
 
-func (c *Client) FetchProteinSequence(ctx context.Context, transcriptInternalID string) (string, error) {
+func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
+	sequenceID = strings.TrimSpace(sequenceID)
+	if sequenceID == "" {
+		return "", fmt.Errorf("empty protein sequence id")
+	}
+	if sequence, err := c.fetchProteinSequenceByTranscript(ctx, sequenceID); err == nil {
+		return sequence, nil
+	}
+	if targetID == 0 {
+		return "", fmt.Errorf("no target proteome id available to resolve protein %s", sequenceID)
+	}
+	gene, err := c.FetchGeneByProtein(ctx, targetID, sequenceID)
+	if err != nil {
+		return "", err
+	}
+	return c.fetchProteinSequenceByTranscript(ctx, gene.ID)
+}
+
+func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcriptInternalID string) (string, error) {
 	transcriptInternalID = strings.TrimSpace(transcriptInternalID)
 	c.mu.RLock()
 	if cached, ok := c.proteinSequenceCache[transcriptInternalID]; ok {
@@ -519,41 +563,120 @@ func (c *Client) FetchProteinSequence(ctx context.Context, transcriptInternalID 
 		return cached, nil
 	}
 	c.mu.RUnlock()
+	if cached, ok := readCachedText("protein-sequences", transcriptInternalID); ok && strings.TrimSpace(cached) != "" {
+		c.mu.Lock()
+		c.proteinSequenceCache[transcriptInternalID] = cached
+		c.mu.Unlock()
+		return cached, nil
+	}
 
-	requestURL := "https://phytozome-next.jgi.doe.gov/api/db/sequence/protein/" + url.PathEscape(transcriptInternalID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	value, err, _ := c.sf.Do("protein-seq:"+transcriptInternalID, func() (any, error) {
+		c.mu.RLock()
+		if cached, ok := c.proteinSequenceCache[transcriptInternalID]; ok {
+			c.mu.RUnlock()
+			return cached, nil
+		}
+		c.mu.RUnlock()
+		if cached, ok := readCachedText("protein-sequences", transcriptInternalID); ok && strings.TrimSpace(cached) != "" {
+			c.mu.Lock()
+			c.proteinSequenceCache[transcriptInternalID] = cached
+			c.mu.Unlock()
+			return cached, nil
+		}
+
+		requestURL := "https://phytozome-next.jgi.doe.gov/api/db/sequence/protein/" + url.PathEscape(transcriptInternalID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("create protein sequence request: %w", err)
+		}
+
+		resp, err := c.baseHTTP.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("fetch protein sequence: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNoContent {
+			return "", fmt.Errorf("no protein sequence for transcript id %s", transcriptInternalID)
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return "", fmt.Errorf("fetch protein sequence: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
+		}
+
+		var payload proteinSequenceResponse
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			return "", fmt.Errorf("decode protein sequence response: %w", err)
+		}
+		if len(payload) == 0 || strings.TrimSpace(payload[0].Residues) == "" {
+			return "", fmt.Errorf("protein sequence response empty for transcript id %s", transcriptInternalID)
+		}
+		residues := strings.TrimSpace(payload[0].Residues)
+
+		c.mu.Lock()
+		c.proteinSequenceCache[transcriptInternalID] = residues
+		c.mu.Unlock()
+		writeCachedText("protein-sequences", transcriptInternalID, residues)
+
+		return residues, nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("create protein sequence request: %w", err)
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
+	var gene model.QuerySequenceSource
+	gene.SourceDatabase = c.Name()
+
+	switch reportType {
+	case "gene":
+		rawGene, err := c.FetchGeneByGeneID(ctx, species.ProteomeID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		gene.GeneID = rawGene.PrimaryIdentifier
+		transcript, err := rawGene.PrimaryTranscript("")
+		if err != nil {
+			return nil, err
+		}
+		sequence, err := c.fetchProteinSequenceByTranscript(ctx, transcript.SecondaryIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		gene.Sequence = sequence
+		gene.TranscriptID = transcript.PrimaryIdentifier
+		gene.ProteinID = transcript.Protein
+		gene.OrganismShort = rawGene.OrganismShortName()
+		gene.Annotation = rawGene.AnnotationVersion()
+	case "transcript":
+		rawGene, err := c.FetchGeneByTranscript(ctx, species.ProteomeID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		gene.GeneID = rawGene.PrimaryIdentifier
+		transcript, err := rawGene.PrimaryTranscript(identifier)
+		if err != nil {
+			return nil, err
+		}
+		sequence, err := c.fetchProteinSequenceByTranscript(ctx, transcript.SecondaryIdentifier)
+		if err != nil {
+			return nil, err
+		}
+		gene.Sequence = sequence
+		gene.TranscriptID = transcript.PrimaryIdentifier
+		gene.ProteinID = transcript.Protein
+		gene.OrganismShort = rawGene.OrganismShortName()
+		gene.Annotation = rawGene.AnnotationVersion()
+	default:
+		return nil, fmt.Errorf("unsupported report URL type %q", reportType)
+	}
+	if gene.GeneID == "" {
+		gene.GeneID = identifier
 	}
 
-	resp, err := c.baseHTTP.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch protein sequence: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNoContent {
-		return "", fmt.Errorf("no protein sequence for transcript id %s", transcriptInternalID)
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("fetch protein sequence: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	var payload proteinSequenceResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode protein sequence response: %w", err)
-	}
-	if len(payload) == 0 || strings.TrimSpace(payload[0].Residues) == "" {
-		return "", fmt.Errorf("protein sequence response empty for transcript id %s", transcriptInternalID)
-	}
-	residues := strings.TrimSpace(payload[0].Residues)
-
-	c.mu.Lock()
-	c.proteinSequenceCache[transcriptInternalID] = residues
-	c.mu.Unlock()
-
-	return residues, nil
+	return &gene, nil
 }
 
 func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
@@ -643,58 +766,89 @@ func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCan
 		return rows, nil
 	}
 	c.mu.RUnlock()
-
-	seen := make(map[string]struct{})
-	genes := make([]geneRecord, 0, 8)
-
-	addGene := func(gene geneRecord) {
-		key := strings.TrimSpace(gene.PrimaryIdentifier) + "|" + strconv.Itoa(gene.ProteomeID())
-		if key == "|" {
-			return
-		}
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		genes = append(genes, gene)
+	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+		rows := append([]model.KeywordResultRow(nil), cached...)
+		c.mu.Lock()
+		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
+		c.mu.Unlock()
+		return rows, nil
 	}
 
-	if looksLikeSpecificGeneIdentifier(keyword) {
-		for _, variant := range specificIdentifierVariants(keyword) {
-			if gene, err := c.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
+	value, err, _ := c.sf.Do("keyword-rows:"+cacheKey, func() (any, error) {
+		c.mu.RLock()
+		if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+			rows := append([]model.KeywordResultRow(nil), cached...)
+			c.mu.RUnlock()
+			return rows, nil
+		}
+		c.mu.RUnlock()
+		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+			rows := append([]model.KeywordResultRow(nil), cached...)
+			c.mu.Lock()
+			c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
+			c.mu.Unlock()
+			return rows, nil
+		}
+
+		seen := make(map[string]struct{})
+		genes := make([]geneRecord, 0, 8)
+
+		addGene := func(gene geneRecord) {
+			key := strings.TrimSpace(gene.PrimaryIdentifier) + "|" + strconv.Itoa(gene.ProteomeID())
+			if key == "|" {
+				return
+			}
+			if _, ok := seen[key]; ok {
+				return
+			}
+			seen[key] = struct{}{}
+			genes = append(genes, gene)
+		}
+
+		if looksLikeSpecificGeneIdentifier(keyword) {
+			for _, variant := range specificIdentifierVariants(keyword) {
+				if gene, err := c.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
+					addGene(gene)
+					continue
+				}
+				if gene, err := c.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
+					addGene(gene)
+					continue
+				}
+				if gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
+					addGene(gene)
+				}
+			}
+		}
+
+		if len(genes) == 0 {
+			matches, err := c.SearchGenesByKeyword(ctx, species.ProteomeID, keyword, 20)
+			if err != nil {
+				return nil, err
+			}
+			for _, gene := range matches {
 				addGene(gene)
 			}
-			if gene, err := c.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
-				addGene(gene)
-			}
-			if gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
-				addGene(gene)
-			}
 		}
-	}
 
-	if len(genes) == 0 {
-		matches, err := c.SearchGenesByKeyword(ctx, species.ProteomeID, keyword, 20)
-		if err != nil {
-			return nil, err
+		rows := make([]model.KeywordResultRow, 0, len(genes))
+		for _, gene := range genes {
+			row, err := buildKeywordResultRow(keyword, species, gene)
+			if err != nil {
+				continue
+			}
+			rows = append(rows, row)
 		}
-		for _, gene := range matches {
-			addGene(gene)
-		}
+		c.mu.Lock()
+		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
+		c.mu.Unlock()
+		writeCachedJSON("keyword-rows", cacheKey, rows)
+		return rows, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	rows := make([]model.KeywordResultRow, 0, len(genes))
-	for _, gene := range genes {
-		row, err := buildKeywordResultRow(keyword, species, gene)
-		if err != nil {
-			continue
-		}
-		rows = append(rows, row)
-	}
-	c.mu.Lock()
-	c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
-	c.mu.Unlock()
-	return rows, nil
+	return value.([]model.KeywordResultRow), nil
 }
 
 func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, gene geneRecord) (model.KeywordResultRow, error) {

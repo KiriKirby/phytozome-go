@@ -10,6 +10,7 @@ type SpeciesCandidate struct {
 	CommonName  string
 	ReleaseDate string
 	SearchAlias string
+	IsOfficial  bool
 }
 
 func (s SpeciesCandidate) DisplayLabel() string {
@@ -24,6 +25,10 @@ func (s SpeciesCandidate) DisplayLabel() string {
 	}
 	if s.ReleaseDate != "" {
 		parts = append(parts, "["+s.ReleaseDate+"]")
+	}
+	if s.IsOfficial {
+		// prepend an official tag so callers can show it prominently
+		parts = append([]string{"[official]"}, parts...)
 	}
 	return strings.Join(parts, " ")
 }
