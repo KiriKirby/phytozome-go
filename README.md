@@ -13,8 +13,8 @@ The program is designed for real biological work where you often need to move fr
 
 This tool is useful when you are doing work like:
 
-- starting from `AT4G32410.1` in *Arabidopsis thaliana* and finding homologs in duckweed
-- searching several cellulose synthase genes together and exporting one result package per query
+- starting from `LOC_Os03g11614.1` in *Oryza sativa* and finding homologs in a selected `lemna.org` release
+- searching several flowering regulator genes together and exporting one result package per query
 - searching a species by keyword, selecting good candidate genes, then copying the generated link list into BLAST mode
 - switching between `Phytozome` and `lemna.org` without learning two different command-line interfaces
 
@@ -36,7 +36,7 @@ Use this when you want the original Phytozome-backed workflow.
 
 Typical use cases:
 
-- exact gene ID search such as `AT5G44030`
+- exact gene ID search such as `Glyma.01G000100`
 - transcript or protein lookups from Phytozome report URLs
 - BLAST against a selected Phytozome proteome/genome
 
@@ -171,7 +171,7 @@ How to decide:
 
 Real example:
 
-- you have an *Arabidopsis* gene link and want to search homologs in *Spirodela polyrhiza 9509*
+- you have a rice gene link and want to search homologs in a selected `lemna.org` release
 - choose `lemna`
 - the query sequence can still come from the Phytozome URL, but the search target will be the selected lemna species
 
@@ -196,7 +196,7 @@ Typical inputs:
 
 Real example:
 
-- you know `AtCESA1` and want sequence similarity hits in duckweed
+- you know `OsMADS1` and want sequence similarity hits in another plant genome
 - BLAST is the right starting point
 
 ### When to use `keyword`
@@ -205,8 +205,8 @@ Use keyword search when you want to search annotations, IDs, aliases, or descrip
 
 Real example:
 
-- you want to search all cellulose synthase family members inside one proteome
-- use keyword mode with terms like `At5g44030`, `CESA4`, or annotation words
+- you want to search several flowering regulator genes inside one proteome
+- use keyword mode with terms like `LOC_Os03g11614`, `OsMADS1`, or annotation words
 
 ## Step 3: Choose Species
 
@@ -230,7 +230,7 @@ What you see may include:
 
 Real example:
 
-- choose `Spirodela polyrhiza 9509 REF-OXFORD-3.0`
+- choose the `lemna.org` release you actually want to search
 - the wizard then shows a capability summary for BLAST and available FASTA fallback paths
 
 ## BLAST Mode: Detailed Guide
@@ -264,20 +264,20 @@ The wizard accepts all of these:
 ### Example 1: Single FASTA query
 
 ```text
->A.thaliana TAIR10|AT4G32410.1 (AtCESA1)
+>O.sativa Japonica Group|LOC_Os03g11614.1 (OsMADS1)
 MSS...
 ```
 
 What happens:
 
 - the wizard reads the FASTA metadata
-- `A.thaliana TAIR10|AT4G32410.1` becomes the query source header
-- `(AtCESA1)` becomes the visible identification label
+- `O.sativa Japonica Group|LOC_Os03g11614.1` becomes the query source header
+- `(OsMADS1)` becomes the visible identification label
 
 ### Example 2: Phytozome URL query
 
 ```text
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT4G32410
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
 ```
 
 What happens:
@@ -289,9 +289,9 @@ What happens:
 ### Example 3: Batch BLAST from many Phytozome URLs
 
 ```text
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G37040
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT3G53260
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT5G04230
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os01g69850
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os06g06750
 ```
 
 What happens:
@@ -304,13 +304,13 @@ What happens:
 ### Example 4: Paste a keyword `list` block directly into BLAST
 
 ```text
-PAL1
-PAL2
-PAL3
+OsMADS1
+OsMADS14
+OsMADS15
 ~~
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G37040
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT3G53260
-https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT5G04230
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os01g69850
+https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os06g06750
 ```
 
 What happens:
@@ -334,7 +334,7 @@ The wizard groups the programs by query type.
 
 Real example:
 
-- if your query is a protein FASTA from `AtCESA1`, choose `blastp` or `tblastn`
+- if your query is a protein FASTA from `OsMADS1`, choose `blastp` or `tblastn`
 - if your query is a CDS sequence, choose `blastn` or `blastx`
 
 ## Server And Local BLAST
@@ -407,10 +407,10 @@ The `.txt` file contains:
 
 Real example:
 
-If your query is `CESA1` from *Arabidopsis*, the query header in the text export looks like:
+If your query is `OsMADS1` from rice, the query header in the text export looks like:
 
 ```text
->A.thaliana TAIR10|AT4G32410.1 (AtCESA1)
+>O.sativa Japonica Group|LOC_Os03g11614.1 (OsMADS1)
 ```
 
 ## Keyword Mode: Detailed Guide
@@ -440,12 +440,12 @@ You can enter:
 Real example:
 
 ```text
-At5g44030
-At5g17420
-At4g18780
-At4g32410
-At5g05170
-At5g64740
+LOC_Os03g11614
+LOC_Os01g69850
+LOC_Os06g06750
+LOC_Os07g41370
+LOC_Os02g07430
+LOC_Os10g25170
 ```
 
 This is useful when you already know the source genes and want to pull equivalent candidates inside one target species.
@@ -463,12 +463,12 @@ Rules:
 Real example:
 
 ```text
-CESA4
-CESA7
-CESA8
-CESA1
-CESA3
-CESA6
+OsMADS1
+OsMADS14
+OsMADS15
+OsMADS18
+OsMADS5
+OsMADS56
 ```
 
 These labels are then carried into:
@@ -514,7 +514,7 @@ A realistic workflow looks like this:
 1. choose `phytozome`
 2. choose `keyword`
 3. choose a species
-4. search for several cellulose synthase genes
+4. search for several flowering regulator genes
 5. use `list`
 6. copy the generated labels and links
 7. switch to `blast`
@@ -573,29 +573,29 @@ Persistent cache examples:
 
 ## Practical Examples
 
-## Example A: Search One Arabidopsis Gene Against Duckweed
+## Example A: Search One Rice Gene Against A Lemna Release
 
 Goal:
 
-- start from `AT4G32410`
-- search homologs in `Spirodela polyrhiza 9509`
+- start from `LOC_Os03g11614`
+- search homologs in the `lemna.org` release you care about
 
 Steps:
 
 1. choose `lemna`
 2. choose `blast`
-3. choose `Spirodela polyrhiza 9509`
-4. paste `https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT4G32410`
+3. choose the target release
+4. paste `https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614`
 5. choose `blastp`
 6. review rows
 7. select the hits you want
 8. export files from `output/`
 
-## Example B: Search Many Lignin Pathway Genes Together
+## Example B: Search Many Flowering Regulator Genes Together
 
 Goal:
 
-- search a panel of pathway genes such as `PAL1`, `PAL2`, `C4H`, `4CL1`
+- search a panel of genes such as `OsMADS1`, `OsMADS14`, `OsMADS15`, `OsMADS18`
 - generate one BLAST export per query
 
 Steps:
@@ -619,7 +619,7 @@ Steps:
 
 1. choose `lemna`
 2. choose `keyword`
-3. choose a species such as `Lemna minor 9252`
+3. choose the release you want to annotate-search
 4. enter annotation-like terms
 5. review rows collected from `GFF3` and `AHRD`
 6. export table and peptides

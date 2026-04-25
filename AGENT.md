@@ -124,7 +124,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - why the step exists
   - what kind of input is expected
   - what files are generated at the end
-- Prefer concrete examples such as Arabidopsis gene IDs, Phytozome report URLs, copied `list` output blocks, and batch BLAST usage instead of abstract placeholders.
+- Prefer concrete examples such as rice or soybean gene IDs, Phytozome report URLs, copied `list` output blocks, and batch BLAST usage instead of abstract placeholders.
+- Do not reuse user-provided identifiers, species combinations, pathway panels, or research-specific examples in public documentation. When writing README examples, use fresh public examples that did not come from the user's prior workflow.
 - Keep screenshots and README images in a stable repository location such as `docs/images/`.
 - Whenever output paths, cache paths, language switching, batch behavior, or recovery commands change, update the README and this file in the same change.
 - Release packaging rules:
