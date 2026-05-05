@@ -3483,7 +3483,6 @@ func RunActionModalPage(page ActionModalPage) (ActionModalResult, error) {
 func RunRecoveryModalPage(page RecoveryModalPage) (ActionModalResult, error) {
 	actions := []Action{
 		{Value: "retry", Label: ButtonRetry, Shortcut: ShortcutRetry},
-		{Value: "home", Label: ButtonHome, Shortcut: ShortcutHome},
 	}
 	confirmText := ButtonClose
 	confirmValue := "close"
@@ -3774,7 +3773,6 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	contentHeight += 1
 	addButtonRow(modalBody, modalButtons([]buttonSpec{
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
-		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { closeWithNav(NavHome) }, Visible: page.AllowHome},
 		{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: true},
 	}, true, page.ConfirmText, "Enter", closeWithNav, submitExportSettings))
 	contentHeight += 1
@@ -3800,11 +3798,6 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 		case tcell.KeyEscape:
 			if page.AllowBack {
 				closeWithNav(NavBack)
-				return nil
-			}
-		case tcell.KeyCtrlO:
-			if page.AllowHome {
-				closeWithNav(NavHome)
 				return nil
 			}
 		case tcell.KeyCtrlV:
@@ -4063,7 +4056,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	modalBody.AddItem(interProModule, 0, 1, false)
 	addButtonRow(modalBody, modalButtons([]buttonSpec{
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
-		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { closeWithNav(NavHome) }, Visible: page.AllowHome},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", closeWithNav, confirm))
 	addHints(modalBody, []string{"Tab switches UniProt/InterPro modules. In InterPro, use Up/Down to move through settings; same-row controls are ordered left to right. Space toggles checkboxes. Enter moves to the next module; on InterPro it applies. F1 opens parameter help."})
@@ -4091,11 +4083,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		case tcell.KeyEscape:
 			if page.AllowBack {
 				closeWithNav(NavBack)
-				return nil
-			}
-		case tcell.KeyCtrlO:
-			if page.AllowHome {
-				closeWithNav(NavHome)
 				return nil
 			}
 		case tcell.KeyTab:
@@ -4294,7 +4281,6 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	body.AddItem(settingsModule, settingsHeight, 0, true)
 	actionButtons := modalButtons([]buttonSpec{
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
-		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { closeWithNav(NavHome) }, Visible: page.AllowHome},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), ShortcutApply, closeWithNav, confirm)
 	addButtonRow(body, actionButtons)
@@ -4329,11 +4315,6 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		case tcell.KeyEscape:
 			if page.AllowBack {
 				closeWithNav(NavBack)
-				return nil
-			}
-		case tcell.KeyCtrlO:
-			if page.AllowHome {
-				closeWithNav(NavHome)
 				return nil
 			}
 		case tcell.KeyUp:
@@ -4784,7 +4765,6 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 
 	addButtonRow(module, modalButtons([]buttonSpec{
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
-		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { closeWithNav(NavHome) }, Visible: page.AllowHome},
 		{Label: ButtonClearFilter, Shortcut: ShortcutClearFilter, Action: clearFilter, Visible: true},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonFilter), ShortcutConfirm, closeWithNav, confirm))
@@ -4815,11 +4795,6 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		case tcell.KeyEscape:
 			if page.AllowBack {
 				closeWithNav(NavBack)
-				return nil
-			}
-		case tcell.KeyCtrlO:
-			if page.AllowHome {
-				closeWithNav(NavHome)
 				return nil
 			}
 		case tcell.KeyUp:

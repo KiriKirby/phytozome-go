@@ -77,13 +77,13 @@ const (
 )
 
 type blastQueryItem struct {
-	RawInput      string
-	LabelName     string
-	Sequence      string
-	QuerySource   *model.QuerySequenceSource
-	FamilyName    string
-	MemberLabel   string
-	FamilySources []*model.QuerySequenceSource
+	RawInput       string
+	LabelName      string
+	Sequence       string
+	QuerySource    *model.QuerySequenceSource
+	FamilyName     string
+	MemberLabel    string
+	FamilySources  []*model.QuerySequenceSource
 	FamilySettings model.FamilyBlastSettings
 }
 
@@ -812,7 +812,7 @@ func (w *BlastWizard) detectLemnaBlastCapabilities(ctx context.Context, lc *lemn
 		Title:       title,
 		Description: "Checking lemna.org server databases and local FASTA downloads for the selected species.",
 		Initial:     fmt.Sprintf("Checking BLAST availability for %s...", selected.DisplayLabel()),
-		CancelError: prompt.ErrBackToBlastProgram,
+		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (lemna.BlastCapability, error) {
 		safeTaskUpdate(update)("Checking online BLAST databases and local FASTA files...")
 		return lc.DetectBlastCapabilities(mergeContexts(ctx, taskCtx), selected)
@@ -1455,7 +1455,7 @@ func (w *BlastWizard) executeConfiguredBlastBatch(ctx context.Context, selected 
 }
 
 func (w *BlastWizard) executeConfiguredBlastBatchWithReferences(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, configuredRequest model.BlastRequest, references externalReferenceConfig, familyPlan *familyBlastPlan) error {
-	w.postRunBackTarget = prompt.ErrBackToBlastProgram
+	w.postRunBackTarget = prompt.ErrBackToQueryInput
 
 	queryRuns := make([]blastQueryRun, 0, len(prepared))
 	resumeIndex := 0
@@ -1472,6 +1472,20 @@ func (w *BlastWizard) executeConfiguredBlastBatchWithReferences(ctx context.Cont
 		failedIndex := resumeIndex + batchErr.Index - 1
 		if failedIndex < resumeIndex || failedIndex >= len(prepared) {
 			return err
+		}
+		if blastplus.IsMissingToolsError(batchErr) {
+			installed, installErr := w.promptInstallBlastPlus(ctx, batchErr.Error(), prompt.ErrBackToQueryInput)
+			if installErr != nil {
+				if errors.Is(installErr, prompt.ErrDialogClosed) {
+					return prompt.ErrBackToQueryInput
+				}
+				return installErr
+			}
+			if installed {
+				resumeIndex = failedIndex
+				continue
+			}
+			return prompt.ErrBackToQueryInput
 		}
 		action, actionErr := w.prompt.FetchErrorAction(batchErr.Error(), prompt.ErrBackToQueryInput)
 		if actionErr != nil {
@@ -1641,7 +1655,7 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 			}
 			continue
 		}
-		w.postRunBackTarget = prompt.ErrBackToRowSelection
+		w.postRunBackTarget = prompt.ErrBackToQueryInput
 		if !selection.GenerateFile {
 			continue
 		}
@@ -1722,7 +1736,7 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 }
 
 func (w *BlastWizard) reviewBlastRuns(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, runs []blastQueryRun, configuredRequest model.BlastRequest, originalRunCount int) error {
-	w.postRunBackTarget = prompt.ErrBackToRowSelection
+	w.postRunBackTarget = prompt.ErrBackToQueryInput
 	if len(runs) == 0 {
 		return nil
 	}
@@ -3051,12 +3065,12 @@ func buildFamilyBlastRun(group familyBlastGroup, prepared []blastQueryItem, runs
 		rows = mergeFamilyBlastRowsByTarget(rows, settings)
 	}
 	item := blastQueryItem{
-		RawInput:      strings.Join(memberLabels, "\n"),
-		LabelName:     group.Name,
-		FamilyName:    group.Name,
-		MemberLabel:   strings.Join(uniqueStrings(memberLabels), "\n"),
-		QuerySource:   sourceRuns[0].Item.QuerySource,
-		FamilySources: querySources,
+		RawInput:       strings.Join(memberLabels, "\n"),
+		LabelName:      group.Name,
+		FamilyName:     group.Name,
+		MemberLabel:    strings.Join(uniqueStrings(memberLabels), "\n"),
+		QuerySource:    sourceRuns[0].Item.QuerySource,
+		FamilySources:  querySources,
 		FamilySettings: settings,
 	}
 	result := sourceRuns[0].Results
@@ -4372,32 +4386,7 @@ func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.Bl
 		}
 		var missingTools *blastplus.MissingToolsError
 		if errors.As(err, &missingTools) {
-			action, actionErr := w.prompt.BlastPlusInstallAction(missingTools.Error())
-			if actionErr != nil {
-				if errors.Is(actionErr, prompt.ErrDialogClosed) {
-					return model.BlastJob{}, prompt.ErrBackToBlastProgram
-				}
-				return model.BlastJob{}, actionErr
-			}
-			switch action {
-			case "install":
-				if _, installErr := tui.RunTaskValueContext(tui.TaskPage{
-					Path:        w.tuiPath("BLAST", "Install BLAST+"),
-					Title:       "Installing BLAST+",
-					Description: "Downloading and preparing managed NCBI BLAST+ tools for local BLAST.",
-					Initial:     "Installing BLAST+...",
-					CancelError: prompt.ErrBackToBlastProgram,
-				}, func(taskCtx context.Context, update func(string)) (string, error) {
-					safeTaskUpdate(update)("Downloading and extracting BLAST+...")
-					return blastplus.InstallManaged(mergeContexts(ctx, taskCtx), w.httpClient)
-				}); installErr != nil {
-					err = fmt.Errorf("install BLAST+: %w", installErr)
-				} else {
-					continue
-				}
-			default:
-				return model.BlastJob{}, prompt.ErrBackToBlastProgram
-			}
+			return model.BlastJob{}, err
 		}
 		if !isLocalBlastRequest(request) {
 			localOK, localErr := w.canRunLocalBlastFallback(ctx, request)
@@ -4416,11 +4405,34 @@ func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.Bl
 		case "retry":
 			continue
 		case "close":
-			return model.BlastJob{}, prompt.ErrBackToBlastProgram
+			return model.BlastJob{}, prompt.ErrBackToQueryInput
 		default:
-			return model.BlastJob{}, prompt.ErrBackToBlastProgram
+			return model.BlastJob{}, prompt.ErrBackToQueryInput
 		}
 	}
+}
+
+func (w *BlastWizard) promptInstallBlastPlus(ctx context.Context, description string, cancelTarget error) (bool, error) {
+	action, actionErr := w.prompt.BlastPlusInstallAction(description)
+	if actionErr != nil {
+		return false, actionErr
+	}
+	if action != "install" {
+		return false, nil
+	}
+	if _, installErr := tui.RunTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("BLAST", "Install BLAST+"),
+		Title:       "Installing BLAST+",
+		Description: "Downloading and preparing managed NCBI BLAST+ tools for local BLAST.",
+		Initial:     "Installing BLAST+...",
+		CancelError: cancelTarget,
+	}, func(taskCtx context.Context, update func(string)) (string, error) {
+		safeTaskUpdate(update)("Downloading and extracting BLAST+...")
+		return blastplus.InstallManaged(mergeContexts(ctx, taskCtx), w.httpClient)
+	}); installErr != nil {
+		return false, fmt.Errorf("install BLAST+: %w", installErr)
+	}
+	return true, nil
 }
 
 func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRequest) (model.BlastJob, error) {
@@ -4440,7 +4452,7 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 				Title:       "Running local BLAST",
 				Description: "Downloading required FASTA files when needed, preparing BLAST databases, and running BLAST+ locally.",
 				Initial:     "Starting local BLAST+...",
-				CancelError: prompt.ErrBackToBlastProgram,
+				CancelError: prompt.ErrBackToQueryInput,
 			}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 				safeTaskUpdate(update)("Preparing local BLAST+ run...")
 				return lc.SubmitBlast(mergeContexts(ctx, taskCtx), request)
@@ -4451,7 +4463,7 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 			Title:       "Trying online BLAST",
 			Description: "Submitting the query to the lemna.org BLAST service. If it cannot return a usable result, the CLI will automatically continue with local BLAST+ when available.",
 			Initial:     "Submitting to lemna.org...",
-			CancelError: prompt.ErrBackToBlastProgram,
+			CancelError: prompt.ErrBackToQueryInput,
 		}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 			safeTaskUpdate(update)("Submitting to lemna.org BLAST...")
 			return lc.SubmitBlastServerOnly(mergeContexts(ctx, taskCtx), request)
@@ -4463,7 +4475,7 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 		Title:       "Submitting BLAST job",
 		Description: "Submitting the BLAST query to the selected remote service.",
 		Initial:     "Submitting BLAST job...",
-		CancelError: prompt.ErrBackToBlastProgram,
+		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 		safeTaskUpdate(update)("Submitting BLAST job...")
 		return w.source.SubmitBlast(mergeContexts(ctx, taskCtx), request)
@@ -4494,7 +4506,7 @@ func (w *BlastWizard) canRunLocalBlastFallback(ctx context.Context, request mode
 		Title:       "Checking local fallback",
 		Description: "Checking whether the selected species has downloadable FASTA files for local BLAST+.",
 		Initial:     "Checking local BLAST availability...",
-		CancelError: prompt.ErrBackToBlastProgram,
+		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (lemna.BlastCapability, error) {
 		safeTaskUpdate(update)("Checking local FASTA downloads...")
 		return lc.DetectBlastCapabilities(mergeContexts(ctx, taskCtx), request.Species)

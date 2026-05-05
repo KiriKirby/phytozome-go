@@ -508,8 +508,8 @@ type BlastRowSelection struct {
 	GenerateFile     bool
 	DoneAll          bool
 	RunIndex         int
-	Selected        []bool
-	SelectedByRun   [][]bool
+	Selected         []bool
+	SelectedByRun    [][]bool
 	RowsByRun        [][]model.BlastResultRow
 	RowNumbers       []int
 	RowNumbersByRun  [][]int
@@ -2671,17 +2671,17 @@ func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll boo
 			return BlastRowSelection{}, fmt.Errorf("no rows selected")
 		}
 		if result.GenerateFile {
-		return BlastRowSelection{
-			Rows:           chosen,
-			GenerateFile:   true,
-			DoneAll:        result.DoneAll,
-			RowNumbers:     chosenNumbers,
-			Selected:       append([]bool(nil), selected...),
-			FilterFlags:    append([]bool(nil), result.FilterFlags...),
-			FilterSettings: filterSettings,
-			FilterApplied:  filterApplied,
-			FilterCleared:  filterCleared,
-		}, nil
+			return BlastRowSelection{
+				Rows:           chosen,
+				GenerateFile:   true,
+				DoneAll:        result.DoneAll,
+				RowNumbers:     chosenNumbers,
+				Selected:       append([]bool(nil), selected...),
+				FilterFlags:    append([]bool(nil), result.FilterFlags...),
+				FilterSettings: filterSettings,
+				FilterApplied:  filterApplied,
+				FilterCleared:  filterCleared,
+			}, nil
 		}
 	}
 }
@@ -3366,11 +3366,6 @@ func (p *Prompter) PostRunAction(mode string, lemnaMode bool, backTarget error) 
 				Description: fmt.Sprintf("Choose another species and run %s", modeLabel),
 			},
 			{
-				Value:       "home",
-				Label:       tui.ButtonHome,
-				Description: p.t("Return to database and mode selection"),
-			},
-			{
 				Value:       "exit",
 				Label:       "Exit",
 				Description: "Exit",
@@ -3390,9 +3385,6 @@ func (p *Prompter) PostRunAction(mode string, lemnaMode bool, backTarget error) 
 	}
 	if result.Value == "" {
 		return "exit", nil
-	}
-	if result.Value == "home" {
-		return "", ErrBackToDatabaseSelection
 	}
 	return result.Value, nil
 
@@ -3577,7 +3569,7 @@ func (p *Prompter) BlastSubmitErrorAction(description string) (string, error) {
 		p.t("BLAST submit error"),
 		"Step failed: "+description,
 		false,
-		ErrBackToBlastProgram,
+		ErrBackToQueryInput,
 	)
 }
 
@@ -3594,9 +3586,6 @@ func (p *Prompter) recoveryErrorAction(path []string, title string, message stri
 	if navErr := tuiNavError(result.Nav, backTarget); navErr != nil {
 		return "", navErr
 	}
-	if result.Value == "home" {
-		return "", ErrBackToDatabaseSelection
-	}
 	if result.Value == "" {
 		return "close", nil
 	}
@@ -3606,15 +3595,14 @@ func (p *Prompter) recoveryErrorAction(path []string, title string, message stri
 // BlastPlusInstallAction prompts the user when local BLAST needs BLAST+.
 // It returns:
 //   - "install" : download and install managed BLAST+ for this app
-//   - "back"    : return to BLAST program selection
+//   - "back"    : return to BLAST query input
 func (p *Prompter) BlastPlusInstallAction(description string) (string, error) {
 	result, err := tui.RunActionModalPage(tui.ActionModalPage{
-		Path:    p.tuiPath("Startup", "Recovery", "BLAST+ required"),
-		Title:   p.t("BLAST+ required"),
-		Message: "Local BLAST needs NCBI BLAST+. The app can install a managed copy for this workflow.\n\n" + description,
+		Path:    p.tuiPath("Startup", "Recovery", "Fetch error"),
+		Title:   p.t("Fetch error"),
+		Message: "Failed to fetch: " + description + "\n\nNCBI BLAST+ is required. Install a managed copy now and continue the current operation?",
 		Actions: []tui.Action{
 			{Value: "close", Label: tui.ButtonClose},
-			{Value: "home", Label: tui.ButtonHome, Shortcut: tui.ShortcutHome},
 		},
 		ConfirmText:  tui.ButtonInstall,
 		ConfirmValue: "install",
@@ -3622,11 +3610,8 @@ func (p *Prompter) BlastPlusInstallAction(description string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if navErr := tuiNavError(result.Nav, ErrBackToBlastProgram); navErr != nil {
+	if navErr := tuiNavError(result.Nav, ErrBackToQueryInput); navErr != nil {
 		return "", navErr
-	}
-	if result.Value == "home" {
-		return "", ErrBackToDatabaseSelection
 	}
 	if result.Value == "close" || result.Value == "" {
 		return "", ErrDialogClosed
