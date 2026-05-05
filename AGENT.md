@@ -19,9 +19,259 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 - Prefer reliable data sources: treat the `download/` release directory as the authoritative source of available databases/releases; use the public homepage only for labeling and "official" marking.
 - Expose capabilities to the CLI so the workflow can choose between server BLAST and local BLAST fallbacks transparently.
 
+## Long-term database and workflow direction
+
+- Treat `Phytozome` and `lemna.org` as primary sequence/genome sources. They provide species selection, keyword search targets, BLAST targets, source FASTA/GFF-style assets, gene/protein identifiers, and peptide export data.
+- Treat `UniProt`, `InterPro`, `Plant Reactome`, `PlantCyc`, and `MetaCyc` as external knowledge layers, not as peer primary databases in the startup selector:
+  - `UniProt`: protein names, reviewed/unreviewed status, canonical length, GO, EC/catalytic activity, pathway notes, subcellular location, keywords, sequence cautions, and cross-references.
+  - `InterPro`: protein families, domains, motifs, signatures, and Pfam-backed domain evidence through InterPro rather than direct Pfam-only coupling.
+  - `Plant Reactome` / `PlantCyc` / `MetaCyc`: pathway skeletons, reactions, compounds, enzyme steps, and pathway-guided candidate discovery.
+- The long-term biological workflow target is pathway-guided protein discovery: a user can choose a species, search a function or pathway such as `Monolignol Biosynthesis`, view a pathway diagram with enzyme steps annotated by candidate proteins, then select proteins for keyword review, BLAST, cross-species BLAST, export, or comparison.
+- Pathway discovery should combine pathway skeletons from Plant Reactome/PlantCyc/MetaCyc with candidate proteins from Phytozome/lemna and evidence from UniProt/InterPro. Candidate confidence should be based on multiple signals such as keyword match, BLAST homology, EC/GO match, domain/family match, sequence length, reviewed status, and sequence caution flags.
+
 ## CLI UX standards
 
 - Treat the terminal UI like a commercial wizard: every major step must be easy to scan, self-explanatory, and safe to recover from.
+- The product is pure TUI for all interactive workflows. All interactive workflow design and implementation must target the shared tview template layer; do not preserve, add, or keep a traditional text wizard fallback.
+- Delete traditional interactive paths instead of hiding them. The interactive wizard must not contain stdin `readLine` prompts, `Press Enter to continue` pauses, stdout banners, stdout status logs, stdout tables, stdout spinners, or stdout progress bars.
+- Use mature Go TUI libraries as the primary implementation path. The default stack for interactive screens is now `github.com/rivo/tview` plus `github.com/gdamore/tcell/v2` so the app can rely on mature widgets, focus handling, mouse handling, forms, lists, tables, buttons, pages, and layout primitives instead of custom drawing.
+- Do not hand-roll custom terminal widgets when tview already covers the need. Custom code should be limited to app-specific screen composition, workflow state, and small adapters between workflow data and tview primitives.
+- UI reference baseline: `letientai299/7guis`, especially `tui/`, is the visual/structural reference for simple module composition, restrained widgets, and clear page structure.
+- Technical reference baseline: `kivattt/fen` is the input/backend reference for Windows-compatible tview behavior. Treat its application setup as the source of truth for keyboard, mouse, paste, resize, and terminal reliability.
+- Follow the `7guis/tui` style and architecture:
+  - configure a global `tview.Styles` theme once
+  - follow `kivattt/fen` for terminal backend initialization: use a plain `tview.NewApplication()`, the default tcell screen, `EnableMouse(true)`, and `EnablePaste(true)`
+  - use `github.com/kivattt/tcell-naively-faster/v2` and `github.com/kivattt/tview` through `go.mod` replace directives, matching `fen`'s dependency strategy
+  - compose screens with `Frame`, `Flex`, `Pages`, `List`, `Table`, `Form`, `InputField`, `Button`, and `TextView`
+  - prefer a sidebar/page or framed-panel structure over hand-drawn ASCII layout
+  - use bordered tview widgets for modules and selection areas
+  - use tview button widgets for actions and keep mouse enabled; mouse must remain optional, not required
+  - keep keyboard behavior available, but let tview manage focus traversal and widget events wherever practical
+- Classify interactive pages by behavior and reuse templates instead of building each screen separately:
+  - startup/multi-module pages: `Frame + Flex` with ordered modules; Enter advances modules, final Enter confirms
+  - single-choice pages: `List` plus action buttons
+  - text input pages: `InputField` plus action buttons
+  - multi-line input pages: `TextArea` plus action buttons
+  - row-selection pages: shared `Table` result template plus Back/Home/Copy/View/Export buttons only
+  - recovery/error pages: `List` or `Modal` with retry/skip/back/exit-style choices
+  - progress pages: tview modal progress/status primitives
+- Row-selection checkbox state is semantic and consistent across the app: selected/on checkboxes are green, and unselected/off checkboxes are red. This belongs in the shared TUI layer, not in each workflow.
+- Row-selection tables use a shared Excel-like interaction model:
+  - The checkbox column and row-number column are fixed on the left; content columns can scroll horizontally, and result rows can scroll vertically.
+  - The first header cell is a checkbox that toggles all rows. Do not render separate Select all, Clear, or Toggle buttons. Keep `Ctrl+A`, `Ctrl+N`, and `Space` shortcuts.
+  - The default sort is row-number ascending. The row-number header must show the initial sort indicator.
+  - Selection is a single cell, not an entire row. Do not add Excel-style row/column crosshair background fills unless explicitly requested again; they were tried and removed for readability.
+  - Press `Tab` to switch between table-cell control and column-header control. Header control must visibly focus the current sortable header cell, keep the original header text readable, and keep Left/Right navigation locked within sortable headers. Up/Down changes only the current header's sort direction and must not move focus. Do not add a whole-header-row background unless explicitly requested again.
+  - Mouse-clicking a sortable header changes/toggles sort but does not switch into header-control mode.
+  - Non-sortable columns are skipped by header-control Left/Right navigation and ignored by mouse sort clicks.
+  - Columns are auto-sized from the longest displayed value/header so cell text is not truncated by fixed column widths.
+  - Columns should have comfortable horizontal padding and low-contrast vertical separators between them so dense tables remain readable without making grid lines visually dominant. The header row and table body should also be separated by a small gap plus a matching low-contrast horizontal divider.
+  - Data columns should be displayed as whole columns whenever possible. Avoid showing a half-visible trailing column; hide that column until horizontal navigation can bring it fully into view, except when the viewport is too narrow to fit even the fixed columns plus one data column.
+  - BLAST result table headers with ratio-style `/` labels must render as two physical header rows only in BLAST tables. Keep the numerator and trailing slash on the first row, for example `align_len /`, and put the denominator on the second row, for example `query_length (%)`. Non-BLAST tables must not split headers just because a `/` appears.
+  - Do not draw scrollbars or hidden row/column status bars in table modules. The row-number header shows the total row count, for example `38 lines`, and the table itself handles vertical and horizontal navigation.
+  - `View` in table-cell control means a large modal showing all available details for the currently focused normal data row, not a summary of all selected rows or the whole table. The row-number column is a valid row focus for row View. In column-header control, `View` shows a column explanation modal for the currently focused header, with English, Chinese, and Japanese explanations. On group/header rows outside header-control, on the checkbox column, or when no data row/column can be viewed, invalid view attempts should show a small OK-only modal instead of returning a workflow error.
+  - `Copy` in row-selection tables copies only the currently focused normal data cell to the clipboard. The row-number column is copyable and copies the row number. It is exposed as a button plus `Ctrl+Shift+C`, and is disabled with a small OK-only modal in header control, on checkbox/group/header cells, or when no copyable cell is selected.
+  - Copy success should be silent. Do not open a success modal, do not flash the Copy button, and do not call `Application.Draw()` directly from table/button callbacks; only failure or invalid-copy cases should open a small OK-only modal.
+  - Display-column lists affect only the table view. Exports, generated files, and View row-detail dialogs must continue to use the full underlying model data.
+  - Every table type must keep explicit column lists for display columns and full-detail/export columns. Manage column order and column names through those lists rather than scattering ad-hoc header order in render/export code.
+  - BLAST UniProt display-column ordering rule: the two pre-existing comparison columns, original-database `target_length / UniProt canonical length (%)` and `UniProt canonical length`, stay in their original length-reference positions in the table and details. The comparison header must name the current original database, for example `Phytozome target_length / UniProt canonical length (%)` or `lemna target_length / UniProt canonical length (%)`. Other UniProt display columns belong after the original database columns. Table view must not show `UniProt keywords`, `UniProt EC`, or `UniProt GO`, although details and exports may include them.
+  - `UniProt reviewed` table cells should be color-coded by status while remaining readable as text. Empty UniProt cells stay blank; do not use placeholders for rows without UniProt data.
+  - BLAST InterPro display-column ordering rule: the old `Pfam_domain` position is owned by `InterPro conserved region status`, displayed as a two-line header and color-coded by `present`, `partial`, `missing`, and `uncertain`. Other InterPro columns are appended after original database columns and UniProt columns, with every InterPro-sourced header prefixed by `InterPro`. Details and exports should preserve the same original, UniProt, InterPro grouping, and InterPro Excel headers use the InterPro header color. The external-reference dialog owns the InterPro enable switch and detailed `InterPro conserved region status` thresholds/evidence checkboxes.
+  - InterPro enrichment should use the official EBI InterPro API by UniProt accession, with caching, de-duplication, and parallel lookup. Blank is preferred over weak invented mappings; when query InterPro evidence is unavailable, status may be conservatively derived from the hit protein's own conserved region evidence rather than forcing all rows to `uncertain`.
+  - BLAST filter behavior: the filter is a row-selection-table action, not a destructive data transform. It is available only when BLAST results have all external references enabled, meaning both UniProt and InterPro reference columns are present for the run. The filter opens a large parameter modal with detailed hard-rule and optional soft-score controls, plus the standard trilingual Help window. Applying the filter automatically rebuilds the suggested checkbox state: rows judged plausible are checked, rows suggested for removal are unchecked, and the suggested-removal row numbers are colored red. Users may manually change checkboxes afterward, and running the filter again restores the filter's own current recommendation.
+  - BLAST filter default intent: conservatively remove hits that are unlikely to be true homologs before export or follow-up BLAST, using only generic evidence columns and thresholds. Default hard rules emphasize the two main biological failure modes for homolog pickup: abnormal amino-acid length and lost conserved-region evidence. By default, original target_length / UniProt canonical length must be present and within 70-130%, UniProt fragment records are rejected, and `InterPro conserved region status` must be `present` or allowed `partial`; `missing`, `uncertain`, and blank InterPro status are rejected. Identity, align_len/query_length, and E-value thresholds default to 0/off and are available as optional stricter hard rules for follow-up passes. Do not reject all unreviewed UniProt rows by default and do not require UniProt accession by default. By default the filter also collapses transcript isoforms to the best row per target gene. Do not add family-specific, species-specific, pathway-specific, paper-specific, copy-number-specific, whitelist, or special-name matching behavior to the filter; papers may only be used to calibrate generic thresholds. Optional generic top-hit limiting and soft scoring exist for stricter later passes, but should remain off by default.
+  - BLAST filter parameter-surface rule: every numeric threshold, score weight, penalty, multiplier, distance band, evidence requirement, missing-data behavior, row-limiting mechanism, and ranking/tie-break preference used by the filter must be exposed in the filter parameter modal and round-tripped through model, prompt, and TUI settings. Do not add hidden filter constants or hard-coded ordering rules that a user cannot inspect and change from the modal.
+  - BLAST filter execution rule: applying a filter, recalculating filter suggestions, clearing filter marks, and resetting selected rows from filter state must run behind a TUI loading/progress modal over the current result table. Never perform these actions synchronously in a table callback in a way that freezes the terminal. The modal must include `Cancel (Esc)` and cancellation returns to the same result table without showing a workflow error.
+- Scrollable module status:
+  - Do not add hidden-row/hidden-column status lines to scrollable modules. This design was removed because it made table and modal layouts heavier without improving navigation.
+  - Do not draw custom scrollbar tracks or thumbs.
+- Keyword result tables for both `phytozome` and `lemna` preserve search-term grouping:
+  - Each search term appears as a centered, non-selectable group title row above its result rows, matching the old non-TUI table grouping intent.
+  - Search-term group order is fixed to the query order.
+  - Sorting in keyword tables is performed only inside each search-term group; sorting must never move rows between groups.
+  - The `search_tern` display column is not sortable because group headers already define the search-term partition.
+  - Keyword result short labels such as `C4H`, `CCR2`, or `ATPAL1` are `label_name`, not `protein_id`. Phytozome keyword results only expose this naming label as `label_name`; do not add a separate `protein_id` column there unless the database source actually provides an original protein accession independently of the label feature.
+  - Keyword display columns are checkbox, row count, `search_tern`, conditional `label_name`, conditional original `protein_id` only when the source naturally provides it, `transcript`, and `discripition`; `search_tern` is not sortable, while `label_name`, original `protein_id`, `transcript`, and `discripition` are sortable.
+  - Keyword-mode label names are part of the main keyword review flow, not export-only data. Ask for them immediately after keyword input and before running keyword searches for both databases, so table display, View dialogs, file naming, and FASTA labels can use `label_name`.
+  - Keyword and BLAST label prompts use `Auto identify (Enter)` as the primary action when the input is empty. As soon as any text is present, the same primary button becomes `Apply (Enter)`. `Skip` is shown immediately to its left in the right-side action group and uses a non-Enter Ctrl shortcut. Auto identify must produce the same label list as manual input would: for keyword mode, infer each label from result data, preferring an explicit row `label_name`, then the first alias (for example `ATPAL1` from `ATPAL1; PAL1`), and only then gene/transcript/sequence identifiers; for lemna keyword rows with no local alias-derived label, search Phytozome Arabidopsis with an `At1g80820`-style identifier found in the row/search term and use the first result's first alias as `label_name`. For BLAST export labels, infer from resolved query source identifiers when available.
+- Treat the application as query-first. Search/query workflows should end at selectable result tables by default; file generation is a subordinate table action, never the default meaning of completing a table.
+- In every result table, the default primary action is `View` (`Enter`): it opens a small details dialog for the current/selected rows. Export is exposed as `Export` (`Ctrl+G`) and batch export as `Export all` (`Ctrl+D`) where applicable.
+- Do not ask for export filenames, output folders, label names that are only needed for exported files, data analysis reports, peptide fetching, Excel writing, list-file writing, or any other export-only data until the user explicitly chooses `Export` or `Export all`.
+- This separation must be enforced in workflow/business logic, not only in button labels. Before the generation subflow is opened, no export path should create output directories, derive export file names, write list files, fetch peptides only for exports, or run export-specific preparation.
+- Export settings are a shared contract across all generation paths. When adding or changing export options in the TUI, propagate the returned values through `prompt.ExportSettings`, workflow `exportSettings`, and every writer branch before considering the work complete. This must cover BLAST single export, BLAST `Export all`, keyword export, text output, normal Excel, raw Excel, and the data analysis report option. A missing propagation step can make all `Write*` flags false and surface as `No files were written`; add regression tests around any new export setting.
+- Data analysis reports replace the old detailed TXT log concept. Do not revive timestamped `*_blast_log.txt` or `*_keyword_log.txt` writers.
+- Reports must be generated from structured report data first, then rendered to PDF by an internal Go implementation or an internal HTML-to-PDF backend. Do not use Carbone for this feature.
+- Reports must never trigger database searches, API calls, BLAST runs, sequence fetches, enrichment requests, cache refreshes, downloads, or any other data-gathering work solely for report writing. A report may only use data already known to the program because the current export action needed it. If desired report content is missing, write an explicit "not available in this run" explanation instead of fetching it.
+- A report covers only the current generated file set and the process that produced it: query/source input, input resolution, selected database/species, search or BLAST parameters, result/selection summary, generated files, and relevant row-level evidence for the current export. Do not include earlier session navigation, earlier searches, unrelated tools, future pathway actions, or any operation outside the current export action.
+- Each explicit generation action creates at most one report. A normal export that writes both `.xlsx` and `.txt` still gets one report. BLAST multi-file/export-all mode also gets one report for that action, not one report per generated file.
+- Report file names use the generation completion timestamp followed by `_report`, for example `20260505_143012_report.pdf`. The timestamp must be local time, sortable, filesystem-safe, and independent of the exported data file base name.
+- Export settings modals must size themselves from actual content. Do not hard-code a height that can clip checkboxes or leave large dead space after adding options. The file-type section must always show all available options, and its copy must explain that normal Excel exports selected rows while raw Excel writes every table row, including unchecked rows, to a separate `_raw.xlsx` file.
+
+## Data Analysis Report Design
+
+- Mode-specific report design belongs in dedicated files under `docs/reports/`.
+- Keyword-mode report design is specified in `docs/reports/keyword-report-design.md`; treat that file as the source of truth for keyword report content, order, chart choices, layout rules, provenance rules, performance sections, quality checks, and implementation data model hints.
+- Future BLAST, pathway, or other report types should get their own files in `docs/reports/` instead of expanding this agent note.
+- Do not keep text fallback paths for interactive workflows, including tests. Tests should cover pure parsing/business helpers or TUI primitives, not simulated stdin/readLine wizard flows.
+- The interactive terminal UI should be implemented as a conservative TUI, with Windows 10 and Windows 11 `conhost.exe` as the baseline compatibility target.
+- Keep keyboard navigation as the primary interaction path in every TUI screen:
+  - arrow keys move selection
+  - Enter confirms
+  - Esc performs Back on full-screen pages when a safe back target exists
+  - Esc closes the topmost modal/overlay when a modal/overlay is open; modal input must be captured by the topmost modal/overlay before any underlying full-screen page receives keys
+  - Ctrl+B is not a navigation shortcut
+  - Back has one absolute meaning: return to the full-screen page the user saw immediately before the current full-screen page
+  - Close has one absolute meaning: dismiss the topmost modal/overlay and return to the underlying full-screen page
+  - Back must never mean "exit the program", "close only the current modal", or "return to an arbitrary earlier workflow state"
+  - Modal dismissal is `Close`; full-screen navigation is `Back`
+- Mouse support is enabled, matching `kivattt/fen`'s Windows-tested tview setup. It must remain optional and must never be required to complete a workflow.
+- Avoid terminal features that are fragile in Windows `conhost.exe`:
+  - do not depend on emoji, Powerline glyphs, ligatures, gradients, or 24-bit truecolor
+  - prefer ASCII borders and conservative symbols for core UI structure
+  - keep color as an aid only; every status must also be readable as text
+  - avoid drag interactions, complex animations, and layout assumptions that fail under IME input or narrow windows
+- TUI output must fail clearly when no interactive terminal is available:
+  - do not silently fall back to the old text prompt wizard; the old text prompt wizard is not supported
+  - non-interactive commands such as `version` and `blast plan` may remain plain text
+  - interactive wizard commands should require a real TTY and return a clear error otherwise
+- Keep the TUI layer separate from workflow/business packages. The TUI should collect user choices and display state; BLAST, species, export, cache, and download behavior should stay in the existing domain packages.
+- Use one consistent `7guis/tui`-style shell:
+  - a top `Frame` area shows only the left-aligned breadcrumb/layer line; do not add a separate divider line there
+  - breadcrumb/layer data should be modeled as a real path, not a hardcoded two-item label
+  - when breadcrumb text is too long, collapse from the left with `...`, preserving the deepest/current page labels on the right
+  - page titles should live in the current module/frame title, not as a separate top title
+  - the main area uses tview layout primitives, not manual string drawing
+  - startup page: show a natural short program introduction, author, repository, and license, then one `Startup` module with two stacked tview `List` selection boxes for `Function` and `Sub-option`
+  - startup page behavior: function and sub-option live on one page; Enter moves through modules in order, and Enter on the final module starts the chosen workflow
+  - startup page number shortcuts are global across the whole page: `1`, `2`, and `3` choose the fixed function module (`Keyword`, `Blast`, `Tools`); sub-option shortcuts always start at `4` and proceed downward based on the currently selected function. Sub-option numbering is dynamic and should not reserve permanent numbers for hidden options.
+  - current startup sub-options: `Keyword` offers `Phytozome keyword` and `lemna keyword`; `Blast` offers `Phytozome blast` and `lemna blast`; `Tools` currently offers `Pathway search` as an entry placeholder only.
+  - `Pathway search` must remain an inert/placeholder entry until its pathway implementation is added. It should not silently run keyword or BLAST behavior.
+  - mouse clicks select/focus widgets only; mouse clicks on selection lists must not advance to the next module or enter the next page
+  - bottom hints use `TextView` lines for keyboard shortcuts and explanations not already visible as buttons
+- Resize behavior:
+  - let tview/tcell own resize handling through the default application and screen
+  - on Windows, keep a lightweight resize sync fallback because maximizing, minimizing, or restoring `conhost.exe` can miss the normal resize event; the fallback should ask the active tcell screen to resync instead of rebuilding page state
+  - keep every interactive template full-screen by calling `SetRoot(root, true)`
+  - avoid manual viewport padding, custom resize clearing, or hand-rendered frame strings unless a tview primitive cannot express the layout
+  - apply conservative background colors through tview styles and primitives, not through raw ANSI string rows
+- Button rules:
+  - render only mouse-clickable actions as buttons
+  - every button label must include its shortcut in parentheses, for example `Search (Enter)` or `Paste (Ctrl+V)`
+  - letter shortcuts must use Ctrl combinations; never bind plain letters such as `q`, `b`, `h`, `a`, or `d` in TUI pages because plain letters must remain safe for text input
+  - never bind `Ctrl+H`; many terminals encode Backspace as Ctrl+H, so using it for Home/Help/Back breaks text editing
+  - use `tview.Button` for buttons whenever possible
+  - button rows must wrap by whole button units when horizontal space is insufficient; never truncate or partially draw a button just to keep a one-line row
+  - button rows occupy one layout line by default; wrapped extra lines expand upward into the flexible content area only when the current width actually requires wrapping
+  - never reserve worst-case multi-line button height on wide layouts, because that creates dead space between the main content and hints
+  - left-side buttons wrap with other left-side buttons, right-side primary buttons wrap with other right-side primary buttons, and the two groups must not push, overlap, or hide each other
+  - every page and modal must add buttons through the shared button-row helper so wrapping behavior stays global instead of hard-coding per-page button heights
+  - global navigation buttons are limited to Back and Home
+  - do not show Quit/Exit as a global quick button; closing the terminal/window is the supported program-level exit path
+  - do not expose a Mode/Spawn button in the TUI
+  - navigation buttons such as Back/Home and progression buttons such as Next/Start/Confirm should be real focusable/clickable controls
+  - progression buttons such as Start, Select, Search, Run BLAST, Apply, Save, View, Export, and Export all belong at the far right of the button row
+  - progression buttons must use the same blue as the focused module border/title, distinct from normal dark-blue buttons
+  - button text should be concise and verb-led; avoid vague labels like `Go`, `Use`, `Choose`, `Next`, `Continue`, `Confirm`, `Next / Start`, or verbose `Use ...`
+  - button labels and shortcuts must come from the shared button dictionary in `internal/tui/buttons.go` whenever a standard action exists
+  - standard button dictionary:
+    - navigation: `Back (Esc)`, `Home (Ctrl+O)`
+    - modal dismissal: `Close (Esc)`, `OK (Enter)`
+    - selection/progression: `Start (Enter)`, `Select (Enter)`, `Search (Enter)`, `Run BLAST (Enter)`, `Apply (Enter)`, `Auto identify (Enter)` when it is the primary empty-input action, `Save (Enter)`, `View (Enter)`
+    - export/results: `Export (Ctrl+G)`, `Export all (Ctrl+D)`
+    - table selection shortcuts only, not visible buttons: `Ctrl+A` select all, `Ctrl+N` clear all, `Space` toggle current row
+    - editing/recovery: `Paste (Ctrl+V)`, `Retry (Ctrl+R)`, `Skip (Ctrl+R)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
+  - identical or similar actions must use identical labels across all pages; for example export actions are always `Export` / `Export all`, not `Generate file`, `Write file`, or `Create`
+  - every interactive page after the startup page should expose a Home button that returns to database/startup selection
+  - every full-screen page that exposes Back must map Back to the immediately previous full-screen page in the user-visible flow
+  - do not emulate buttons with plain colored text unless a tview widget cannot represent the interaction
+  - non-button keyboard hints such as `Tab switch selection box` or `Up/Down choose item` go in hint `TextView` lines, not inside the button row
+- Selection page behavior:
+  - multi-module pages must have an explicit module order
+  - `Enter` advances through modules in that order; on the final actionable module it confirms the page
+  - `Tab` switches modules in order without confirming and must wrap from the last module back to the first
+  - intercept `Tab` at the app/template layer before tview `List` receives it, because `List` treats Tab as item navigation by default
+  - arrow keys move within the focused section
+  - number keys select within the focused section
+  - mouse click may select/focus but must not advance modules or confirm the page unless the clicked widget is an explicit button
+- Search page behavior:
+  - search pages combine the search input and search results on one screen, like a modern search interface
+  - editing the search input refreshes the result list in the same page; do not split search input and result selection into separate pages
+  - search pages use one keyboard model, not separate active regions: Left/Right always move the search-box cursor, Up/Down always move the highlighted candidate
+  - search result highlighting must use exactly one visual system; do not combine tview's default selected-row background with custom blue text highlighting
+  - when the highlighted result is at the top and the user presses Up, move to the previous page and highlight that page's last result; when it is at the bottom and the user presses Down, move to the next page and highlight that page's first result
+  - search results do not use number shortcuts or visible numeric prefixes; plain digits remain editable search text, and keyboard selection is Up/Down plus Enter
+  - use pagination for result sets larger than 10; `Tab` and `PgDn` move forward, `Shift+Tab` and `PgUp` move backward
+  - show a dedicated centered page selector below the results, make every page number mouse-clickable, and wrap page numbers onto additional lines instead of truncating after a fixed count
+  - each result item should use two display rows: the name/key on the first row and secondary details on the second row, rather than squeezing name and details into separate columns
+  - Back from search pages returns to the Startup page that contains both database and mode selection, not to a separate mode-only page
+- Focus styling:
+  - the active module's border and title must be bright blue
+  - inactive module borders and titles use the normal theme colors
+  - focus styling must be attached to real tview focus/blur events, not set once during construction
+  - apply the same focus styling rule consistently across lists, tables, text inputs, and multi-line inputs
+- Prefer modal dialogs for small decisions:
+  - use centered modal overlays for every loading state, progress state, error reminder, warning, confirmation, validation message, and small status notice
+  - keep large working contexts such as search, table selection, and multi-line editing as full-screen pages
+  - modal overlays should sit on top of the current tview shell/pages instead of dumping traditional text or switching to a plain terminal prompt
+  - modal overlays must reuse the most recent real full-screen page as their background; never use an empty placeholder page behind a modal unless no previous page exists, including loading/progress/status task modals
+  - loading/progress/status modal descriptions must live inside the modal frame while still overlaying the previous full-screen page. Do not render `TaskPage.Description`, "Fetching...", "Loading...", or similar explanatory text outside or behind the modal box; the whole modal content belongs inside the bordered dialog, and an empty background must never be used to hide misplaced content.
+  - all modal explanatory text, prompts, choice lists, form fields, and buttons must be inside the modal's bordered dialog. Never render a modal `Message` or prompt sentence above/outside the modal frame.
+  - modal overlays must capture keyboard and mouse before lower layers; lower-layer buttons must not receive clicks while a modal is open
+  - design the modal layer as a stack even if most flows only show one modal at a time; the topmost modal owns input
+  - implement modal layering through `tview.Pages` plus a full-screen overlay primitive that draws only the centered dialog but consumes all mouse events outside and inside the dialog unless the dialog itself handles them
+  - modal dialogs must not show global Back/Home/Quit navigation buttons by default
+  - simple information/validation modals should show only the primary action on the far right, usually `OK (Enter)`
+  - action/recovery modals should put this modal's own actions on the left, for example Retry, Skip, Back, Install, or Exit, and keep the primary/default action on the far right
+  - modal dismiss actions must be labeled `Close`, not `Back`; `Close` only dismisses the current overlay and returns to the underlying page/state
+  - Esc inside a modal must close only the topmost modal and return to the underlying full-screen page
+  - do not turn a modal close into a workflow error page; the parent workflow may decide to stay on the current page, retry the same step, or explicitly navigate, but that decision must not be surfaced as an error
+  - short action sets should use buttons; long final-operation prompts whose choices need explanatory secondary text should stay as a single-choice list with an added `Close` button
+  - modal primary buttons must map to their own explicit action value; never let the far-right primary button accidentally trigger the first left-side action
+  - BLAST loading states must describe the actual step, such as capability detection, online BLAST submission, local fallback check, BLAST+ installation, local BLAST execution, or result polling
+  - when a loading task has no known total, use a modal spinner/status dialog; when a meaningful total exists, use a modal progress dialog
+  - every loading/progress/status task modal must include a left-side `Cancel (Esc)` button. Cancel means abandon the running task, cancel its context when possible, close the modal, and return to the relevant previous workflow page without showing a workflow error modal.
+  - BLAST fallback flow is TUI-owned: try online BLAST explicitly when available, show a modal decision if online BLAST fails or cannot produce a usable automated result, then only run local BLAST+ after the user chooses the local fallback
+  - if local BLAST+ tools are missing, close the fallback decision and show a dedicated BLAST+ install modal; installation itself runs in a loading modal, then local BLAST resumes in its own progress/status modal
+  - use a long single-choice list only when there are many choices or each choice needs long explanatory secondary text
+  - use tview widgets such as `Pages`, `Modal`, `TextView`, and shared buttons for dialogs; do not print ad-hoc messages to stdout during interactive workflows
+  - `internal/ui` stdout spinner/progress helpers are forbidden for interactive workflow code; remove the package if it exists only for stdout UI
+- Export settings:
+  - entering the file-generation/export subflow must open a modal dialog over the current result table, not a new full-screen page
+  - collect export file name, optional output folder, and data analysis report choice in one larger modal when export begins
+  - omit the output-folder module when that mode does not use a folder; when present, leaving it blank means write files directly to the program output directory
+  - checkbox-style choices, including the data analysis report choice, use the shared `[x]` / `[ ]` selection style: selected/on is green, unselected/off is red, and Space toggles the focused checkbox
+  - the export settings modal uses stacked modules like the startup page: Tab switches modules, Enter advances modules, and Enter on the final module activates the primary export action
+- Keyboard capture rules:
+  - do not solve duplicate input by timing-based event dropping or "eat repeated key" filters
+  - do not add custom Windows screen selection, custom TTY wrappers, or outgoing escape-sequence filtering unless a focused reproduction proves the default tview/tcell path cannot work
+  - prefer the `fen` pattern: default tview application, default tcell screen, mouse enabled, paste enabled, and no custom screen/TTY wrappers
+  - do not attach ad-hoc global key capture to text input or multi-line input pages unless absolutely necessary
+  - ordinary text entry must be handled only by the focused tview input widget
+  - text input pages should use widget-local handlers such as `InputField.SetDoneFunc` or widget `SetInputCapture` for widget-specific behavior, following `fen`; app-level capture is only for global Ctrl navigation
+  - do not install no-op Tab captures; only intercept Tab on pages with multiple focusable modules where Tab has an explicit app-level focus-switching meaning
+  - navigation on input pages should primarily use real buttons and Ctrl shortcuts, avoiding duplicate key processing
+  - in multi-line text areas, Enter inserts a new line; the main/progression action must only use a key event that is explicitly `KeyEnter` with `ModCtrl`
+  - do not treat `KeyCtrlJ` or `KeyCtrlM` as multi-line confirmation because many terminals encode ordinary Enter or pasted newlines as those values
+  - never bind plain letter shortcuts on input pages; use Ctrl shortcuts for navigation and secondary actions, and Enter for the page's primary action, including multi-line input pages
+- Paste behavior:
+  - keep the default tview/tcell paste path provided by `EnablePaste(true)` and the focused input widget
+  - input, multi-line input, and search pages may also expose a Paste button plus `Ctrl+V` as an explicit app action that reads the system clipboard and inserts through the focused widget's paste handler
+  - the app-level Paste action must not use a modal loading overlay, must not swap the page root, and must not move focus away from the active input widget while reading the system clipboard
+  - input, multi-line input, and search pages should reserve one inline status line directly below the input area for Paste feedback; show reading/failure text there, clear it after a successful paste, and refresh stale failure text on the next paste attempt
+  - pasted text must continue to pass through the shared clipboard read and sanitization path before insertion, including UTF-8 validation, newline normalization, ANSI escape stripping, control-character filtering, and empty-content validation
+  - the app-level Paste action must not replace or disable normal terminal paste behavior
+  - do not fix Paste focus problems with page-level focus locks or broad app-level mouse/key capture; keep focus behavior close to tview defaults and fix the Paste flow itself
+  - `Ctrl+Shift+C` is reserved for row-selection table cell copy. Do not bind `Ctrl+Shift+V` because terminals often reserve it for paste.
+- Color rules:
+  - centralize all TUI colors in the shared theme constants
+  - canvas/background: black
+  - normal panel/select background: dark blue
+  - normal text: ghost white
+  - secondary/help text: yellow
+  - accent/status text: green
+  - inactive borders and titles: white
+  - focused borders, focused titles, selected text, and primary/progression buttons: the same bright blue
+  - primary/progression button text: black for contrast
 - Use one consistent page pattern for interactive steps:
   - a short page title that names the step
   - one or two lines that explain what the user is doing
@@ -34,27 +284,20 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - explain command meaning instead of repeating the prompt verbatim
 - Never show bare command lists when a short explanation fits. If a page offers commands, each command must include a one-line meaning.
 - Keep wording consistent across similar pages:
-  - use `Database selection`, `Mode selection`, `BLAST program selection`, `BLAST execution target`, `Keyword input`, and `BLAST input` as the canonical page titles
+  - use `Function selection`, `Sub-option selection`, `BLAST program selection`, `BLAST execution target`, `Keyword input`, and `BLAST input` as the canonical page titles
   - use `Select ...` for choice prompts and `Enter ...` for free-form text prompts
   - prefer `Review the summary and press Enter to continue.` for confirmation pages
   - prefer sentence-case labels and avoid mixing labels like `Choose ...`, `Pick ...`, and `Enter ...` on the same type of page
-- Keep the global navigation commands visible on every interactive page:
+- Keep the global navigation controls visible on every interactive page:
   - `back` returns to the previous page
-  - `spawn` jumps to mode selection
-  - `lobby` jumps to database selection
+  - `home` returns to database/startup selection
   - `exit` quits the wizard
-- Use clear section boundaries between sessions and major phases:
-  - print a visible banner when a wizard session starts
-  - print a visible separator and outcome when a session ends
+- Use clear TUI section boundaries between sessions and major phases:
+  - show session identity and outcomes inside tview pages or modal overlays
+  - never print wizard session banners, separators, or completion messages to stdout
   - keep repeated prompts grouped so the user can immediately tell where they are in the flow
-- Support runtime language switching and executable-name locale selection:
-  - `lang=en`, `lang=cn`, and `lang=jp` must switch the following prompts immediately
-  - executable suffixes `-en`, `-cn`, and `-jp` should select the default language on startup
-  - if no suffix or runtime override is present, default to English
-  - keep language-specific prompt text and help text aligned across the whole wizard
-  - when adding or changing a prompt, update the English text and both translated variants in the same change
-  - do not leave new prompt text untranslated in one locale while adding it in another
-  - for blank/Enter-only branches, return an explicit placeholder value when the caller expects a slice or list, rather than returning `nil` and relying on downstream indexing
+- The program UI is English-only. Do not add runtime language switching or executable-name locale behavior. Use explicit multi-language text only in deliberately scoped scientific help surfaces, such as column details or InterPro parameter help.
+- For blank/Enter-only branches, return an explicit placeholder value when the caller expects a slice or list, rather than returning `nil` and relying on downstream indexing
 - Prefer descriptive labels over terse jargon:
   - `File name` is preferred over localized or ambiguous labels
   - query input prompts should say exactly what kinds of inputs are accepted
@@ -62,18 +305,23 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 - BLAST batch input rules:
   - accept one query per line, FASTA entries, Phytozome report URLs, or a keyword list copied from `list`
   - accept `load "file.txt"` from the program directory as a batch input source
-  - if more than one query is supplied, require a per-query `Protein Identification` unless the pasted list already supplies labels
+  - when more than one query is supplied, validate that pasted label names are either present for all items or omitted for all items
   - allow `~` as the explicit blank placeholder for per-query labels
-  - ask for an optional output folder name when multiple BLAST queries are queued
+  - after external-reference settings, detect Family BLAST/query-group patterns generically, such as `NAME1/NAME2/NAME3`, `PREFIX10/PREFIX10-like`, or `GROUP.1/GROUP2`; if at least two queries share a detected family prefix, open the Family BLAST settings modal with Family BLAST enabled by default
+  - Family BLAST does not require external references to run; it groups the review/export unit by gene family while still executing BLAST per query. External references still control evidence columns, and the automatic filter remains gated on full external-reference availability
+  - Family BLAST must not rewrite or normalize original `label_name` values. Derive a separate `family_name` for grouping only. Remove trailing member numbering by default. Before that, default-on suffix handling should treat `prefix + number + suffix` labels such as `GENE10-like` or `GENE10_like` as `GENE10`, so `GENE9/GENE14/GENE10/GENE10-like` group as `GENE`. Keep database-provided `At`/`AT` prefixes by default, so `ATGENE1/ATGENE2` groups as `ATGENE`; the optional `Strip Arabidopsis At/AT prefix only for family_name` setting may be enabled manually to group those as `GENE`
+  - in Family BLAST, grouped output filenames use the derived family name without member numbering, for example `GENE` instead of `GENE1`, `GENE2`, `GENE3`, `GENE4`; rows are merged by target protein/gene by default, keeping the best hit when one target is hit by multiple member queries
+  - Family BLAST export should preserve the grouped family file while including all available query sequence headers for the family, not only the first member query
+  - ask for missing per-query label names only inside the file-generation subflow
+  - ask for an optional output folder name only inside the file-generation subflow for batch BLAST export
   - process and confirm BLAST result tables one query at a time
   - keep the BLAST selection table visible during row confirmation, including checkbox markers and row numbers
-  - support `done all` to approve the current result selection and auto-approve the remaining batch with default selections
-  - accept `doneall` as a convenience alias for `done all`
-  - print a run report before writing any export files
+  - in multi-file BLAST result tables, the left query sidebar shows the gene ID as the primary text. Its secondary yellow text is two lines: first the `label_name`, then the result count such as `5 lines`.
+  - support `Export all` / `Ctrl+D` to generate files for the current selection and auto-generate remaining batch queries with default selections
 - Keyword mode ordering:
-  - ask for `Protein Identification` before `File name`
-  - preserve one-to-one ordering between keyword terms and `Protein Identification` values
-  - allow `~` to mark an intentionally blank identification
+  - ask for keyword `label_name` values in the main keyword review flow, before running the keyword search
+  - preserve one-to-one ordering between keyword terms and `label_name` values
+  - allow `~` to mark an intentionally blank `label_name`
 - Batch query resolution:
   - use a progress bar for batch URL resolution instead of repeating per-item spinner messages
   - keep single-query resolution feedback concise and non-duplicative
@@ -98,9 +346,16 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - batch query resolution and batch per-query execution should fail one item at a time, not fail the whole batch by default, when a safe `skip` path exists
   - if a skip path is unsafe for a step, document that in the prompt and keep the recovery path explicit
 - Loading feedback:
-  - use a progress bar whenever the code knows the number of items being processed
-  - use a spinner for single-item or unknown-duration work
-  - do not leave long network/file operations without visible feedback
+  - use a TUI modal progress bar whenever the code knows the number of items being processed
+  - use a TUI modal status/progress overlay for single-item or unknown-duration work
+  - do not leave long network/file operations without visible TUI feedback
+- Modal navigation for external-reference-like scientific parameter windows:
+  - top-level modules are switched with `Tab`/`Backtab`
+  - inside a module, use `Up`/`Down` only; reserve `Left`/`Right` for text-input cursor movement
+  - `Enter` moves to the next top-level module, and only the final module's `Enter` performs the primary action
+  - clicking the primary action button performs the action immediately
+  - every such modal should include a `Help (F1)` button using the shared three-language help template; remember the last help language for the current session
+  - text and controls must wrap or use vertical module layout rather than overflowing horizontally; modal height should fit actual content without unnecessary dead space
 - Performance and concurrency:
   - prefer controlled parallelism for batch-safe stages such as keyword searches, batch query resolution, and sequence fetch preloading
   - keep all interactive prompts serialized even when background work is parallelized
@@ -130,7 +385,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 - Prefer concrete examples such as rice or soybean gene IDs, Phytozome report URLs, copied `list` output blocks, and batch BLAST usage instead of abstract placeholders.
 - Do not reuse user-provided identifiers, species combinations, pathway panels, or research-specific examples in public documentation. When writing README examples, use fresh public examples that did not come from the user's prior workflow.
 - Keep screenshots and README images in a stable repository location such as `docs/images/`.
-- Whenever output paths, cache paths, language switching, batch behavior, or recovery commands change, update the README and this file in the same change.
+- Whenever output paths, cache paths, batch behavior, or recovery commands change, update the README and this file in the same change.
 - Release packaging rules:
   - clear `bin/` before rebuilding release artifacts
   - rebuild all supported platform binaries into `bin/`
@@ -148,7 +403,7 @@ The wizard asks users to choose a database at startup:
 
 - species search and single-species selection
 - sequence / FASTA / report URL input
-- batch query input from multiple newline-separated items or copied keyword list previews
+- batch query input from multiple newline-separated items, FASTA entries, or supported report URLs
 - server BLAST submission and polling when server-side submission is available and parsed safely
 - automatic fallback to a local BLAST workflow when server-side submission isn't available or lacks required DBs
 - interactive row selection
@@ -354,7 +609,7 @@ Priority 4 (low / optional)
 
 ## Output behavior
 
-- Exported `.xlsx`, `.txt`, reports, and generated list files are written under an `output/` directory next to the executable being run.
+- Exported `.xlsx`, `.txt`, and PDF data analysis reports are written under an `output/` directory next to the executable being run.
 - If the user requests an extra output folder, create it inside `output/`, not beside the executable.
 - Runtime caches must live under a single hidden-capable `.cache/` directory next to the executable, not scattered across OS temp or user cache roots.
 - Lemna local BLAST assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`.

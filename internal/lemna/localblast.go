@@ -433,6 +433,8 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 		// Parse numeric fields carefully
 		pident, _ := strconv.ParseFloat(fields[2], 64)
 		alignLen, _ := strconv.Atoi(fields[3])
+		mismatch, _ := strconv.Atoi(fields[4])
+		gapOpen, _ := strconv.Atoi(fields[5])
 		qstart, _ := strconv.Atoi(fields[6])
 		qend, _ := strconv.Atoi(fields[7])
 		sstart, _ := strconv.Atoi(fields[8])
@@ -444,8 +446,10 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 		queryID := fields[0]
 
 		row := model.BlastResultRow{
+			SourceDatabase:  "lemna",
 			HitNumber:       i,
 			Protein:         proteinID,
+			SubjectID:       proteinID,
 			Species:         "", // species label may be filled by caller if known
 			EValue:          evalue,
 			PercentIdentity: pident,
@@ -457,9 +461,11 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 			TargetFrom:      sstart,
 			TargetTo:        send,
 			Bitscore:        bitscore,
-			Identical:       0,
+			Mismatches:      mismatch,
+			GapOpenings:     gapOpen,
+			Identical:       int(pident * float64(alignLen) / 100),
 			Positives:       0,
-			Gaps:            0,
+			Gaps:            gapOpen,
 		}
 
 		// Enrich from fastaIndex if available
@@ -568,20 +574,32 @@ func saveBlastResultToCache(cacheDir string, jobID string, result model.BlastRes
 
 	w := bufio.NewWriter(f)
 	// header
-	if _, err := w.WriteString("hit\tprotein\tqseqid\tqstart\tqend\tevalue\tpident\talign_len\tbitscore\n"); err != nil {
+	if _, err := w.WriteString("hit\tprotein\tsubject_id\tqseqid\tqstart\tqend\tsstart\tsend\tevalue\tpident\talign_len\tmismatch\tgapopen\tbitscore\ttarget_length\tsequence_id\ttranscript_id\ttarget_id\tjbrowse_name\tgene_report_url\tdefline\n"); err != nil {
 		return err
 	}
 	for i, r := range result.Rows {
-		line := fmt.Sprintf("%d\t%s\t%s\t%d\t%d\t%s\t%.2f\t%d\t%.2f\n",
+		line := fmt.Sprintf("%d\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%.2f\t%d\t%d\t%d\t%.2f\t%d\t%s\t%s\t%d\t%s\t%s\t%s\n",
 			i+1,
 			r.Protein,
+			r.SubjectID,
 			r.QueryID,
 			r.QueryFrom,
 			r.QueryTo,
+			r.TargetFrom,
+			r.TargetTo,
 			r.EValue,
 			r.PercentIdentity,
 			r.AlignLength,
+			r.Mismatches,
+			r.GapOpenings,
 			r.Bitscore,
+			r.TargetLength,
+			r.SequenceID,
+			r.TranscriptID,
+			r.TargetID,
+			r.JBrowseName,
+			r.GeneReportURL,
+			strings.ReplaceAll(r.Defline, "\t", " "),
 		)
 		if _, err := w.WriteString(line); err != nil {
 			return err
@@ -613,6 +631,9 @@ func enrichBlastRowsWithAHRD(rows []model.BlastResultRow, ahrd map[string]ahrdRe
 			// direct match
 			if rec, ok := ahrd[key]; ok {
 				// populate useful fields
+				if r.UniProtAccession == "" {
+					r.UniProtAccession = uniprotAccessionFromAHRD(rec)
+				}
 				if r.TranscriptID == "" {
 					r.TranscriptID = key
 				}
@@ -626,6 +647,9 @@ func enrichBlastRowsWithAHRD(rows []model.BlastResultRow, ahrd map[string]ahrdRe
 			if strings.Contains(key, ".") {
 				base := strings.Split(key, ".")[0]
 				if rec, ok := ahrd[base]; ok {
+					if r.UniProtAccession == "" {
+						r.UniProtAccession = uniprotAccessionFromAHRD(rec)
+					}
 					if r.TranscriptID == "" {
 						r.TranscriptID = base
 					}
@@ -641,6 +665,9 @@ func enrichBlastRowsWithAHRD(rows []model.BlastResultRow, ahrd map[string]ahrdRe
 				parts := strings.Split(key, "|")
 				token := parts[len(parts)-1]
 				if rec, ok := ahrd[token]; ok {
+					if r.UniProtAccession == "" {
+						r.UniProtAccession = uniprotAccessionFromAHRD(rec)
+					}
 					if r.TranscriptID == "" {
 						r.TranscriptID = token
 					}
@@ -715,6 +742,9 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 				continue
 			}
 			if rec, ok := ahrd[tok]; ok {
+				if r.UniProtAccession == "" {
+					r.UniProtAccession = uniprotAccessionFromAHRD(rec)
+				}
 				// Populate description/defline fields from AHRD.
 				if r.Defline == "" {
 					r.Defline = rec.HumanReadableDescription
@@ -812,6 +842,37 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 			r.TargetID = rel.BlastNDBID
 		}
 	}
+}
+
+func uniprotAccessionFromAHRD(record ahrdRecord) string {
+	for _, value := range []string{record.BlastHitAccession, record.ProteinAccession} {
+		for _, token := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == '|' || r == ';' || r == ',' || r == ' ' || r == '\t'
+		}) {
+			token = strings.Trim(token, `"'=:`)
+			if looksLikeUniProtAccession(token) {
+				return token
+			}
+		}
+	}
+	return ""
+}
+
+func looksLikeUniProtAccession(value string) bool {
+	if len(value) < 6 || len(value) > 10 {
+		return false
+	}
+	hasDigit := false
+	for _, ch := range value {
+		switch {
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+			hasDigit = true
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 // sanitizeFileName replaces characters unsuitable for file names.

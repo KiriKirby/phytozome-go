@@ -159,6 +159,19 @@ func (g geneRecord) PrimaryTranscript(preferredID string) (geneTranscript, error
 	return g.Transcripts[0], nil
 }
 
+func (g geneRecord) PrimaryTranscriptByProtein(proteinID string) (geneTranscript, error) {
+	proteinID = strings.TrimSpace(proteinID)
+	for _, transcript := range g.Transcripts {
+		if proteinID != "" && strings.EqualFold(strings.TrimSpace(transcript.Protein), proteinID) {
+			return transcript, nil
+		}
+		if proteinID != "" && strings.EqualFold(strings.TrimSpace(transcript.PrimaryIdentifier), proteinID) {
+			return transcript, nil
+		}
+	}
+	return g.PrimaryTranscript("")
+}
+
 func (g geneRecord) OrganismShortName() string {
 	return strings.TrimSpace(g.Organism.ShortName)
 }
@@ -346,9 +359,11 @@ func parseBlastRows(rawXML string) ([]model.BlastResultRow, error) {
 
 			for _, hsp := range hit.HSPs.Items {
 				row := model.BlastResultRow{
+					SourceDatabase:  "phytozome",
 					HitNumber:       hit.Num,
 					HSPNumber:       hsp.Num,
 					Protein:         proteinID,
+					SubjectID:       proteinID,
 					Species:         meta.SpeciesLabel,
 					EValue:          hsp.EValue,
 					PercentIdentity: percentIdentity(hsp.Identity, hsp.AlignLen),
@@ -459,6 +474,63 @@ func (c *Client) FetchGeneByProtein(ctx context.Context, proteomeID int, protein
 	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("protein %s in proteome %d", proteinID, proteomeID))
 }
 
+func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
+	gene, err := c.FetchGeneByProtein(ctx, targetID, proteinID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	for _, transcript := range gene.Transcripts {
+		if strings.TrimSpace(proteinID) != "" && !strings.EqualFold(strings.TrimSpace(transcript.Protein), strings.TrimSpace(proteinID)) && !strings.EqualFold(strings.TrimSpace(transcript.PrimaryIdentifier), strings.TrimSpace(proteinID)) {
+			continue
+		}
+		for _, value := range transcript.Uniprot {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if idx := strings.LastIndex(value, ":"); idx >= 0 {
+				value = strings.TrimSpace(value[idx+1:])
+			}
+			value = strings.Trim(value, ";, ")
+			if value == "" {
+				continue
+			}
+			key := strings.ToUpper(value)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	if len(out) == 0 {
+		for _, transcript := range gene.Transcripts {
+			for _, value := range transcript.Uniprot {
+				value = strings.TrimSpace(value)
+				if value == "" {
+					continue
+				}
+				if idx := strings.LastIndex(value, ":"); idx >= 0 {
+					value = strings.TrimSpace(value[idx+1:])
+				}
+				value = strings.Trim(value, ";, ")
+				if value == "" {
+					continue
+				}
+				key := strings.ToUpper(value)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, value)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (c *Client) FetchGeneByGeneID(ctx context.Context, proteomeID int, geneID string) (geneRecord, error) {
 	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?gene=%s", proteomeID, url.QueryEscape(strings.TrimSpace(geneID)))
 	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("gene %s in proteome %d", geneID, proteomeID))
@@ -555,6 +627,35 @@ func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenc
 	return c.fetchProteinSequenceByTranscript(ctx, gene.ID)
 }
 
+func (c *Client) FetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error) {
+	gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, proteinID)
+	if err != nil {
+		return nil, err
+	}
+	transcript, err := gene.PrimaryTranscriptByProtein(proteinID)
+	if err != nil {
+		return nil, err
+	}
+	sequence, err := c.fetchProteinSequenceByTranscript(ctx, transcript.SecondaryIdentifier)
+	if err != nil {
+		return nil, err
+	}
+	source := &model.QuerySequenceSource{
+		Sequence:          sequence,
+		SourceDatabase:    c.Name(),
+		SourceProteomeID:  species.ProteomeID,
+		SourceJBrowseName: species.JBrowseName,
+		SourceGenomeLabel: species.GenomeLabel,
+		GeneID:            strings.TrimSpace(gene.PrimaryIdentifier),
+		TranscriptID:      strings.TrimSpace(transcript.PrimaryIdentifier),
+		ProteinID:         strings.TrimSpace(transcript.Protein),
+		OrganismShort:     gene.OrganismShortName(),
+		Annotation:        gene.AnnotationVersion(),
+	}
+	applyPhytozomeQueryLabels(source, gene)
+	return source, nil
+}
+
 func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcriptInternalID string) (string, error) {
 	transcriptInternalID = strings.TrimSpace(transcriptInternalID)
 	c.mu.RLock()
@@ -629,6 +730,9 @@ func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcrip
 func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	var gene model.QuerySequenceSource
 	gene.SourceDatabase = c.Name()
+	gene.SourceProteomeID = species.ProteomeID
+	gene.SourceJBrowseName = species.JBrowseName
+	gene.SourceGenomeLabel = species.GenomeLabel
 
 	switch reportType {
 	case "gene":
@@ -636,6 +740,7 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 		if err != nil {
 			return nil, err
 		}
+		applyPhytozomeQueryLabels(&gene, rawGene)
 		gene.GeneID = rawGene.PrimaryIdentifier
 		transcript, err := rawGene.PrimaryTranscript("")
 		if err != nil {
@@ -655,6 +760,7 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 		if err != nil {
 			return nil, err
 		}
+		applyPhytozomeQueryLabels(&gene, rawGene)
 		gene.GeneID = rawGene.PrimaryIdentifier
 		transcript, err := rawGene.PrimaryTranscript(identifier)
 		if err != nil {
@@ -677,6 +783,12 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 	}
 
 	return &gene, nil
+}
+
+func applyPhytozomeQueryLabels(source *model.QuerySequenceSource, gene geneRecord) {
+	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
+	source.Aliases = strings.Join(aliases, "; ")
+	source.LabelName = firstAlias(source.Aliases)
 }
 
 func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
@@ -758,15 +870,19 @@ func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keywo
 
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
 	keyword = strings.TrimSpace(keyword)
+	reportType, reportIdentifier, isReportURL := phytozomeGeneReportKeyword(keyword)
 	cacheKey := strconv.Itoa(species.ProteomeID) + "|" + keyword
+	if isReportURL {
+		cacheKey = strconv.Itoa(species.ProteomeID) + "|report|" + reportType + "|" + reportIdentifier
+	}
 	c.mu.RLock()
-	if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+	if cached, ok := c.keywordRowsCache[cacheKey]; ok && (!isReportURL || len(cached) > 0) {
 		rows := append([]model.KeywordResultRow(nil), cached...)
 		c.mu.RUnlock()
 		return rows, nil
 	}
 	c.mu.RUnlock()
-	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok && (!isReportURL || len(cached) > 0) {
 		rows := append([]model.KeywordResultRow(nil), cached...)
 		c.mu.Lock()
 		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
@@ -776,13 +892,13 @@ func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCan
 
 	value, err, _ := c.sf.Do("keyword-rows:"+cacheKey, func() (any, error) {
 		c.mu.RLock()
-		if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+		if cached, ok := c.keywordRowsCache[cacheKey]; ok && (!isReportURL || len(cached) > 0) {
 			rows := append([]model.KeywordResultRow(nil), cached...)
 			c.mu.RUnlock()
 			return rows, nil
 		}
 		c.mu.RUnlock()
-		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok && (!isReportURL || len(cached) > 0) {
 			rows := append([]model.KeywordResultRow(nil), cached...)
 			c.mu.Lock()
 			c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
@@ -803,6 +919,28 @@ func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCan
 			}
 			seen[key] = struct{}{}
 			genes = append(genes, gene)
+		}
+
+		if isReportURL {
+			for _, variant := range specificIdentifierVariants(reportIdentifier) {
+				switch reportType {
+				case "gene":
+					if gene, err := c.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
+						addGene(gene)
+					}
+				case "transcript":
+					if gene, err := c.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
+						addGene(gene)
+					}
+				case "protein":
+					if gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
+						addGene(gene)
+					}
+				}
+				if len(genes) > 0 {
+					break
+				}
+			}
 		}
 
 		if looksLikeSpecificGeneIdentifier(keyword) {
@@ -865,6 +1003,10 @@ func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, ge
 	}
 
 	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
+	labelName := ""
+	if len(aliases) > 0 {
+		labelName = strings.TrimSpace(aliases[0])
+	}
 	uniprotValues := make([]string, 0, len(transcript.Uniprot))
 	for _, value := range transcript.Uniprot {
 		value = strings.TrimSpace(value)
@@ -875,7 +1017,9 @@ func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, ge
 	}
 
 	return model.KeywordResultRow{
+		SourceDatabase:      "phytozome",
 		SearchTerm:          searchTerm,
+		LabelName:           labelName,
 		TranscriptID:        strings.TrimSpace(transcript.PrimaryIdentifier),
 		GeneIdentifier:      geneIdentifier,
 		Genome:              formatKeywordGenome(gene),
@@ -943,6 +1087,36 @@ func looksLikeSpecificGeneIdentifier(value string) bool {
 	return hasLetter && hasDigit
 }
 
+func phytozomeGeneReportKeyword(value string) (reportType string, identifier string, ok bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", false
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + strings.TrimPrefix(value, "//")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return "", "", false
+	}
+	if !strings.EqualFold(parsed.Host, "phytozome-next.jgi.doe.gov") {
+		return "", "", false
+	}
+	segments := nonEmptyPathSegments(parsed.Path)
+	if len(segments) != 4 || !strings.EqualFold(segments[0], "report") {
+		return "", "", false
+	}
+	reportType = strings.ToLower(strings.TrimSpace(segments[1]))
+	if reportType != "gene" && reportType != "transcript" && reportType != "protein" {
+		return "", "", false
+	}
+	identifier = strings.TrimSpace(segments[3])
+	if identifier == "" {
+		return "", "", false
+	}
+	return reportType, identifier, true
+}
+
 func specificIdentifierVariants(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -969,6 +1143,18 @@ func specificIdentifierVariants(value string) []string {
 	return variants
 }
 
+func nonEmptyPathSegments(path string) []string {
+	parts := strings.Split(path, "/")
+	segments := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			segments = append(segments, part)
+		}
+	}
+	return segments
+}
+
 func dedupePreserveOrder(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
@@ -985,6 +1171,18 @@ func dedupePreserveOrder(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func firstAlias(value string) string {
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			return part
+		}
+	}
+	return ""
 }
 
 func copyStringSlice(values []string) []string {

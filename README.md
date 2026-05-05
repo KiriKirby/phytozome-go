@@ -80,7 +80,6 @@ The program keeps all runtime artifacts next to the executable so nothing is sca
 - `output/`
   - exported `.xlsx`
   - exported `.txt`
-  - generated `_list.txt`
   - detailed run reports
 - `.cache/`
   - Phytozome persistent caches
@@ -88,34 +87,6 @@ The program keeps all runtime artifacts next to the executable so nothing is sca
   - local BLAST databases and downloaded FASTA
 
 If you choose an extra folder name during batch BLAST export, that folder is created inside `output/`.
-
-## Language Switching
-
-The program supports English, Chinese, and Japanese.
-
-### Runtime language switching
-
-At any prompt, type one of these:
-
-```text
-lang=en
-lang=cn
-lang=jp
-```
-
-This changes the following prompts immediately.
-
-### Language from executable name
-
-You can also choose the startup language by renaming the executable:
-
-```text
-phytozome-go-en.exe
-phytozome-go-cn.exe
-phytozome-go-jp.exe
-```
-
-If no language suffix is present, the default is English.
 
 ## Global Navigation Commands
 
@@ -298,25 +269,8 @@ What happens:
 
 - each line becomes a separate BLAST query
 - the wizard resolves them in parallel
-- you then enter one `Protein Identification` per query
+- you then enter one label name per query
 - each query is reviewed and exported separately
-
-### Example 4: Paste a keyword `list` block directly into BLAST
-
-```text
-OsMADS1
-OsMADS14
-OsMADS15
-~~
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os01g69850
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os06g06750
-```
-
-What happens:
-
-- labels above `~~` are paired with URLs below `~~`
-- you do not need to type `Protein Identification` again
 
 ## BLAST Program Selection
 
@@ -421,7 +375,7 @@ Keyword mode is best when you want to search a species by identifiers or annotat
 flowchart TD
     A[Choose keyword mode] --> B[Choose species]
     B --> C[Enter one or more keyword terms]
-    C --> D[Enter Protein Identification labels]
+    C --> D[Enter label_name values]
     D --> E[Enter export file name]
     E --> F[Run keyword search]
     F --> G[Review grouped result table]
@@ -450,9 +404,9 @@ LOC_Os10g25170
 
 This is useful when you already know the source genes and want to pull equivalent candidates inside one target species.
 
-## Protein Identification In Keyword Mode
+## label_name In Keyword Mode
 
-After keyword input, the wizard asks for `Protein Identification` labels before `File name`.
+After keyword input, the wizard asks for `label_name` values. These are the short names used for display, default file naming, and FASTA labels.
 
 Rules:
 
@@ -475,7 +429,7 @@ These labels are then carried into:
 
 - the result table
 - the Excel export
-- the `list` preview
+- default export names and FASTA labels
 
 ## Keyword Result Selection
 
@@ -489,24 +443,6 @@ Useful commands:
 - `done`
 - `list`
 
-### `list` command
-
-This command is useful when you want to move selected keyword hits into BLAST mode.
-
-If protein identification labels are present, it outputs:
-
-1. one line per label
-2. a separator line `~~`
-3. one line per corresponding link
-
-If labels are completely blank, it outputs only the links.
-
-That output can be:
-
-- copied directly into BLAST mode
-- saved as `_list.txt`
-- loaded later with `load "file.txt"`
-
 ## Example: Keyword To BLAST Workflow
 
 A realistic workflow looks like this:
@@ -515,9 +451,7 @@ A realistic workflow looks like this:
 2. choose `keyword`
 3. choose a species
 4. search for several flowering regulator genes
-5. use `list`
-6. copy the generated labels and links
-7. switch to `blast`
+5. export the selected keyword rows
 8. paste the list block directly
 9. search homologs in another species
 

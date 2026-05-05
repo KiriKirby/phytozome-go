@@ -16,3 +16,11 @@ type DataSource interface {
 	FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error)
 	FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error)
 }
+
+type UniProtResolver interface {
+	FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error)
+}
+
+type ProteinReportResolver interface {
+	FetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error)
+}

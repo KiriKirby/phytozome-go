@@ -1,0 +1,500 @@
+package tui
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+)
+
+func TestButtonRowKeepsLeftAndPrimaryButtonsVisibleOnWideRows(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
+		buttonSpec{Label: ButtonHome, Shortcut: ShortcutHome, Visible: true},
+		buttonSpec{Label: ButtonSelectAll, Shortcut: ShortcutSelectAll, Visible: true},
+		buttonSpec{Label: ButtonClear, Shortcut: ShortcutClear, Visible: true},
+		buttonSpec{Label: ButtonToggle, Shortcut: ShortcutToggle, Visible: true},
+		buttonSpec{Label: ButtonExport, Shortcut: ShortcutExport, Visible: true, Primary: true},
+		buttonSpec{Label: ButtonView, Shortcut: ShortcutConfirm, Visible: true, Primary: true},
+	)
+
+	positions := row.buttonPositions(180)
+	if len(positions) != 7 {
+		t.Fatalf("unexpected visible button count: got %d want 7", len(positions))
+	}
+	for _, pos := range positions {
+		if pos.row != 0 {
+			t.Fatalf("wide button row should not wrap, got %q on row %d", pos.label, pos.row)
+		}
+	}
+	if got := row.requiredHeight(180); got != 1 {
+		t.Fatalf("wide button row height = %d, want 1", got)
+	}
+}
+
+func TestButtonRowWrapsOnlyWhenLeftAndPrimaryGroupsOverlap(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
+		buttonSpec{Label: ButtonHome, Shortcut: ShortcutHome, Visible: true},
+		buttonSpec{Label: ButtonSelectAll, Shortcut: ShortcutSelectAll, Visible: true},
+		buttonSpec{Label: ButtonClear, Shortcut: ShortcutClear, Visible: true},
+		buttonSpec{Label: ButtonToggle, Shortcut: ShortcutToggle, Visible: true},
+		buttonSpec{Label: ButtonExport, Shortcut: ShortcutExport, Visible: true, Primary: true},
+		buttonSpec{Label: ButtonView, Shortcut: ShortcutConfirm, Visible: true, Primary: true},
+	)
+
+	if got := row.requiredHeight(48); got <= 1 {
+		t.Fatalf("narrow button row should wrap, got height %d", got)
+	}
+}
+
+func TestButtonRowPositionsFitInsideRequiredHeightAtCommonWidths(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
+		buttonSpec{Label: ButtonHome, Shortcut: ShortcutHome, Visible: true},
+		buttonSpec{Label: ButtonSelectAll, Shortcut: ShortcutSelectAll, Visible: true},
+		buttonSpec{Label: ButtonClear, Shortcut: ShortcutClear, Visible: true},
+		buttonSpec{Label: ButtonToggle, Shortcut: ShortcutToggle, Visible: true},
+		buttonSpec{Label: ButtonExport, Shortcut: ShortcutExport, Visible: true, Primary: true},
+		buttonSpec{Label: ButtonView, Shortcut: ShortcutConfirm, Visible: true, Primary: true},
+	)
+
+	for _, width := range []int{64, 96, 128, 180} {
+		height := row.requiredHeight(width)
+		for _, pos := range row.buttonPositions(width) {
+			if pos.row < 0 || pos.row >= height {
+				t.Fatalf("button %q row %d is outside required height %d at width %d", pos.label, pos.row, height, width)
+			}
+			if pos.left < 0 || pos.right > width || pos.left >= pos.right {
+				t.Fatalf("button %q has invalid x range [%d,%d) at width %d", pos.label, pos.left, pos.right, width)
+			}
+		}
+	}
+}
+
+func TestButtonRowMouseLeftClickActivatesButton(t *testing.T) {
+	activated := false
+	row := buttonRow(buttonSpec{
+		Label:    ButtonSearch,
+		Shortcut: ShortcutApply,
+		Action:   func() { activated = true },
+		Visible:  true,
+		Primary:  true,
+	})
+	row.SetRect(0, 0, 40, row.requiredHeight(40))
+	positions := row.buttonPositions(40)
+	if len(positions) != 1 {
+		t.Fatalf("unexpected positions: got %d want 1", len(positions))
+	}
+	x := positions[0].left + (positions[0].right-positions[0].left)/2
+
+	consumed, _ := row.MouseHandler()(tview.MouseLeftClick, tcell.NewEventMouse(x, positions[0].row, tcell.ButtonNone, 0), nil)
+	if !consumed {
+		t.Fatal("button row should consume mouse left click inside a button")
+	}
+	if !activated {
+		t.Fatal("button mouse left click should activate the button action")
+	}
+}
+
+func TestButtonRowPrimaryLabelUpdatesOnlyPrimaryButtons(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonSkip, Shortcut: ShortcutRetry, Visible: true},
+		buttonSpec{Label: ButtonApply, Shortcut: ShortcutApply, Visible: true, Primary: true},
+	)
+
+	row.setPrimaryLabel(ButtonAuto)
+
+	if row.buttons[0].Label != ButtonSkip {
+		t.Fatalf("non-primary skip button label changed to %q", row.buttons[0].Label)
+	}
+	if row.buttons[1].Label != ButtonAuto {
+		t.Fatalf("primary button label = %q, want %q", row.buttons[1].Label, ButtonAuto)
+	}
+}
+
+func TestButtonRowMouseDoesNotCaptureButton(t *testing.T) {
+	row := buttonRow(buttonSpec{
+		Label:    ButtonPaste,
+		Shortcut: ShortcutPaste,
+		Visible:  true,
+	})
+	row.SetRect(0, 0, 40, row.requiredHeight(40))
+	positions := row.buttonPositions(40)
+	if len(positions) != 1 {
+		t.Fatalf("unexpected positions: got %d want 1", len(positions))
+	}
+	x := positions[0].left + (positions[0].right-positions[0].left)/2
+
+	consumed, capture := row.MouseHandler()(tview.MouseLeftDown, tcell.NewEventMouse(x, positions[0].row, tcell.Button1, 0), nil)
+	if !consumed {
+		t.Fatal("button row should consume mouse left down inside a button")
+	}
+	if capture != nil {
+		t.Fatal("button row should not capture mouse state after mouse down")
+	}
+}
+
+func TestButtonFlexUsesDefaultMouseRoutingForButtonRows(t *testing.T) {
+	activated := false
+	body := newButtonFlex()
+	content := tview.NewTextArea().SetText("", true)
+	body.AddItem(content, 0, 1, true)
+	row := buttonRow(buttonSpec{
+		Label:    ButtonSearch,
+		Shortcut: ShortcutApply,
+		Action:   func() { activated = true },
+		Visible:  true,
+		Primary:  true,
+	})
+	addButtonRow(body, row)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(80, 12)
+	body.SetRect(0, 0, 80, 12)
+	body.Draw(screen)
+
+	positions := row.buttonPositions(80)
+	if len(positions) != 1 {
+		t.Fatalf("unexpected button positions: got %d want 1", len(positions))
+	}
+	_, rowY, _, _ := row.GetRect()
+	x := positions[0].left + (positions[0].right-positions[0].left)/2
+	y := rowY + positions[0].row
+	consumed, _ := body.MouseHandler()(tview.MouseLeftClick, tcell.NewEventMouse(x, y, tcell.ButtonNone, 0), nil)
+	if !consumed {
+		t.Fatal("button flex should route clicks to button rows")
+	}
+	if !activated {
+		t.Fatal("button row should activate through default flex mouse routing")
+	}
+}
+
+func TestResolveInputFileTextKeepsOrdinaryText(t *testing.T) {
+	text, err := resolveInputFileText("LOC_Os03g11614\nOsMADS1")
+	if err != nil {
+		t.Fatalf("ordinary text should be accepted: %v", err)
+	}
+	if text != "LOC_Os03g11614\nOsMADS1" {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestResolveInputFileTextReadsFilePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queries.txt")
+	if err := os.WriteFile(path, []byte("ATPAL1\nATPAL2\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	text, err := resolveInputFileText(`"` + path + `"`)
+	if err != nil {
+		t.Fatalf("file path should be read: %v", err)
+	}
+	if text != "ATPAL1\nATPAL2" {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestResolveInputFileTextRejectsUnreadableFilePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.txt")
+	if text, err := resolveInputFileText(`"` + path + `"`); err == nil || text != "" {
+		t.Fatalf("missing file should be rejected, got text=%q err=%v", text, err)
+	}
+}
+
+func TestSearchResultOffsetKeepsSelectionVisibleWhenMovingDown(t *testing.T) {
+	offset := searchResultOffsetForSelection(0, 3, 10, 4)
+	if offset != 4 {
+		t.Fatalf("offset = %d, want 4", offset)
+	}
+}
+
+func TestSearchResultOffsetKeepsSelectionVisibleWhenMovingUp(t *testing.T) {
+	offset := searchResultOffsetForSelection(8, 2, 10, 4)
+	if offset != 4 {
+		t.Fatalf("offset = %d, want 4", offset)
+	}
+}
+
+func TestSearchResultOffsetStaysZeroWhenViewportFitsPage(t *testing.T) {
+	offset := searchResultOffsetForSelection(0, 9, 10, 20)
+	if offset != 0 {
+		t.Fatalf("offset = %d, want 0", offset)
+	}
+}
+
+func TestRowSelectionGroupsKeepEmptyExplicitGroups(t *testing.T) {
+	rows := []TableRow{
+		{Group: "alpha", Cells: []string{"A"}},
+		{Group: "gamma", Cells: []string{"G"}},
+	}
+	groups := rowSelectionGroups(rows, []string{"alpha", "beta", "gamma"})
+	if len(groups) != 3 {
+		t.Fatalf("group count = %d, want 3", len(groups))
+	}
+	if groups[1].Label != "beta" || len(groups[1].Rows) != 0 || !groups[1].Explicit {
+		t.Fatalf("empty explicit group not preserved: %#v", groups[1])
+	}
+	if len(groups[0].Rows) != 1 || groups[0].Rows[0] != 0 {
+		t.Fatalf("alpha rows not linked: %#v", groups[0])
+	}
+	if len(groups[2].Rows) != 1 || groups[2].Rows[0] != 1 {
+		t.Fatalf("gamma rows not linked: %#v", groups[2])
+	}
+}
+
+func TestChoiceModalOptionsPrependCloseWhenAllowed(t *testing.T) {
+	choices := choiceModalOptions(ChoiceModalPage{
+		AllowClose: true,
+		Choices: []Choice{{
+			Value:       "next",
+			Label:       "Next",
+			Description: "continue",
+		}},
+	})
+	if len(choices) != 2 {
+		t.Fatalf("choice count = %d, want 2", len(choices))
+	}
+	if choices[0].Value != "close" || choices[0].Label != ButtonClose {
+		t.Fatalf("first choice should be Close, got %#v", choices[0])
+	}
+	if choices[1].Value != "next" {
+		t.Fatalf("original choice shifted incorrectly: %#v", choices[1])
+	}
+}
+
+func TestBlastHeaderSplitsIntoTwoRowsWithSlash(t *testing.T) {
+	top, bottom := tableHeaderLines("align_len /\nquery_length (%)")
+	if top != "align_len /" {
+		t.Fatalf("top header = %q, want slash on first line", top)
+	}
+	if bottom != "query_length (%)" {
+		t.Fatalf("bottom header = %q", bottom)
+	}
+
+	layout := newRowSelectionLayout([]TableColumn{{Header: "align_len /\nquery_length (%)"}})
+	if !layout.headerTwoLine || layout.firstDataRow != 3 || layout.dividerRow != 2 {
+		t.Fatalf("two-line layout not activated: %#v", layout)
+	}
+}
+
+func TestUniProtReviewedCellColor(t *testing.T) {
+	column := TableColumn{ID: "uniprot_reviewed"}
+	if got := tableCellColor(column, "reviewed"); got != colorSelectionOn {
+		t.Fatalf("reviewed color = %v", got)
+	}
+	if got := tableCellColor(column, "unreviewed"); got != colorMuted {
+		t.Fatalf("unreviewed color = %v", got)
+	}
+	if got := tableCellColor(column, ""); got != tview.Styles.PrimaryTextColor {
+		t.Fatalf("empty reviewed color = %v", got)
+	}
+}
+
+func TestIndentSecondaryPreservesMultiLineDetails(t *testing.T) {
+	got := indentSecondary("PAL4\n5 lines")
+	if got != "  PAL4\n  5 lines" {
+		t.Fatalf("secondary text = %q", got)
+	}
+}
+
+func TestBlastRunSidebarDrawsSecondaryAsTwoPhysicalLines(t *testing.T) {
+	sidebar := newBlastRunSidebar()
+	sidebar.SetItems([]blastRunSidebarItem{{
+		Primary:   "AT1G12345",
+		Secondary: []string{"PAL4"},
+		Lines:     "5 lines",
+	}})
+	sidebar.SetCurrentItem(0)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(24, 7)
+	sidebar.SetRect(0, 0, 24, 7)
+	sidebar.Draw(screen)
+
+	if !containsText(screenLine(screen, 1, 24), "AT1G12345") {
+		t.Fatalf("primary line missing: %q", screenLine(screen, 1, 24))
+	}
+	if !containsText(screenLine(screen, 2, 24), "PAL4") {
+		t.Fatalf("label line missing: %q", screenLine(screen, 2, 24))
+	}
+	if !containsText(screenLine(screen, 3, 24), "5 lines") {
+		t.Fatalf("lines line missing: %q", screenLine(screen, 3, 24))
+	}
+}
+
+func TestBlastRunSidebarDrawsMemberLabelsAsSeparateLines(t *testing.T) {
+	sidebar := newBlastRunSidebar()
+	sidebar.SetItems([]blastRunSidebarItem{{
+		Primary:   "AT1G12345.1",
+		Secondary: []string{"[VND]", "VND6", "VND7"},
+		Lines:     "12/12 lines",
+	}})
+	sidebar.SetCurrentItem(0)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(24, 8)
+	sidebar.SetRect(0, 0, 24, 8)
+	sidebar.Draw(screen)
+
+	if !containsText(screenLine(screen, 1, 24), "AT1G12345.1") {
+		t.Fatalf("primary line missing: %q", screenLine(screen, 1, 24))
+	}
+	if !containsText(screenLine(screen, 2, 24), "[VND]") {
+		t.Fatalf("family label line missing: %q", screenLine(screen, 2, 24))
+	}
+	if !containsText(screenLine(screen, 3, 24), "VND6") {
+		t.Fatalf("first member line missing: %q", screenLine(screen, 3, 24))
+	}
+	if !containsText(screenLine(screen, 4, 24), "VND7") {
+		t.Fatalf("second member line missing: %q", screenLine(screen, 4, 24))
+	}
+	if !containsText(screenLine(screen, 5, 24), "12/12 lines") {
+		t.Fatalf("lines line missing: %q", screenLine(screen, 5, 24))
+	}
+}
+
+func TestPartialColumnHidingKeepsCompleteColumns(t *testing.T) {
+	table := &rowSelectionTable{Table: tview.NewTable().
+		SetBorders(false).
+		SetSeparator(tview.Borders.Vertical).
+		SetSelectable(true, true).
+		SetFixed(2, 2).
+		SetEvaluateAllRows(true)}
+	table.SetCell(0, 0, paddedTableCell("[x]"))
+	table.SetCell(0, 1, paddedTableCell("row"))
+	table.SetCell(0, 2, paddedTableCell("short"))
+	table.SetCell(0, 3, paddedTableCell("very_long_column_header"))
+	table.SetCell(1, 0, paddedTableCell(""))
+	table.SetCell(1, 1, paddedTableCell(""))
+	table.SetCell(1, 2, paddedTableCell(""))
+	table.SetCell(1, 3, paddedTableCell(""))
+	table.SetCell(2, 0, paddedTableCell("[x]"))
+	table.SetCell(2, 1, paddedTableCell("1"))
+	table.SetCell(2, 2, paddedTableCell("A"))
+	table.SetCell(2, 3, paddedTableCell("BBBBBBBBBBBBBBBBBBBB"))
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(38, 6)
+	table.SetRect(0, 0, 38, 6)
+	table.Draw(screen)
+
+	line := screenLine(screen, 0, 38)
+	if !containsText(line, "short") {
+		t.Fatalf("complete first data column should remain visible: %q", line)
+	}
+	if containsText(line, "very_long_column_header") {
+		t.Fatalf("partial trailing data column should be hidden when a complete data column is visible: %q", line)
+	}
+}
+
+func TestPartialColumnHidingDoesNotBlankCompleteColumnAfterWidePartial(t *testing.T) {
+	table := &rowSelectionTable{Table: tview.NewTable().
+		SetBorders(false).
+		SetSeparator(tview.Borders.Vertical).
+		SetSelectable(true, true).
+		SetFixed(2, 2).
+		SetEvaluateAllRows(true)}
+	table.SetCell(0, 0, paddedTableCell("[x]"))
+	table.SetCell(0, 1, paddedTableCell("row"))
+	table.SetCell(0, 2, paddedTableCell("very_very_very_very_wide_header"))
+	table.SetCell(0, 3, paddedTableCell("fit"))
+	table.SetCell(1, 0, paddedTableCell(""))
+	table.SetCell(1, 1, paddedTableCell(""))
+	table.SetCell(1, 2, paddedTableCell(""))
+	table.SetCell(1, 3, paddedTableCell(""))
+	table.SetCell(2, 0, paddedTableCell("[x]"))
+	table.SetCell(2, 1, paddedTableCell("1"))
+	table.SetCell(2, 2, paddedTableCell("AAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+	table.SetCell(2, 3, paddedTableCell("B"))
+	table.SetOffset(0, 0)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(26, 6)
+	table.SetRect(0, 0, 26, 6)
+	table.Draw(screen)
+
+	if !containsText(screenLine(screen, 0, 26), "fit") {
+		t.Fatalf("next complete data column should be visible: %q", screenLine(screen, 0, 26))
+	}
+	if containsText(screenLine(screen, 0, 26), "very_very") {
+		t.Fatalf("partial wide column should be hidden: %q", screenLine(screen, 0, 26))
+	}
+}
+
+func TestClippedPrimitiveBlocksChildOverflowBelowItsRect(t *testing.T) {
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(20, 6)
+	bgStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	for y := 0; y < 6; y++ {
+		for x := 0; x < 20; x++ {
+			screen.SetContent(x, y, '.', nil, bgStyle)
+		}
+	}
+
+	child := &overflowPrimitive{Box: tview.NewBox()}
+	clipped := clipPrimitive(child)
+	clipped.SetRect(2, 1, 8, 2)
+	clipped.Draw(screen)
+
+	if main, _, _, _ := screen.GetContent(3, 1); main != 'I' {
+		t.Fatalf("expected child content inside clip rect, got %q", main)
+	}
+	if main, _, _, _ := screen.GetContent(3, 4); main != '.' {
+		t.Fatalf("expected overflow below clip rect to be blocked, got %q", main)
+	}
+}
+
+type overflowPrimitive struct {
+	*tview.Box
+}
+
+func screenLine(screen tcell.SimulationScreen, y int, width int) string {
+	runes := make([]rune, 0, width)
+	for x := 0; x < width; x++ {
+		main, _, _, _ := screen.GetContent(x, y)
+		if main == 0 {
+			main = ' '
+		}
+		runes = append(runes, main)
+	}
+	return string(runes)
+}
+
+func containsText(value string, text string) bool {
+	return strings.Contains(value, text)
+}
+
+func (o *overflowPrimitive) Draw(screen tcell.Screen) {
+	x, y, width, height := o.GetRect()
+	for row := 0; row < height+3; row++ {
+		for col := 0; col < width; col++ {
+			ch := 'O'
+			if row < height {
+				ch = 'I'
+			}
+			screen.SetContent(x+col, y+row, ch, nil, tcell.StyleDefault)
+		}
+	}
+}

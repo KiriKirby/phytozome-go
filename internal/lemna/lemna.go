@@ -34,6 +34,7 @@ var (
 	linkPattern        = regexp.MustCompile(`(?is)<a\s+href="([^"]+)">([^<]+)</a>`)
 	spacePattern       = regexp.MustCompile(`\s+`)
 	searchNoisePattern = regexp.MustCompile(`[^a-z0-9]+`)
+	symbolTokenPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{1,8})?\d*\b`)
 )
 
 type Client struct {
@@ -841,6 +842,16 @@ func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model
 	}
 }
 
+// SubmitBlastServerOnly submits a BLAST job to the lemna.org server path without
+// silently falling back to local BLAST. The TUI workflow owns the local fallback
+// decision so users can see and approve the transition explicitly.
+func (c *Client) SubmitBlastServerOnly(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
+		return model.BlastJob{}, fmt.Errorf("server-only BLAST cannot run local program %q", req.Program)
+	}
+	return c.submitBlastToServer(ctx, req)
+}
+
 // submitBlastToServer is a conservative, best-effort server submission helper.
 // It attempts to POST a nucleotide BLAST job to the lemna.org endpoints using the
 // detected ProteomeID. This implementation is intentionally defensive: if the
@@ -926,41 +937,23 @@ func (c *Client) WaitForBlastResults(ctx context.Context, jobID string, pollInte
 	// Support returning local-run results cached by LocalBlastRun/LocalBlastRunFull.
 	// For local jobs we search the cache directory for a cached TSV result and load it.
 	if strings.HasPrefix(jobID, "local-") || strings.HasPrefix(jobID, "local:") {
-		deadline := time.Now().Add(timeout)
-		if pollInterval <= 0 {
-			pollInterval = 1 * time.Second
+		if err := ctx.Err(); err != nil {
+			return model.BlastResult{}, fmt.Errorf("wait for local blast results canceled: %w", err)
 		}
-		for {
-			// Check in-memory cache first.
-			c.mu.RLock()
-			if res, ok := c.localResultsCache[jobID]; ok {
-				c.mu.RUnlock()
-				return res, nil
-			}
-			c.mu.RUnlock()
-
-			// Search cache directory for a matching job file.
-			res, err := c.loadBlastResultFromCache(jobID)
-			if err == nil {
-				// store in memory cache for faster subsequent access
-				c.mu.Lock()
-				c.localResultsCache[jobID] = res
-				c.mu.Unlock()
-				return res, nil
-			}
-
-			// Respect context cancellation.
-			select {
-			case <-ctx.Done():
-				return model.BlastResult{}, fmt.Errorf("wait for local blast results canceled: %w", ctx.Err())
-			case <-time.After(pollInterval):
-				// continue and re-check deadline
-			}
-
-			if time.Now().After(deadline) {
-				return model.BlastResult{}, fmt.Errorf("timeout waiting for local BLAST results for job %s", jobID)
-			}
+		c.mu.RLock()
+		res, ok := c.localResultsCache[jobID]
+		c.mu.RUnlock()
+		if ok {
+			return res, nil
 		}
+		res, err := c.loadBlastResultFromCache(jobID)
+		if err != nil {
+			return model.BlastResult{}, fmt.Errorf("local BLAST finished but cached result %q was not found: %w", jobID, err)
+		}
+		c.mu.Lock()
+		c.localResultsCache[jobID] = res
+		c.mu.Unlock()
+		return res, nil
 	}
 
 	// Non-local jobs: server-side parsing not implemented yet.
@@ -1036,24 +1029,62 @@ func (c *Client) loadBlastResultFromCache(jobID string) (model.BlastResult, erro
 		}
 		hit, _ := strconv.Atoi(fields[0])
 		protein := fields[1]
+		subjectID := protein
 		qseqid := fields[2]
-		qstart, _ := strconv.Atoi(fields[3])
-		qend, _ := strconv.Atoi(fields[4])
-		evalue := fields[5]
-		pident, _ := strconv.ParseFloat(fields[6], 64)
-		alignLen, _ := strconv.Atoi(fields[7])
-		bitscore, _ := strconv.ParseFloat(fields[8], 64)
+		qstartField := 3
+		if len(fields) >= 21 {
+			subjectID = fields[2]
+			qseqid = fields[3]
+			qstartField = 4
+		}
+		qstart, _ := strconv.Atoi(fields[qstartField])
+		qend, _ := strconv.Atoi(fields[qstartField+1])
+		targetFrom, targetTo := 0, 0
+		evalueField := qstartField + 2
+		if len(fields) >= 21 {
+			targetFrom, _ = strconv.Atoi(fields[qstartField+2])
+			targetTo, _ = strconv.Atoi(fields[qstartField+3])
+			evalueField = qstartField + 4
+		}
+		evalue := fields[evalueField]
+		pident, _ := strconv.ParseFloat(fields[evalueField+1], 64)
+		alignLen, _ := strconv.Atoi(fields[evalueField+2])
+		mismatch, gapOpen := 0, 0
+		bitscoreField := evalueField + 3
+		if len(fields) >= 21 {
+			mismatch, _ = strconv.Atoi(fields[evalueField+3])
+			gapOpen, _ = strconv.Atoi(fields[evalueField+4])
+			bitscoreField = evalueField + 5
+		}
+		bitscore, _ := strconv.ParseFloat(fields[bitscoreField], 64)
 
 		row := model.BlastResultRow{
+			SourceDatabase:  "lemna",
 			HitNumber:       hit,
 			Protein:         protein,
+			SubjectID:       subjectID,
 			QueryID:         qseqid,
 			QueryFrom:       qstart,
 			QueryTo:         qend,
+			TargetFrom:      targetFrom,
+			TargetTo:        targetTo,
 			EValue:          evalue,
 			PercentIdentity: pident,
 			AlignLength:     alignLen,
+			Mismatches:      mismatch,
+			GapOpenings:     gapOpen,
 			Bitscore:        bitscore,
+			Identical:       int(pident * float64(alignLen) / 100),
+			Gaps:            gapOpen,
+		}
+		if len(fields) >= 21 {
+			row.TargetLength, _ = strconv.Atoi(fields[bitscoreField+1])
+			row.SequenceID = fields[bitscoreField+2]
+			row.TranscriptID = fields[bitscoreField+3]
+			row.TargetID, _ = strconv.Atoi(fields[bitscoreField+4])
+			row.JBrowseName = fields[bitscoreField+5]
+			row.GeneReportURL = fields[bitscoreField+6]
+			row.Defline = fields[bitscoreField+7]
 		}
 		result.Rows = append(result.Rows, row)
 	}
@@ -1075,13 +1106,16 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 				return nil, err
 			}
 			return &model.QuerySequenceSource{
-				Sequence:       sequence,
-				SourceDatabase: c.Name(),
-				GeneID:         row.GeneIdentifier,
-				TranscriptID:   row.TranscriptID,
-				ProteinID:      row.SequenceID,
-				OrganismShort:  species.JBrowseName,
-				Annotation:     species.GenomeLabel,
+				Sequence:          sequence,
+				SourceDatabase:    c.Name(),
+				SourceProteomeID:  species.ProteomeID,
+				SourceJBrowseName: species.JBrowseName,
+				SourceGenomeLabel: species.GenomeLabel,
+				GeneID:            row.GeneIdentifier,
+				TranscriptID:      row.TranscriptID,
+				ProteinID:         row.SequenceID,
+				OrganismShort:     species.JBrowseName,
+				Annotation:        species.GenomeLabel,
 			}, nil
 		}
 	}
@@ -1336,7 +1370,10 @@ func (c *Client) searchGFFRows(ctx context.Context, release releaseInfo, species
 			}
 			if !ok {
 				row = model.KeywordResultRow{
+					SourceDatabase:      "lemna",
 					SearchTerm:          keyword,
+					LabelName:           keywordShortLabelFromAHRD(keyword, record),
+					ProteinID:           record.ProteinAccession,
 					TranscriptID:        transcriptID,
 					GeneIdentifier:      stripTranscriptSuffix(transcriptID),
 					Genome:              species.DisplayLabel(),
@@ -1346,6 +1383,8 @@ func (c *Client) searchGFFRows(ctx context.Context, release releaseInfo, species
 				}
 			}
 			row.Description = firstNonEmpty(row.Description, record.HumanReadableDescription)
+			row.LabelName = firstNonEmpty(row.LabelName, keywordShortLabelFromAHRD(keyword, record))
+			row.ProteinID = firstNonEmpty(row.ProteinID, record.ProteinAccession)
 			row.ExtraColumns = ensureExtraColumns(row.ExtraColumns)
 			row.ExtraColumns["ahrd_protein_accession"] = record.ProteinAccession
 			row.ExtraColumns["ahrd_blast_hit_accession"] = record.BlastHitAccession
@@ -1735,8 +1774,10 @@ func buildKeywordRowFromGFF(species model.SpeciesCandidate, release releaseInfo,
 	id := firstNonEmpty(attrs["ID"], attrs["Name"], attrs["locus"], attrs["gene_id"], attrs["transcript_id"])
 	parent := firstNonEmpty(attrs["Parent"], attrs["gene"], attrs["gene_id"])
 	transcript := firstNonEmpty(attrs["transcript_id"], attrs["protein_id"], attrs["Name"], id)
-	sequenceID := firstNonEmpty(attrs["protein_id"], transcript, id)
+	proteinID := firstNonEmpty(attrs["protein_id"], attrs["protein"], attrs["protein_accession"])
+	sequenceID := firstNonEmpty(proteinID, transcript, id)
 	description := firstNonEmpty(attrs["product"], attrs["description"], attrs["Note"], attrs["note"])
+	labelName := keywordShortLabelFromGFF(searchTerm, attrs, description)
 
 	extra := map[string]string{
 		"gff_seqid":      gff.SeqID,
@@ -1756,7 +1797,10 @@ func buildKeywordRowFromGFF(species model.SpeciesCandidate, release releaseInfo,
 	}
 
 	return model.KeywordResultRow{
+		SourceDatabase:      "lemna",
 		SearchTerm:          searchTerm,
+		LabelName:           labelName,
+		ProteinID:           proteinID,
 		TranscriptID:        transcript,
 		GeneIdentifier:      firstNonEmpty(parent, id),
 		Genome:              species.DisplayLabel(),
@@ -1803,6 +1847,8 @@ func rowMatchesTerms(row model.KeywordResultRow, terms []string) bool {
 		return false
 	}
 	values := []string{
+		row.LabelName,
+		row.ProteinID,
 		row.TranscriptID,
 		row.GeneIdentifier,
 		row.Aliases,
@@ -1870,6 +1916,105 @@ func ensureExtraColumns(values map[string]string) map[string]string {
 		return values
 	}
 	return make(map[string]string)
+}
+
+func keywordShortLabelFromGFF(_ string, attrs map[string]string, _ string) string {
+	for _, value := range []string{
+		attrs["Alias"],
+		attrs["alias"],
+		attrs["gene_name"],
+		attrs["gene_symbol"],
+		attrs["symbol"],
+		attrs["Name"],
+		attrs["gene"],
+	} {
+		if label := firstSymbolFromDelimited(value); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+func keywordShortLabelFromAHRD(keyword string, record ahrdRecord) string {
+	for _, value := range []string{
+		record.HumanReadableDescription,
+		record.BlastHitAccession,
+		record.Interpro,
+		record.GeneOntologyTerm,
+		keyword,
+	} {
+		if label := firstSymbolFromDelimited(value); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+func firstSymbolFromDelimited(value string) string {
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		part = strings.TrimSpace(part)
+		if label := firstSymbolFromText(part); label != "" {
+			return label
+		}
+	}
+	return ""
+}
+
+func firstSymbolFromText(value string) string {
+	value = cleanText(value)
+	if value == "" {
+		return ""
+	}
+	for _, token := range symbolTokenPattern.FindAllString(value, -1) {
+		if isLikelyShortLabel(token) {
+			return token
+		}
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 1 && isLikelyShortLabel(fields[0]) {
+		return fields[0]
+	}
+	return ""
+}
+
+func isLikelyShortLabel(value string) bool {
+	value = strings.Trim(strings.TrimSpace(value), ".,:;()[]{}")
+	if len(value) < 2 || len(value) > 15 {
+		return false
+	}
+	lower := strings.ToLower(value)
+	switch lower {
+	case "go", "ipr", "pfam", "kegg", "ec", "gene", "mrna", "cds", "rna", "dna", "protein":
+		return false
+	}
+	if strings.Contains(lower, "http") || strings.Contains(lower, "spipo") || strings.Contains(lower, "lem") {
+		return false
+	}
+	hasUpper := false
+	hasDigit := false
+	hasLower := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	if !hasUpper {
+		return false
+	}
+	if strings.Count(value, "_") > 0 {
+		return false
+	}
+	return hasDigit || !hasLower || len(value) <= 6
 }
 
 func stripTranscriptSuffix(value string) string {

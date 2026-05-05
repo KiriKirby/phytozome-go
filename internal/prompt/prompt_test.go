@@ -1,12 +1,9 @@
 package prompt
 
 import (
-	"bytes"
-	"errors"
 	"strings"
 	"testing"
 
-	"github.com/KiriKirby/phytozome-go/internal/locale"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 )
 
@@ -66,105 +63,9 @@ func TestParseRowSpecRangeReversed(t *testing.T) {
 	}
 }
 
-func TestPostRunActionKeywordMode(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("3\n"), &out, locale.English)
-
-	action, err := p.PostRunAction("keyword")
-	if err != nil {
-		t.Fatalf("PostRunAction returned error: %v", err)
-	}
-	if action != "change_mode" {
-		t.Fatalf("unexpected action: got %q want %q", action, "change_mode")
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "Run keyword again with the same species") {
-		t.Fatalf("keyword-specific prompt not shown: %q", output)
-	}
-	if strings.Contains(output, "BLAST again") {
-		t.Fatalf("blast-specific prompt leaked into keyword mode: %q", output)
-	}
-}
-
-func TestPostRunActionBackShortcut(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("back\n"), &out, locale.English)
-
-	action, err := p.PostRunAction("blast")
-	if err != nil {
-		t.Fatalf("PostRunAction returned error: %v", err)
-	}
-	if action != "change_species" {
-		t.Fatalf("unexpected action: got %q want %q", action, "change_species")
-	}
-}
-
-func TestPostRunActionLobbyShortcut(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("lobby\n"), &out, locale.English)
-
-	_, err := p.PostRunAction("blast")
-	if !errors.Is(err, ErrBackToDatabaseSelection) {
-		t.Fatalf("expected ErrBackToDatabaseSelection, got %v", err)
-	}
-}
-
-func TestSelectBlastRowsBack(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("back\n"), &out, locale.English)
-
-	_, err := p.SelectBlastRows([]model.BlastResultRow{
-		{Protein: "AT1G01010.1", Species: "A.thaliana TAIR10", EValue: "0", PercentIdentity: 100, GeneReportURL: "https://example.com"},
-	})
-	if !errors.Is(err, ErrBackToQueryInput) {
-		t.Fatalf("expected ErrBackToQueryInput, got %v", err)
-	}
-}
-
-func TestSelectBlastRowsBatchDoneAll(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("done all\n"), &out, locale.English)
-
-	rows, doneAll, err := p.SelectBlastRowsBatch([]model.BlastResultRow{
-		{Protein: "AT1G01010.1", Species: "A.thaliana TAIR10", EValue: "0", PercentIdentity: 100, GeneReportURL: "https://example.com"},
-	})
-	if err != nil {
-		t.Fatalf("SelectBlastRowsBatch returned error: %v", err)
-	}
-	if !doneAll {
-		t.Fatalf("expected doneAll to be true")
-	}
-	if len(rows) != 1 {
-		t.Fatalf("unexpected selected rows count: %d", len(rows))
-	}
-}
-
-func TestBlastProteinIdentificationsOptionalSkip(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("\n"), &out, locale.English)
-
-	got, err := p.BlastProteinIdentifications(1, false)
-	if err != nil {
-		t.Fatalf("BlastProteinIdentifications returned error: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("expected a single blank label, got %d values: %v", len(got), got)
-	}
-	if got[0] != "" {
-		t.Fatalf("expected a blank label for skipped optional input, got %q", got[0])
-	}
-}
-
-func TestBlastProteinIdentificationsRequiredCount(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("A\nB\n\n"), &out, locale.English)
-
-	got, err := p.BlastProteinIdentifications(2, true)
-	if err != nil {
-		t.Fatalf("BlastProteinIdentifications returned error: %v", err)
-	}
-	want := []string{"A", "B"}
+func TestParseKeywordIdentityValues(t *testing.T) {
+	got := parseKeywordIdentityValues([]string{"ID1 ~", "ID3"})
+	want := []string{"ID1", "", "ID3"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected length: got %d want %d", len(got), len(want))
 	}
@@ -175,97 +76,9 @@ func TestBlastProteinIdentificationsRequiredCount(t *testing.T) {
 	}
 }
 
-func TestChooseBlastProgramShowsDescriptions(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("1\n"), &out, locale.English)
-
-	program, err := p.ChooseBlastProgram([]string{"blastn", "blastx", "tblastn", "blastp"})
-	if err != nil {
-		t.Fatalf("ChooseBlastProgram returned error: %v", err)
-	}
-	if program != "blastn" {
-		t.Fatalf("unexpected program: got %q want %q", program, "blastn")
-	}
-	output := out.String()
-	for _, want := range []string{
-		"Nucleotide query starts here:",
-		"Protein query starts here:",
-		"blastn - nucleotide query -> nucleotide/genome database",
-		"blastx - nucleotide query -> translated protein -> protein database",
-		"tblastn - protein query -> translated nucleotide/genome database",
-		"blastp - protein query -> protein database",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("expected prompt to contain %q, got %q", want, output)
-		}
-	}
-}
-
-func TestChooseBlastExecutionExplainsLocalMode(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("2\n"), &out, locale.English)
-
-	mode, err := p.ChooseBlastExecution()
-	if err != nil {
-		t.Fatalf("ChooseBlastExecution returned error: %v", err)
-	}
-	if mode != "local" {
-		t.Fatalf("unexpected execution mode: got %q want %q", mode, "local")
-	}
-	output := out.String()
-	for _, want := range []string{
-		"download the lemna FASTA files automatically and run BLAST on this computer",
-		"does not require you to prepare the FASTA files yourself",
-		"require NCBI BLAST+ on PATH",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("expected prompt to contain %q, got %q", want, output)
-		}
-	}
-}
-
-func TestBlastSubmitErrorActionBack(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("back\n"), &out, locale.English)
-
-	_, err := p.BlastSubmitErrorAction("submit BLAST job: failed")
-	if !errors.Is(err, ErrBackToBlastProgram) {
-		t.Fatalf("expected ErrBackToBlastProgram, got %v", err)
-	}
-	if !strings.Contains(out.String(), "choose BLAST program / execution target again") {
-		t.Fatalf("back option not shown: %q", out.String())
-	}
-}
-
-func TestChooseModeLobby(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("lobby\n"), &out, locale.English)
-
-	_, err := p.ChooseMode()
-	if !errors.Is(err, ErrBackToDatabaseSelection) {
-		t.Fatalf("expected ErrBackToDatabaseSelection, got %v", err)
-	}
-}
-
-func TestSequenceInputSpawn(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("spawn\n"), &out, locale.English)
-
-	_, err := p.SequenceInput()
-	if !errors.Is(err, ErrBackToModeSelection) {
-		t.Fatalf("expected ErrBackToModeSelection, got %v", err)
-	}
-}
-
-func TestKeywordProteinIdentificationsTilde(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("ID1 ~\n\n"), &out, locale.English)
-
-	got, err := p.KeywordProteinIdentifications(2)
-	if err != nil {
-		t.Fatalf("KeywordProteinIdentifications returned error: %v", err)
-	}
-	want := []string{"ID1", ""}
+func TestParseBlastIdentityValues(t *testing.T) {
+	got := parseBlastIdentityValues([]string{"A", "~", "C"})
+	want := []string{"A", "", "C"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected length: got %d want %d", len(got), len(want))
 	}
@@ -276,40 +89,332 @@ func TestKeywordProteinIdentificationsTilde(t *testing.T) {
 	}
 }
 
-func TestBlastPlusInstallActionInstall(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("install\n"), &out, locale.English)
+func TestBlastRowsDefaultBackTargetReturnsToQueryInput(t *testing.T) {
+	if got := blastRowsBackTarget(); got != ErrBackToQueryInput {
+		t.Fatalf("BLAST row table Back should return to BLAST input, got %v", got)
+	}
+}
 
-	action, err := p.BlastPlusInstallAction("makeblastdb not found")
-	if err != nil {
-		t.Fatalf("BlastPlusInstallAction returned error: %v", err)
+func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
+	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1"}}
+	columns, tableRows := buildKeywordSelectionTable(rows)
+	if len(columns) == 0 {
+		t.Fatal("expected keyword columns")
 	}
-	if action != "install" {
-		t.Fatalf("unexpected action: got %q want %q", action, "install")
+	if len(tableRows) != 1 {
+		t.Fatalf("table rows = %d, want 1 real row", len(tableRows))
 	}
-	output := out.String()
-	for _, want := range []string{
-		"download official NCBI BLAST+ for this app now",
-		"choose BLAST program / execution target again",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("expected prompt to contain %q, got %q", want, output)
+	if tableRows[0].Group != "alpha" {
+		t.Fatalf("unexpected row group: %q", tableRows[0].Group)
+	}
+	if columns[1].ID != "label_name" {
+		t.Fatalf("expected label_name column, got %#v", columns)
+	}
+}
+
+func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
+	row := model.KeywordResultRow{
+		SearchTerm:     "alpha",
+		LabelName:      "C4H",
+		ProteinID:      "prot123",
+		TranscriptID:   "AT1G01010.1",
+		GeneIdentifier: "AT1G01010",
+		Genome:         "Arabidopsis",
+		Description:    "desc",
+	}
+	detail := keywordRowDetail(row)
+	for _, want := range []string{"label_name: C4H", "protein_id: prot123", "transcript: AT1G01010.1"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("keyword detail missing %q: %s", want, detail)
 		}
 	}
 }
 
-func TestBlastProteinIdentificationsSingleBlankAllowed(t *testing.T) {
-	var out bytes.Buffer
-	p := New(strings.NewReader("\n"), &out, locale.English)
+func TestBlastDisplayKeepsLengthComparisonColumnsInOriginalPosition(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		SourceDatabase:                      "lemna",
+		Protein:                             "Spipo11G0031600",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1234567",
+		TargetUniProtCanonicalLengthPercent: "98.50",
+		UniProtCanonicalLength:              "480",
+	}}
+	columns, tableRows := buildBlastSelectionTable(rows)
+	ids := make([]string, 0, len(columns))
+	headers := make(map[string]string, len(columns))
+	for _, column := range columns {
+		ids = append(ids, column.ID)
+		headers[column.ID] = column.Header
+	}
+	joined := strings.Join(ids, ",")
+	for _, unexpected := range []string{"uniprot_keywords", "uniprot_ec", "uniprot_go"} {
+		if strings.Contains(joined, unexpected) {
+			t.Fatalf("display columns should not include %s: %v", unexpected, ids)
+		}
+	}
+	targetIdx := indexOfString(ids, "target_length")
+	ratioIdx := indexOfString(ids, "target_uniprot_canonical_length_percent")
+	alignIdx := indexOfString(ids, "align_len")
+	canonicalIdx := indexOfString(ids, "uniprot_canonical_length")
+	speciesIdx := indexOfString(ids, "species")
+	accessionIdx := indexOfString(ids, "uniprot_accession")
+	if !(targetIdx >= 0 && ratioIdx == targetIdx+1 && alignIdx == ratioIdx+1) {
+		t.Fatalf("length comparison column should remain beside target_length: %v", ids)
+	}
+	if !(canonicalIdx >= 0 && speciesIdx == canonicalIdx+1) {
+		t.Fatalf("canonical length should remain before species: %v", ids)
+	}
+	if accessionIdx <= speciesIdx {
+		t.Fatalf("other UniProt display columns should be after original columns: %v", ids)
+	}
+	if headers["target_uniprot_canonical_length_percent"] != "lemna target_length /\nUniProt canonical length (%)" {
+		t.Fatalf("unexpected dynamic header: %q", headers["target_uniprot_canonical_length_percent"])
+	}
+	if got := tableRows[0].Cells[ratioIdx]; got != "98.50" {
+		t.Fatalf("ratio cell = %q", got)
+	}
+	if got := tableRows[0].Cells[canonicalIdx]; got != "480" {
+		t.Fatalf("canonical length cell = %q", got)
+	}
+}
 
-	got, err := p.BlastProteinIdentifications(1, false)
-	if err != nil {
-		t.Fatalf("BlastProteinIdentifications returned error: %v", err)
+func TestBlastDisplayLeavesUniProtCellsBlankWithoutUniProtData(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		SourceDatabase:                      "lemna",
+		Protein:                             "Spipo11G0031600",
+		UniProtReferenceEnabled:             true,
+		TargetUniProtCanonicalLengthPercent: "98.50",
+		UniProtCanonicalLength:              "480",
+		UniProtProteinName:                  "Should stay blank",
+	}}
+	columns, tableRows := buildBlastSelectionTable(rows)
+	for index, column := range columns {
+		if strings.HasPrefix(column.ID, "uniprot_") || column.ID == "target_uniprot_canonical_length_percent" {
+			if got := tableRows[0].Cells[index]; got != "" {
+				t.Fatalf("%s cell = %q, want blank", column.ID, got)
+			}
+		}
 	}
-	if len(got) != 1 {
-		t.Fatalf("unexpected length: got %d want 1", len(got))
+
+	detail := blastRowDetail(rows[0])
+	if !strings.Contains(detail, "lemna target_length / UniProt canonical length (%): ") {
+		t.Fatalf("detail missing dynamic ratio label: %s", detail)
 	}
-	if got[0] != "" {
-		t.Fatalf("unexpected label: got %q want empty", got[0])
+	if strings.Contains(detail, "Should stay blank") || strings.Contains(detail, "UniProt canonical length: 480") {
+		t.Fatalf("detail should blank UniProt values without accession: %s", detail)
 	}
+}
+
+func TestDefaultBlastFilterSuggestionUsesReferenceEvidenceHardRules(t *testing.T) {
+	rows := []model.BlastResultRow{
+		{
+			Protein:                             "Spipo1_T001",
+			PercentIdentity:                     42,
+			AlignLength:                         220,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A1",
+			TargetUniProtCanonicalLengthPercent: "98.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "present",
+		},
+		{
+			Protein:                             "Spipo2_T001",
+			PercentIdentity:                     45,
+			AlignLength:                         240,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A2",
+			TargetUniProtCanonicalLengthPercent: "100.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "missing",
+		},
+		{
+			Protein:                             "Spipo3_T001",
+			PercentIdentity:                     25,
+			AlignLength:                         280,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A3",
+			TargetUniProtCanonicalLengthPercent: "100.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "partial",
+		},
+		{
+			Protein:                             "Spipo4_T001",
+			PercentIdentity:                     55,
+			AlignLength:                         90,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A4",
+			TargetUniProtCanonicalLengthPercent: "100.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "partial",
+		},
+		{
+			Protein:                             "Spipo5_T001",
+			PercentIdentity:                     60,
+			AlignLength:                         260,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A5",
+			TargetUniProtCanonicalLengthPercent: "40.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "present",
+		},
+	}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	wantSelected := []bool{true, false, true, true, false}
+	wantFlags := []bool{false, true, false, false, true}
+	for i := range wantSelected {
+		if got.Selected[i] != wantSelected[i] || got.Flags[i] != wantFlags[i] {
+			t.Fatalf("row %d selected/flag = %v/%v, want %v/%v", i, got.Selected[i], got.Flags[i], wantSelected[i], wantFlags[i])
+		}
+	}
+}
+
+func TestDefaultBlastFilterSuggestionRebuildsSelection(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                             "Spipo1_T001",
+		PercentIdentity:                     42,
+		AlignLength:                         220,
+		QueryLength:                         300,
+		EValue:                              "1e-80",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1",
+		TargetUniProtCanonicalLengthPercent: "98.0",
+		InterProReferenceEnabled:            true,
+		InterProConservedRegionStatus:       "present",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{
+		Rows:     rows,
+		Selected: []bool{false},
+		Settings: model.DefaultBlastFilterSettings(),
+	})
+	if len(got.Selected) != 1 || !got.Selected[0] || got.Flags[0] {
+		t.Fatalf("filter should restore its own keep recommendation, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionDoesNotUseBlastMetricsAsDefaultHardRules(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                             "Spipo1_T001",
+		PercentIdentity:                     10,
+		AlignLength:                         20,
+		QueryLength:                         300,
+		EValue:                              "1e-2",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1",
+		TargetUniProtCanonicalLengthPercent: "100.0",
+		InterProReferenceEnabled:            true,
+		InterProConservedRegionStatus:       "present",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if len(got.Selected) != 1 || !got.Selected[0] || got.Flags[0] {
+		t.Fatalf("default should keep rows with length and conserved-region support even when BLAST metrics are weak, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestBlastFilterSuggestionCanUseBlastMetricsAsOptionalHardRules(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                             "Spipo1_T001",
+		PercentIdentity:                     80,
+		AlignLength:                         280,
+		QueryLength:                         300,
+		EValue:                              "1e-5",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1",
+		TargetUniProtCanonicalLengthPercent: "100.0",
+		InterProReferenceEnabled:            true,
+		InterProConservedRegionStatus:       "present",
+	}}
+	settings := model.DefaultBlastFilterSettings()
+	settings.MaxEValue = 1e-30
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: settings})
+	if len(got.Selected) != 1 || got.Selected[0] || !got.Flags[0] {
+		t.Fatalf("weak E-value row should be removable when optional E-value hard rule is enabled, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionRequiresLengthRatioByDefault(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                       "Spipo1_T001",
+		PercentIdentity:               80,
+		AlignLength:                   280,
+		QueryLength:                   300,
+		EValue:                        "1e-80",
+		UniProtReferenceEnabled:       true,
+		UniProtAccession:              "A0A1",
+		InterProReferenceEnabled:      true,
+		InterProConservedRegionStatus: "present",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if len(got.Selected) != 1 || got.Selected[0] || !got.Flags[0] {
+		t.Fatalf("missing length ratio should be suggested for removal, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionRequiresInterProEvidenceByDefault(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                             "Spipo1_T001",
+		PercentIdentity:                     80,
+		AlignLength:                         280,
+		QueryLength:                         300,
+		EValue:                              "1e-80",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1",
+		TargetUniProtCanonicalLengthPercent: "100.0",
+		InterProReferenceEnabled:            true,
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if len(got.Selected) != 1 || got.Selected[0] || !got.Flags[0] {
+		t.Fatalf("missing InterPro conserved evidence should be suggested for removal, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionKeepsBestIsoformPerTargetGene(t *testing.T) {
+	rows := []model.BlastResultRow{
+		{
+			Protein:                             "Sp9509d006g001100_T002",
+			PercentIdentity:                     80,
+			AlignLength:                         280,
+			QueryLength:                         300,
+			EValue:                              "1e-90",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A1",
+			TargetUniProtCanonicalLengthPercent: "100.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "present",
+		},
+		{
+			Protein:                             "Sp9509d006g001100_T001",
+			PercentIdentity:                     80,
+			AlignLength:                         280,
+			QueryLength:                         300,
+			EValue:                              "1e-80",
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "A0A1",
+			TargetUniProtCanonicalLengthPercent: "100.0",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "present",
+		},
+	}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if !got.Selected[0] || got.Flags[0] || got.Selected[1] || !got.Flags[1] {
+		t.Fatalf("best isoform by reference evidence should be kept, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func indexOfString(values []string, target string) int {
+	for i, value := range values {
+		if value == target {
+			return i
+		}
+	}
+	return -1
 }
