@@ -614,15 +614,18 @@ func blastUniProtRows(rows []model.BlastResultRow) []report.UniProtRowSummary {
 			continue
 		}
 		out = append(out, report.UniProtRowSummary{
-			Row:         i + 1,
-			Label:       row.LabelName,
-			Target:      firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID),
-			Accession:   row.UniProtAccession,
-			Reviewed:    row.UniProtReviewed,
-			LengthRatio: row.TargetUniProtCanonicalLengthPercent,
-			Fragment:    row.UniProtFragment,
-			Caution:     row.UniProtSequenceCaution,
-			Annotation:  firstNonEmpty(row.UniProtProteinName, row.UniProtFunction),
+			Row:            i + 1,
+			Label:          row.LabelName,
+			Family:         row.FamilyName,
+			Target:         firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID),
+			Accession:      row.UniProtAccession,
+			Reviewed:       row.UniProtReviewed,
+			FamilySupport:  blastFilterFamilySupportSummary(row),
+			FamilySemantic: blastFilterFamilySemanticSummary(row),
+			LengthRatio:    row.TargetUniProtCanonicalLengthPercent,
+			Fragment:       row.UniProtFragment,
+			Caution:        row.UniProtSequenceCaution,
+			Annotation:     firstNonEmpty(row.UniProtProteinName, row.UniProtFunction),
 		})
 		if len(out) >= 8 {
 			break
@@ -724,12 +727,18 @@ func blastFamilyReportBatch(runs []blastQueryRun) *report.FamilyBlastReport {
 		{Name: "PrependOnlyFirstQuery", Value: fmt.Sprintf("%t", familySettings.PrependOnlyFirstQuery), Explanation: "Controls the TXT peptide export header block: true prepends only the first family-member query sequence, false prepends every family-member query sequence in family order."},
 		{Name: "MinimumGroupSize", Value: strconv.Itoa(maxInt(familySettings.MinimumGroupSize, 2)), Explanation: "Minimum number of related queries required before the workflow turns them into one Family BLAST review/export unit."},
 		{Name: "StripArabidopsisPrefix", Value: fmt.Sprintf("%t", familySettings.StripArabidopsisPrefix), Explanation: "If enabled, Arabidopsis At/AT prefixes are ignored while deriving the family_name used for grouping."},
+		{Name: "StripLeadingSpeciesPrefix", Value: fmt.Sprintf("%t", familySettings.StripLeadingSpeciesPrefix), Explanation: "If enabled, generic leading species-style prefixes are stripped before family-name detection."},
 		{Name: "StripTrailingQueryIndex", Value: fmt.Sprintf("%t", familySettings.StripTrailingQueryIndex), Explanation: "If enabled, trailing member numbers such as 1/2/3 are removed before family-name detection."},
 		{Name: "StripAfterNumberSuffix", Value: fmt.Sprintf("%t", familySettings.StripAfterNumberSuffix), Explanation: "If enabled, suffix text after the detected family member number is ignored during family-name detection."},
+		{Name: "NormalizeInnerPunctuation", Value: fmt.Sprintf("%t", familySettings.NormalizeInnerPunctuation), Explanation: "If enabled, punctuation variants inside the label are normalized before family-name detection."},
+		{Name: "StripTerminalSubtypeSuffix", Value: fmt.Sprintf("%t", familySettings.StripTerminalSubtypeSuffix), Explanation: "If enabled, subtype markers like -like are stripped before final family-name creation."},
+		{Name: "UseUniProtReference", Value: fmt.Sprintf("%t", familySettings.UseUniProtReference), Explanation: "If enabled, UniProt evidence contributes to duplicate-target merge ranking inside a family."},
+		{Name: "UseInterProReference", Value: fmt.Sprintf("%t", familySettings.UseInterProReference), Explanation: "If enabled, InterPro conserved-region evidence contributes to duplicate-target merge ranking inside a family."},
+		{Name: "RankingTieBreakerOrder", Value: familySettings.RankingTieBreakerOrder, Explanation: "Priority chain used when family rows are compared during merge and export preparation."},
 	}
 	return &report.FamilyBlastReport{
 		Settings: settingsRows,
-		Groups: out,
+		Groups:   out,
 	}
 }
 
@@ -1116,11 +1125,14 @@ func blastFilterRows(runs []blastQueryRun, rows []model.BlastResultRow, selected
 			Row:             i + 1,
 			Query:           valueOrWorkflow(queryLabels, i, row.LabelName),
 			Label:           row.LabelName,
+			Family:          row.FamilyName,
 			Target:          firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID),
 			Identity:        fmt.Sprintf("%.1f%%", row.PercentIdentity),
 			Coverage:        fmt.Sprintf("%.1f%%", blastRowCoverageForReport(row)),
 			EValue:          row.EValue,
 			LengthRatio:     row.TargetUniProtCanonicalLengthPercent,
+			FamilySupport:   blastFilterFamilySupportSummary(row),
+			FamilySemantic:  blastFilterFamilySemanticSummary(row),
 			UniProtEvidence: firstNonEmpty(row.UniProtReviewed, row.UniProtAccession, row.UniProtProteinName),
 			InterProStatus:  row.InterProConservedRegionStatus,
 			Recommended:     recommended,
@@ -1131,6 +1143,40 @@ func blastFilterRows(runs []blastQueryRun, rows []model.BlastResultRow, selected
 		})
 	}
 	return out
+}
+
+func blastFilterFamilySupportSummary(row model.BlastResultRow) string {
+	if row.FamilyConsensusSupport <= 0 && strings.TrimSpace(row.FamilyConsensusCoveragePercent) == "" {
+		return ""
+	}
+	parts := []string{}
+	if row.FamilyConsensusSupport > 0 {
+		parts = append(parts, fmt.Sprintf("%d", row.FamilyConsensusSupport))
+	}
+	if row.FamilyConsensusSize > 0 {
+		parts = append(parts, fmt.Sprintf("/%d", row.FamilyConsensusSize))
+	}
+	if cov := strings.TrimSpace(row.FamilyConsensusCoveragePercent); cov != "" {
+		parts = append(parts, fmt.Sprintf("(%s%%)", cov))
+	}
+	return strings.Join(parts, " ")
+}
+
+func blastFilterFamilySemanticSummary(row model.BlastResultRow) string {
+	if row.FamilySemanticAnnotationMatchCount <= 0 && strings.TrimSpace(row.FamilySemanticAgreementPercent) == "" {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if row.FamilySemanticAnnotationMatchCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d match", row.FamilySemanticAnnotationMatchCount))
+	}
+	if pct := strings.TrimSpace(row.FamilySemanticAgreementPercent); pct != "" {
+		parts = append(parts, fmt.Sprintf("(%s%%)", pct))
+	}
+	if tokens := strings.TrimSpace(row.FamilySemanticAnnotationMatchTokens); tokens != "" {
+		parts = append(parts, tokens)
+	}
+	return strings.Join(parts, " ")
 }
 
 func blastFilterQuerySummaries(prepared []blastQueryItem, runs []blastQueryRun, allRows []model.BlastResultRow, selectedMask []bool, flags []bool) []report.BlastFilterQuerySummary {
@@ -1266,7 +1312,7 @@ func reportPercentText(value int, total int) string {
 }
 
 func blastFilterScoreSummary(row model.BlastResultRow, settings model.BlastFilterSettings) string {
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 6)
 	if settings.MinIdentityPercent > 0 {
 		parts = append(parts, fmt.Sprintf("identity %.1f", row.PercentIdentity))
 	}
@@ -1279,6 +1325,9 @@ func blastFilterScoreSummary(row model.BlastResultRow, settings model.BlastFilte
 	if row.InterProConservedRegionStatus != "" {
 		parts = append(parts, "InterPro "+row.InterProConservedRegionStatus)
 	}
+	if settings.UseFamilySemanticAgreement && blastRowHasSemanticTokensWorkflow(row) && row.FamilySemanticAnnotationMatchCount > 0 {
+		parts = append(parts, "semantic "+blastFilterFamilySemanticSummary(row))
+	}
 	if len(parts) == 0 {
 		return "baseline BLAST evidence"
 	}
@@ -1286,7 +1335,7 @@ func blastFilterScoreSummary(row model.BlastResultRow, settings model.BlastFilte
 }
 
 func blastFilterFailureSummary(row model.BlastResultRow, settings model.BlastFilterSettings) string {
-	failures := make([]string, 0, 4)
+	failures := make([]string, 0, 5)
 	if settings.UseTargetCanonicalLengthRatio && settings.RequireTargetCanonicalLengthRatio && strings.TrimSpace(row.TargetUniProtCanonicalLengthPercent) == "" {
 		failures = append(failures, "missing length ratio")
 	}
@@ -1306,10 +1355,51 @@ func blastFilterFailureSummary(row model.BlastResultRow, settings model.BlastFil
 			failures = append(failures, "InterPro "+strings.ToLower(strings.TrimSpace(row.InterProConservedRegionStatus)))
 		}
 	}
+	if settings.UseFamilySemanticAgreement && settings.RequireFamilySemanticAgreement && blastRowHasSemanticTokensWorkflow(row) && blastRowHasSemanticReferenceSurfaceWorkflow(row) && !blastRowHasSemanticAgreementPrompt(row, settings) {
+		failures = append(failures, "family semantic mismatch")
+	}
 	if len(failures) == 0 {
 		return "none"
 	}
 	return strings.Join(failures, "; ")
+}
+
+func blastRowHasSemanticAgreementPrompt(row model.BlastResultRow, settings model.BlastFilterSettings) bool {
+	if !blastRowHasSemanticTokensWorkflow(row) {
+		return true
+	}
+	if row.FamilySemanticAnnotationMatchCount < settings.FamilySemanticMinTokenMatches {
+		return false
+	}
+	if settings.FamilySemanticMinAgreementPercent <= 0 {
+		return true
+	}
+	return parseScientificFloatWorkflow(row.FamilySemanticAgreementPercent, 0) >= settings.FamilySemanticMinAgreementPercent
+}
+
+func blastRowHasSemanticTokensWorkflow(row model.BlastResultRow) bool {
+	return strings.TrimSpace(row.FamilySemanticTokens) != "" || strings.TrimSpace(row.FamilySemanticAliasTokens) != ""
+}
+
+func blastRowHasSemanticReferenceSurfaceWorkflow(row model.BlastResultRow) bool {
+	for _, value := range []string{
+		row.UniProtProteinName,
+		row.UniProtEntryName,
+		row.UniProtGeneNames,
+		row.UniProtKeywords,
+		row.UniProtFunction,
+		row.UniProtCatalyticActivity,
+		row.UniProtPathway,
+		row.UniProtDomain,
+		row.UniProtInterPro,
+		row.PfamDomain,
+		row.InterProEntryName,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func blastFilterRecommendation(flags []bool, index int) string {

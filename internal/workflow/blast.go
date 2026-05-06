@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -62,11 +63,11 @@ const (
 	keywordSearchTimeout    = 30 * time.Second
 	queryResolveTimeout     = 30 * time.Second
 	proteinFetchTimeout     = 30 * time.Second
-	maxParallelKeywordJobs  = 6
-	maxParallelQueryJobs    = 6
-	maxParallelFetchJobs    = 8
-	maxParallelUniProtJobs  = 10
-	maxParallelInterProJobs = 10
+	maxParallelKeywordJobs  = 16
+	maxParallelQueryJobs    = 16
+	maxParallelFetchJobs    = 24
+	maxParallelUniProtJobs  = 24
+	maxParallelInterProJobs = 24
 )
 
 type QueryMode string
@@ -145,6 +146,7 @@ type keywordReportRunContext struct {
 
 type blastRowContext struct {
 	Rows             []model.BlastResultRow
+	AllRows          []model.BlastResultRow
 	Numbers          []int
 	Flags            []bool
 	SelectedRowsMask []bool
@@ -1160,6 +1162,10 @@ func (w *BlastWizard) runBlastMode(ctx context.Context, selected model.SpeciesCa
 		}
 		rowContext := *w.lastBlastRowContext
 		rowContext.Rows = append([]model.BlastResultRow(nil), w.lastBlastRowContext.Rows...)
+		rowContext.AllRows = append([]model.BlastResultRow(nil), w.lastBlastRowContext.AllRows...)
+		rowContext.Numbers = append([]int(nil), w.lastBlastRowContext.Numbers...)
+		rowContext.Flags = append([]bool(nil), w.lastBlastRowContext.Flags...)
+		rowContext.SelectedRowsMask = append([]bool(nil), w.lastBlastRowContext.SelectedRowsMask...)
 		w.reuseLastBlastRows = false
 		return w.resumeBlastRowSelection(ctx, rowContext)
 	}
@@ -1607,6 +1613,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 						results.Rows = enriched
 					}
 				}
+				results.Rows = annotateBlastRowsForQueryContext(results.Rows, item)
 				queryRuns = append(queryRuns, blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results})
 				break submitLoop
 			}
@@ -1679,21 +1686,29 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 		filePrefix := sanitizeExportName(displayName)
 		for {
 			txtHeaderLabel := blastTXTHeaderLabel(exportItem, displayName)
-			files, err := w.exportFamilyBlastSelectionsToDir(ctx, rows, rowContext.Rows, rowContext.Numbers, rowContext.Flags, exportItemFamilySources(exportItem), displayName, txtHeaderLabel, filePrefix, outputDir, settings, rowContext.FamilySettings, true)
+			allRows := rowContext.AllRows
+			if len(allRows) == 0 {
+				allRows = rowContext.Results.Rows
+			}
+			files, err := w.exportFamilyBlastSelectionsToDir(ctx, rows, allRows, rowContext.Numbers, rowContext.Flags, exportItemFamilySources(exportItem), displayName, txtHeaderLabel, filePrefix, outputDir, settings, rowContext.FamilySettings, true)
 			if err == nil && settings.WriteReport && strings.TrimSpace(files.ReportPath) == "" {
+				selectedMask := buildBlastSelectedMaskFromSelection(len(allRows), rowContext.Numbers)
+				if len(selectedMask) == 0 {
+					selectedMask = append([]bool(nil), rowContext.SelectedRowsMask...)
+				}
 				reportPath, reportErr := w.renderBlastReportForExport(ctx, blastReportExportContext{
 					Selected:          rowContext.Selected,
 					Prepared:          []blastQueryItem{rowContext.Item},
 					InputPrepared:     blastReportInputPreparedForItem(w.lastBlastReviewContext, rowContext.Item),
-					Run:               blastQueryRun{Index: rowContext.Index, Item: rowContext.Item, Request: rowContext.Request, Results: rowContext.Results, SelectedRows: rowContext.Rows},
-					Runs:              []blastQueryRun{{Index: rowContext.Index, Item: rowContext.Item, Request: rowContext.Request, Results: rowContext.Results, SelectedRows: rowContext.Rows}},
-					SelectedRows:      append([]bool(nil), rowContext.SelectedRowsMask...),
+					Run:               blastQueryRun{Index: rowContext.Index, Item: rowContext.Item, Request: rowContext.Request, Results: rowContext.Results, SelectedRows: rows},
+					Runs:              []blastQueryRun{{Index: rowContext.Index, Item: rowContext.Item, Request: rowContext.Request, Results: rowContext.Results, SelectedRows: rows}},
+					SelectedRows:      selectedMask,
 					Request:           rowContext.Request,
 					BlastProgram:      rowContext.Request.Program,
-					UseUniProt:        blastRowsHaveUniProt(rowContext.Rows),
-					UseInterPro:       blastRowsHaveInterPro(rowContext.Rows),
-					Rows:              rowContext.Rows,
-					AllRows:           rowContext.Rows,
+					UseUniProt:        blastRowsHaveUniProt(allRows),
+					UseInterPro:       blastRowsHaveInterPro(allRows),
+					Rows:              rows,
+					AllRows:           allRows,
 					RowNumbers:        rowContext.Numbers,
 					FilterFlags:       rowContext.Flags,
 					FilterSettings:    rowContext.FilterSettings,
@@ -1753,6 +1768,7 @@ func (w *BlastWizard) reviewSingleBlastRun(ctx context.Context, selected model.S
 	for {
 		w.lastBlastRowContext = &blastRowContext{
 			Rows:           append([]model.BlastResultRow(nil), run.Results.Rows...),
+			AllRows:        append([]model.BlastResultRow(nil), run.Results.Rows...),
 			Item:           run.Item,
 			Selected:       selected,
 			Request:        run.Request,
@@ -1779,6 +1795,8 @@ func (w *BlastWizard) reviewSingleBlastRun(ctx context.Context, selected model.S
 		}
 		if !selection.GenerateFile {
 			if w.lastBlastRowContext != nil {
+				w.lastBlastRowContext.Rows = append([]model.BlastResultRow(nil), selection.Rows...)
+				w.lastBlastRowContext.Numbers = append([]int(nil), selection.RowNumbers...)
 				w.lastBlastRowContext.FilterSettings = selection.FilterSettings
 				w.lastBlastRowContext.FilterApplied = selection.FilterApplied
 				w.lastBlastRowContext.FilterCleared = selection.FilterCleared
@@ -2145,6 +2163,25 @@ func uniqueExportPrefix(base string, used map[string]int) string {
 	return fmt.Sprintf("%s_%d", base, count+1)
 }
 
+func buildBlastSelectedMaskFromSelection(total int, rowNumbers []int) []bool {
+	if total <= 0 {
+		return nil
+	}
+	mask := make([]bool, total)
+	anySelected := false
+	for _, rowNumber := range rowNumbers {
+		if rowNumber <= 0 || rowNumber > total {
+			continue
+		}
+		mask[rowNumber-1] = true
+		anySelected = true
+	}
+	if !anySelected {
+		return nil
+	}
+	return mask
+}
+
 func hasExportedBlastFiles(runs []blastQueryRun) bool {
 	for _, run := range runs {
 		if strings.TrimSpace(run.ExcelPath) != "" || strings.TrimSpace(run.TextPath) != "" {
@@ -2216,6 +2253,34 @@ func applyBlastLabelToRows(rows []model.BlastResultRow, label string) []model.Bl
 	return out
 }
 
+func annotateBlastRowsForQueryContext(rows []model.BlastResultRow, item blastQueryItem) []model.BlastResultRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	family := strings.TrimSpace(item.FamilyName)
+	if family == "" {
+		settings := model.DefaultFamilyBlastSettings()
+		settings.StripArabidopsisPrefix = true
+		if detected := detectFamilyName(familyBlastQueryLabel(item), settings); detected != "" {
+			family = detected
+		}
+	}
+	if family == "" {
+		return append([]model.BlastResultRow(nil), rows...)
+	}
+	memberLabels := []string{familyBlastQueryLabel(item)}
+	aliasTexts := []string{
+		strings.TrimSpace(item.LabelName),
+	}
+	if item.QuerySource != nil {
+		aliasTexts = append(aliasTexts,
+			strings.TrimSpace(item.QuerySource.LabelName),
+			strings.TrimSpace(item.QuerySource.Aliases),
+		)
+	}
+	return annotateFamilyBlastConsensusRows(rows, family, uniqueStrings(memberLabels), uniqueStrings(aliasTexts))
+}
+
 func fillBlastQueryLength(rows []model.BlastResultRow, sequence string) []model.BlastResultRow {
 	out := append([]model.BlastResultRow(nil), rows...)
 	queryLength := len(sanitizeSequence(sequence))
@@ -2236,6 +2301,9 @@ func fillBlastQueryLength(rows []model.BlastResultRow, sequence string) []model.
 	for i := range out {
 		if out[i].QueryLength <= 0 {
 			out[i].QueryLength = queryLength
+		}
+		if out[i].AlignQueryLengthPercent <= 0 && out[i].AlignLength > 0 && out[i].QueryLength > 0 {
+			out[i].AlignQueryLengthPercent = float64(out[i].AlignLength) / float64(out[i].QueryLength) * 100
 		}
 	}
 	return out
@@ -2606,17 +2674,50 @@ func (w *BlastWizard) lookupInterProQueryEntry(ctx context.Context, client *inte
 	if item.QuerySource == nil {
 		return interpro.Entry{}, false
 	}
-	row := model.BlastResultRow{
-		Protein:       item.QuerySource.ProteinID,
-		SubjectID:     item.QuerySource.ProteinID,
-		SequenceID:    item.QuerySource.ProteinID,
-		TranscriptID:  item.QuerySource.TranscriptID,
-		Species:       item.QuerySource.OrganismShort,
-		GeneReportURL: item.QuerySource.NormalizedURL,
-		Defline:       item.QuerySource.Annotation,
-	}
+	row := w.interProQueryLookupRow(item, ctx)
 	entry, ok, _ := w.lookupInterProEntry(ctx, client, row)
 	return entry, ok
+}
+
+func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, _ context.Context) model.BlastResultRow {
+	if item.QuerySource == nil {
+		return model.BlastResultRow{}
+	}
+	source := item.QuerySource
+	row := model.BlastResultRow{
+		Protein:       firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
+		SubjectID:     firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
+		SequenceID:    firstNonEmpty(source.ProteinID, source.TranscriptID),
+		TranscriptID:  source.TranscriptID,
+		Species:       source.OrganismShort,
+		GeneReportURL: firstNonEmpty(source.NormalizedURL, source.OriginalInputURL),
+		JBrowseName:   source.SourceJBrowseName,
+		TargetID:      source.SourceProteomeID,
+		Defline:       source.Annotation,
+	}
+	if resolver, ok := resolverForQuerySource(source, w.httpClient); ok {
+		proteinID := firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID)
+		if proteinID != "" && source.SourceProteomeID > 0 {
+			fetchCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if accessions, err := resolver.FetchUniProtAccessions(fetchCtx, source.SourceProteomeID, proteinID); err == nil && len(accessions) > 0 {
+				row.UniProtAccession = strings.TrimSpace(accessions[0])
+			}
+		}
+	}
+	return row
+}
+
+func resolverForQuerySource(source *model.QuerySequenceSource, httpClient *http.Client) (source.UniProtResolver, bool) {
+	if source == nil {
+		return nil, false
+	}
+	switch strings.ToLower(strings.TrimSpace(source.SourceDatabase)) {
+	case "phytozome":
+		return phytozome.NewClient(httpClient), true
+	default:
+		return nil, false
+	}
 }
 
 func (w *BlastWizard) lookupInterProEntry(ctx context.Context, client *interpro.Client, row model.BlastResultRow) (interpro.Entry, bool, error) {
@@ -2891,31 +2992,65 @@ func detectFamilyBlastGroups(items []blastQueryItem, settings model.FamilyBlastS
 		if family == "" {
 			continue
 		}
-		if _, ok := indexesByFamily[family]; !ok {
-			order = append(order, family)
+		groupKey := family
+		if settings.KeepDistinctQuerySubgroups {
+			if subgroup := familyBlastSubgroupKey(item, settings); subgroup != "" {
+				groupKey = family + "|" + subgroup
+			}
 		}
-		indexesByFamily[family] = append(indexesByFamily[family], i)
-		labelsByFamily[family] = append(labelsByFamily[family], label)
+		if _, ok := indexesByFamily[groupKey]; !ok {
+			order = append(order, groupKey)
+		}
+		indexesByFamily[groupKey] = append(indexesByFamily[groupKey], i)
+		labelsByFamily[groupKey] = append(labelsByFamily[groupKey], label)
 	}
 	out := make([]familyBlastGroup, 0, len(order))
-	for _, family := range order {
-		indexes := indexesByFamily[family]
+	for _, groupKey := range order {
+		indexes := indexesByFamily[groupKey]
 		if len(indexes) < settings.MinimumGroupSize {
 			continue
+		}
+		family := groupKey
+		if pipe := strings.Index(groupKey, "|"); pipe >= 0 {
+			family = groupKey[:pipe]
 		}
 		out = append(out, familyBlastGroup{
 			Name:    family,
 			Indexes: append([]int(nil), indexes...),
-			Labels:  uniqueStrings(labelsByFamily[family]),
+			Labels:  uniqueStrings(labelsByFamily[groupKey]),
 		})
 	}
 	return out
 }
 
+func familyBlastSubgroupKey(item blastQueryItem, settings model.FamilyBlastSettings) string {
+	for _, value := range []string{
+		strings.TrimSpace(item.LabelName),
+		querySourceAliasLabel(item.QuerySource),
+	} {
+		if value == "" {
+			continue
+		}
+		if subgroup := familyBlastCanonicalSubgroupLabel(value, settings); subgroup != "" {
+			return subgroup
+		}
+	}
+	return ""
+}
+
+func familyBlastCanonicalSubgroupLabel(label string, settings model.FamilyBlastSettings) string {
+	label = familyBlastCanonicalLabel(label, settings)
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	return strings.ToUpper(label)
+}
+
 func familyBlastQueryLabel(item blastQueryItem) string {
 	for _, value := range []string{
-		item.LabelName,
 		querySourceAliasLabel(item.QuerySource),
+		item.LabelName,
 		func() string {
 			if item.QuerySource == nil {
 				return ""
@@ -2938,11 +3073,7 @@ func detectFamilyName(label string, settings model.FamilyBlastSettings) string {
 	if label == "" {
 		return ""
 	}
-	fields := strings.Fields(label)
-	if len(fields) > 0 {
-		label = fields[0]
-	}
-	label = strings.Trim(label, " _-;:,()[]{}")
+	label = familyBlastCanonicalLabel(label, settings)
 	if settings.StripArabidopsisPrefix {
 		upper := strings.ToUpper(label)
 		if strings.HasPrefix(upper, "AT") && len(label) > 2 {
@@ -2960,6 +3091,88 @@ func detectFamilyName(label string, settings model.FamilyBlastSettings) string {
 		return ""
 	}
 	return strings.ToUpper(label)
+}
+
+func familyBlastCanonicalLabel(label string, settings model.FamilyBlastSettings) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	if idx := strings.Index(label, "("); idx >= 0 {
+		label = strings.TrimSpace(label[:idx])
+	}
+	fields := strings.Fields(label)
+	if len(fields) > 0 {
+		label = fields[0]
+	}
+	label = strings.Trim(label, " _-;:,()[]{}")
+	if settings.NormalizeInnerPunctuation {
+		label = normalizeFamilyPunctuation(label)
+	}
+	if settings.StripLeadingSpeciesPrefix {
+		label = stripLeadingFamilySpeciesPrefix(label)
+	}
+	if settings.StripTerminalSubtypeSuffix {
+		label = stripFamilyTerminalSubtypeSuffix(label)
+	}
+	label = strings.Trim(label, " ._-")
+	return label
+}
+
+func normalizeFamilyPunctuation(label string) string {
+	replacer := strings.NewReplacer("’", "", "'", "", ".", ".", "-", "-", "_", "_", "/", "-", ":", "-", " ", "")
+	return replacer.Replace(label)
+}
+
+func stripLeadingFamilySpeciesPrefix(label string) string {
+	if label == "" {
+		return ""
+	}
+	for _, prefix := range []string{"sp", "le", "wo", "os", "at"} {
+		if len(label) <= len(prefix)+1 {
+			continue
+		}
+		if !strings.EqualFold(label[:len(prefix)], prefix) {
+			continue
+		}
+		switch label[len(prefix)] {
+		case '_', '-', '.', ':':
+			rest := strings.TrimLeft(label[len(prefix)+1:], " _-.:")
+			if rest != "" {
+				return rest
+			}
+		}
+	}
+	return label
+}
+
+func stripFamilyTerminalSubtypeSuffix(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	lower := strings.ToLower(label)
+	for _, suffix := range []string{"-like", "_like", ".like"} {
+		if strings.HasSuffix(lower, suffix) && len(label) > len(suffix) {
+			return strings.TrimSpace(label[:len(label)-len(suffix)])
+		}
+	}
+	if idx := strings.LastIndexAny(label, "-_."); idx > 0 && idx < len(label)-1 {
+		tail := label[idx+1:]
+		hasLetter := false
+		for _, r := range tail {
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				hasLetter = true
+			} else {
+				hasLetter = false
+				break
+			}
+		}
+		if hasLetter && len(tail) <= 2 {
+			return strings.TrimSpace(label[:idx])
+		}
+	}
+	return label
 }
 
 func stripAfterFamilyMemberNumber(label string) string {
@@ -3061,9 +3274,22 @@ func buildFamilyBlastRun(group familyBlastGroup, prepared []blastQueryItem, runs
 		return blastQueryItem{}, blastQueryRun{}, false
 	}
 	rowsBeforeMerge := len(rows)
+	rows = prioritizeFamilyBlastRows(rows, settings)
 	if settings.MergeRowsByTarget {
 		rows = mergeFamilyBlastRowsByTarget(rows, settings)
 	}
+	aliasTexts := make([]string, 0, len(group.Indexes)*3)
+	for _, index := range group.Indexes {
+		item := prepared[index]
+		aliasTexts = append(aliasTexts, strings.TrimSpace(item.LabelName))
+		if item.QuerySource != nil {
+			aliasTexts = append(aliasTexts,
+				strings.TrimSpace(item.QuerySource.LabelName),
+				strings.TrimSpace(item.QuerySource.Aliases),
+			)
+		}
+	}
+	rows = annotateFamilyBlastConsensusRows(rows, group.Name, uniqueStrings(memberLabels), uniqueStrings(aliasTexts))
 	item := blastQueryItem{
 		RawInput:       strings.Join(memberLabels, "\n"),
 		LabelName:      group.Name,
@@ -3091,6 +3317,225 @@ func buildFamilyBlastRun(group familyBlastGroup, prepared []blastQueryItem, runs
 	return item, run, true
 }
 
+func annotateFamilyBlastConsensusRows(rows []model.BlastResultRow, family string, memberLabels []string, aliasTexts []string) []model.BlastResultRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	normalizedMembers := make([]string, 0, len(memberLabels))
+	for _, label := range memberLabels {
+		label = strings.TrimSpace(label)
+		if label != "" {
+			normalizedMembers = append(normalizedMembers, label)
+		}
+	}
+	memberCount := len(uniqueStrings(normalizedMembers))
+	semanticTokens := familySemanticTokensFromMembers(family, normalizedMembers, aliasTexts)
+	semanticTokenText := strings.Join(semanticTokens.Core, "; ")
+	semanticAliasText := strings.Join(semanticTokens.Aliases, "; ")
+	supportByTarget := map[string]map[string]struct{}{}
+	bestLabelByTarget := map[string]string{}
+	for _, row := range rows {
+		target := familyBlastTargetKey(row)
+		if target == "" {
+			continue
+		}
+		if _, ok := supportByTarget[target]; !ok {
+			supportByTarget[target] = map[string]struct{}{}
+		}
+		label := strings.TrimSpace(row.LabelName)
+		if label != "" {
+			supportByTarget[target][label] = struct{}{}
+			if bestLabelByTarget[target] == "" {
+				bestLabelByTarget[target] = label
+			}
+		}
+	}
+	out := make([]model.BlastResultRow, len(rows))
+	for i, row := range rows {
+		row.FamilyName = family
+		row.FamilyMemberLabels = strings.Join(uniqueStrings(normalizedMembers), "; ")
+		row.FamilySemanticTokens = semanticTokenText
+		row.FamilySemanticAliasTokens = semanticAliasText
+		matches := familySemanticAnnotationAgreement(row, semanticTokens)
+		row.FamilySemanticAnnotationMatchCount = len(matches)
+		row.FamilySemanticAnnotationMatchTokens = strings.Join(matches, "; ")
+		if total := len(semanticTokens.All()); total > 0 {
+			row.FamilySemanticAgreementPercent = fmt.Sprintf("%.1f", float64(len(matches))/float64(total)*100)
+		}
+		target := familyBlastTargetKey(row)
+		if target != "" {
+			row.FamilyConsensusSupport = len(supportByTarget[target])
+			if memberCount > 0 {
+				row.FamilyConsensusSize = memberCount
+				row.FamilyConsensusCoveragePercent = fmt.Sprintf("%.1f", float64(row.FamilyConsensusSupport)/float64(memberCount)*100)
+			}
+			row.FamilyConsensusPrimaryLabel = bestLabelByTarget[target]
+		}
+		out[i] = row
+	}
+	return out
+}
+
+type familySemanticTokenSet struct {
+	Core    []string
+	Aliases []string
+}
+
+func (set familySemanticTokenSet) All() []string {
+	return uniqueStrings(append(append([]string(nil), set.Core...), set.Aliases...))
+}
+
+func familySemanticTokensFromMembers(family string, memberLabels []string, aliasTexts []string) familySemanticTokenSet {
+	coreSeen := map[string]struct{}{}
+	aliasSeen := map[string]struct{}{}
+	core := make([]string, 0, 8)
+	aliases := make([]string, 0, 16)
+	addCore := func(value string) {
+		value = normalizeFamilySemanticToken(value)
+		if value == "" {
+			return
+		}
+		if _, ok := coreSeen[value]; ok {
+			return
+		}
+		coreSeen[value] = struct{}{}
+		core = append(core, value)
+	}
+	addAlias := func(value string) {
+		value = normalizeFamilySemanticToken(value)
+		if value == "" {
+			return
+		}
+		if _, ok := aliasSeen[value]; ok {
+			return
+		}
+		aliasSeen[value] = struct{}{}
+		aliases = append(aliases, value)
+	}
+	addCore(family)
+	for _, label := range memberLabels {
+		for _, token := range splitFamilySemanticTokens(label) {
+			addAlias(token)
+		}
+	}
+	for _, aliasText := range aliasTexts {
+		for _, token := range splitFamilySemanticTokens(aliasText) {
+			addAlias(token)
+		}
+	}
+	for _, token := range foldFamilySemanticAliases(family) {
+		addAlias(token)
+	}
+	return familySemanticTokenSet{Core: core, Aliases: aliases}
+}
+
+func familySemanticAnnotationAgreement(row model.BlastResultRow, tokens familySemanticTokenSet) []string {
+	if len(tokens.All()) == 0 {
+		return nil
+	}
+	text := familySemanticAnnotationText(row)
+	if text == "" {
+		return nil
+	}
+	matches := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	for _, token := range tokens.All() {
+		if token == "" {
+			continue
+		}
+		if !strings.Contains(text, token) {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		matches = append(matches, token)
+	}
+	return matches
+}
+
+func familySemanticAnnotationText(row model.BlastResultRow) string {
+	parts := []string{
+		row.UniProtProteinName,
+		row.UniProtEntryName,
+		row.UniProtGeneNames,
+		row.UniProtKeywords,
+		row.UniProtFunction,
+		row.UniProtCatalyticActivity,
+		row.UniProtPathway,
+		row.UniProtDomain,
+		row.UniProtInterPro,
+		row.PfamDomain,
+		row.InterProEntryName,
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if normalized := normalizeFamilySemanticText(part); normalized != "" {
+			out = append(out, normalized)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func normalizeFamilySemanticText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("-", "", "_", "", "/", "", "\\", "", "'", "", "\"", "", "(", "", ")", "", "[", "", "]", "", "{", "", "}", "", ",", "", ";", "", ":", "", ".", "", " ", "")
+	return replacer.Replace(value)
+}
+
+func normalizeFamilySemanticToken(value string) string {
+	value = normalizeFamilySemanticText(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 1 {
+		return ""
+	}
+	return value
+}
+
+func splitFamilySemanticTokens(label string) []string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return nil
+	}
+	fields := regexp.MustCompile(`[A-Za-z0-9']+`).FindAllString(label, -1)
+	out := make([]string, 0, len(fields)+1)
+	if canonical := normalizeFamilySemanticToken(label); canonical != "" {
+		out = append(out, canonical)
+	}
+	for _, field := range fields {
+		token := normalizeFamilySemanticToken(field)
+		if token == "" {
+			continue
+		}
+		out = append(out, token)
+		token = strings.TrimRight(token, "0123456789")
+		if token != "" {
+			out = append(out, token)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func foldFamilySemanticAliases(family string) []string {
+	normalized := normalizeFamilySemanticToken(family)
+	switch normalized {
+	case "ccoamt", "ccoaomt":
+		return []string{"ccoamt", "ccoaomt", "caffeoylcoao methyltransferase", "caffeoylcoaomethyltransferase"}
+	case "comt", "omt":
+		return []string{"comt", "omt", "caffeicacidomethyltransferase", "caffeateomethyltransferase", "ocaffeoylomt"}
+	case "f5h", "fah":
+		return []string{"f5h", "fah", "ferulate5hydroxylase", "ferulicacid5hydroxylase", "cyp84"}
+	default:
+		return nil
+	}
+}
+
 func mergeFamilyBlastRowsByTarget(rows []model.BlastResultRow, settings model.FamilyBlastSettings) []model.BlastResultRow {
 	if !settings.KeepBestHitPerTarget {
 		return append([]model.BlastResultRow(nil), rows...)
@@ -3113,6 +3558,14 @@ func mergeFamilyBlastRowsByTarget(rows []model.BlastResultRow, settings model.Fa
 	return out
 }
 
+func prioritizeFamilyBlastRows(rows []model.BlastResultRow, settings model.FamilyBlastSettings) []model.BlastResultRow {
+	out := append([]model.BlastResultRow(nil), rows...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return familyBlastRowLess(out[i], out[j], settings)
+	})
+	return out
+}
+
 func familyBlastTargetKey(row model.BlastResultRow) string {
 	for _, value := range []string{row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID, row.GeneReportURL} {
 		value = strings.ToLower(strings.TrimSpace(value))
@@ -3131,35 +3584,102 @@ func familyBlastTargetKey(row model.BlastResultRow) string {
 }
 
 func betterFamilyBlastRow(left model.BlastResultRow, right model.BlastResultRow, settings model.FamilyBlastSettings) model.BlastResultRow {
-	leftEvidence := familyBlastReferenceScore(left, settings)
-	rightEvidence := familyBlastReferenceScore(right, settings)
-	if rightEvidence > leftEvidence {
-		return right
-	}
-	if rightEvidence < leftEvidence {
-		return left
-	}
-	leftE := parseScientificFloatWorkflow(left.EValue, 1e300)
-	rightE := parseScientificFloatWorkflow(right.EValue, 1e300)
-	if rightE < leftE {
-		return right
-	}
-	if rightE > leftE {
-		return left
-	}
-	if right.PercentIdentity > left.PercentIdentity {
-		return right
-	}
-	if right.PercentIdentity < left.PercentIdentity {
-		return left
-	}
-	if right.AlignQueryLengthPercent > left.AlignQueryLengthPercent {
-		return right
-	}
-	if right.Bitscore > left.Bitscore {
+	if familyBlastRowLess(right, left, settings) {
 		return right
 	}
 	return left
+}
+
+func familyBlastRowLess(left model.BlastResultRow, right model.BlastResultRow, settings model.FamilyBlastSettings) bool {
+	for _, field := range familyBlastRankingOrder(settings) {
+		switch field {
+		case "reference":
+			leftEvidence := familyBlastReferenceScore(left, settings)
+			rightEvidence := familyBlastReferenceScore(right, settings)
+			if leftEvidence != rightEvidence {
+				return leftEvidence > rightEvidence
+			}
+		case "evalue":
+			leftE := parseScientificFloatWorkflow(left.EValue, 1e300)
+			rightE := parseScientificFloatWorkflow(right.EValue, 1e300)
+			if leftE != rightE {
+				return leftE < rightE
+			}
+		case "identity":
+			if left.PercentIdentity != right.PercentIdentity {
+				return left.PercentIdentity > right.PercentIdentity
+			}
+		case "coverage":
+			leftCoverage := familyBlastCoverage(left)
+			rightCoverage := familyBlastCoverage(right)
+			if leftCoverage != rightCoverage {
+				return leftCoverage > rightCoverage
+			}
+		case "targetlength":
+			if left.TargetLength != right.TargetLength {
+				return left.TargetLength > right.TargetLength
+			}
+		case "bitscore":
+			if left.Bitscore != right.Bitscore {
+				return left.Bitscore > right.Bitscore
+			}
+		}
+	}
+	return familyBlastTargetKey(left) < familyBlastTargetKey(right)
+}
+
+func familyBlastCoverage(row model.BlastResultRow) float64 {
+	if row.AlignQueryLengthPercent > 0 {
+		return row.AlignQueryLengthPercent
+	}
+	if row.AlignLength > 0 && row.QueryLength > 0 {
+		return float64(row.AlignLength) / float64(row.QueryLength) * 100
+	}
+	return 0
+}
+
+func familyBlastRankingOrder(settings model.FamilyBlastSettings) []string {
+	order := parseFamilyBlastRankingOrder(settings.RankingTieBreakerOrder)
+	if len(order) == 0 {
+		order = parseFamilyBlastRankingOrder("reference,evalue,identity,coverage,bitscore")
+	}
+	return order
+}
+
+func parseFamilyBlastRankingOrder(value string) []string {
+	known := map[string]bool{
+		"reference":    true,
+		"evalue":       true,
+		"identity":     true,
+		"coverage":     true,
+		"targetlength": true,
+		"bitscore":     true,
+	}
+	seen := make(map[string]bool, len(known))
+	out := make([]string, 0, len(known))
+	for _, part := range strings.Split(value, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		part = strings.ReplaceAll(part, "-", "")
+		part = strings.ReplaceAll(part, "_", "")
+		switch part {
+		case "ref", "referencescore", "externalevidence", "evidence":
+			part = "reference"
+		case "eval", "evaluecutoff":
+			part = "evalue"
+		case "querycoverage", "aligncoverage", "alignquerycoverage":
+			part = "coverage"
+		case "targetlen", "length", "targetlengthratio":
+			part = "targetlength"
+		case "bit", "bits":
+			part = "bitscore"
+		}
+		if !known[part] || seen[part] {
+			continue
+		}
+		seen[part] = true
+		out = append(out, part)
+	}
+	return out
 }
 
 func familyBlastReferenceScore(row model.BlastResultRow, settings model.FamilyBlastSettings) int {
@@ -3364,15 +3884,165 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 		labelCtx := mergeContexts(ctx, taskCtx)
 		phytozomeSource := phytozome.NewClient(w.httpClient)
 		out := cloneBlastQueryItems(items)
-		for i := range out {
-			if strings.TrimSpace(out[i].LabelName) != "" {
-				continue
-			}
-			taskUpdate(fmt.Sprintf("Searching label for query %d/%d...", i+1, len(out)))
-			out[i].LabelName = w.autoIdentifyBlastLabel(labelCtx, phytozomeSource, selected, out[i])
+		workerCount := parallelismFor(len(out), maxParallelQueryJobs)
+		type labelResult struct {
+			index int
+			label string
 		}
+		jobs := make(chan int)
+		results := make(chan labelResult, len(out))
+		var workers sync.WaitGroup
+		for range workerCount {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for idx := range jobs {
+					if strings.TrimSpace(out[idx].LabelName) != "" {
+						results <- labelResult{index: idx, label: out[idx].LabelName}
+						continue
+					}
+					results <- labelResult{
+						index: idx,
+						label: w.autoIdentifyBlastLabel(labelCtx, phytozomeSource, selected, out[idx]),
+					}
+				}
+			}()
+		}
+		go func() {
+			for i := range out {
+				select {
+				case <-labelCtx.Done():
+					close(jobs)
+					return
+				case jobs <- i:
+				}
+			}
+			close(jobs)
+		}()
+		completed := 0
+		for completed < len(out) {
+			select {
+			case <-labelCtx.Done():
+				workers.Wait()
+				return nil, labelCtx.Err()
+			case result := <-results:
+				if result.index >= 0 && result.index < len(out) {
+					out[result.index].LabelName = result.label
+				}
+				completed++
+				taskUpdate(fmt.Sprintf("Searching labels... %d/%d", completed, len(out)))
+			}
+		}
+		workers.Wait()
+		out = harmonizeAutoIdentifiedBlastLabels(out)
 		return out, nil
 	})
+}
+
+func harmonizeAutoIdentifiedBlastLabels(items []blastQueryItem) []blastQueryItem {
+	out := cloneBlastQueryItems(items)
+	if len(out) <= 1 {
+		return out
+	}
+	settings := model.DefaultFamilyBlastSettings()
+	candidatesByIndex := make([][]string, len(out))
+	familyCounts := map[string]int{}
+	addFamily := func(label string) {
+		if family := detectFamilyName(label, settings); family != "" {
+			familyCounts[family]++
+		}
+	}
+	for i, item := range out {
+		candidates := blastAutoLabelCandidates(item)
+		candidatesByIndex[i] = candidates
+		for _, candidate := range candidates {
+			addFamily(candidate)
+		}
+	}
+	for i := range out {
+		best := strings.TrimSpace(out[i].LabelName)
+		bestScore := -1
+		for _, candidate := range candidatesByIndex[i] {
+			score := blastAutoLabelCoordinationScore(candidate, familyCounts, settings)
+			if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+				best = candidate
+				bestScore = score
+			}
+		}
+		if strings.TrimSpace(best) != "" {
+			out[i].LabelName = best
+			if out[i].QuerySource != nil {
+				out[i].QuerySource.LabelName = best
+			}
+		}
+	}
+	return out
+}
+
+func blastAutoLabelCandidates(item blastQueryItem) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 12)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToUpper(value)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, value)
+	}
+	if item.QuerySource != nil {
+		add(item.QuerySource.LabelName)
+		for _, part := range strings.FieldsFunc(item.QuerySource.Aliases, func(r rune) bool {
+			return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+		}) {
+			add(part)
+		}
+		for _, part := range autoDefineCandidates(item.QuerySource.AutoDefine) {
+			add(part)
+		}
+	}
+	add(item.LabelName)
+	return out
+}
+
+func blastAutoLabelCoordinationScore(label string, familyCounts map[string]int, settings model.FamilyBlastSettings) int {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return -1
+	}
+	score := aliasPreferenceScore(label) + queryAliasPrimarySymbolBonus(label)
+	if family := detectFamilyName(label, settings); family != "" {
+		score += familyCounts[family] * 30
+	}
+	if looksLikeFamilyMemberStyleLabel(label) {
+		score += 12
+	}
+	return score
+}
+
+func looksLikeFamilyMemberStyleLabel(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '-', r == '\'', r == '.':
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
 }
 
 func blastLabelFallbackSpecies(selected model.SpeciesCandidate, candidates []model.SpeciesCandidate) (model.SpeciesCandidate, bool) {
@@ -4832,13 +5502,16 @@ func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context,
 }
 
 func autoIdentifyKeywordGroupLabel(group model.KeywordSearchGroup) string {
+	if label := bestKeywordRowLabel(group.Rows); label != "" {
+		return label
+	}
 	for _, row := range group.Rows {
 		if label := rowKeywordLabelName(row); label != "" {
 			return label
 		}
 	}
 	for _, row := range group.Rows {
-		if label := firstAlias(row.Aliases); label != "" {
+		if label := bestAlias(row.Aliases); label != "" {
 			return label
 		}
 	}
@@ -4922,8 +5595,11 @@ func findArabidopsisThalianaSpecies(candidates []model.SpeciesCandidate) (model.
 }
 
 func keywordLabelFromPhytozomeRows(rows []model.KeywordResultRow) string {
+	if label := bestKeywordRowLabel(rows); label != "" {
+		return label
+	}
 	for _, row := range rows {
-		if label := firstAlias(row.Aliases); label != "" {
+		if label := bestAlias(row.Aliases); label != "" {
 			return label
 		}
 	}
@@ -4933,6 +5609,122 @@ func keywordLabelFromPhytozomeRows(rows []model.KeywordResultRow) string {
 		}
 	}
 	return ""
+}
+
+func bestKeywordRowLabel(rows []model.KeywordResultRow) string {
+	best := ""
+	bestScore := -1
+	for _, row := range rows {
+		candidates := []string{
+			rowKeywordLabelName(row),
+			bestAlias(row.Aliases),
+			labelFromAutoDefine(row.AutoDefine),
+		}
+		for _, candidate := range candidates {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			score := aliasPreferenceScore(candidate)
+			if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+				best = candidate
+				bestScore = score
+			}
+		}
+	}
+	return best
+}
+
+func labelFromAutoDefine(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	best := ""
+	bestScore := -1
+	for _, candidate := range autoDefineCandidates(value) {
+		score := autoDefineLabelScore(candidate)
+		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func autoDefineCandidates(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '(' || r == ')' || r == ',' || r == ';' || r == '/' || r == '\t' || r == '\r' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !looksLikeAliasToken(part) {
+			continue
+		}
+		key := strings.ToUpper(part)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, part)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := aliasPreferenceScore(out[i])
+		right := aliasPreferenceScore(out[j])
+		if left != right {
+			return left > right
+		}
+		return len(out[i]) < len(out[j])
+	})
+	return out
+}
+
+func autoDefineLabelScore(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return -1
+	}
+	score := aliasPreferenceScore(value)
+	if strings.Contains(value, "'") {
+		score += 10
+	}
+	if len(value) <= 4 {
+		score += 12
+	} else if len(value) <= 6 {
+		score += 8
+	} else if len(value) <= 8 {
+		score += 4
+	} else {
+		score -= len(value) - 8
+	}
+	upper := strings.ToUpper(value)
+	if strings.HasPrefix(upper, "CYP") && len(value) > 6 {
+		score -= 8
+	}
+	return score
+}
+
+func looksLikeAliasToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 16 {
+		return false
+	}
+	hasLetter := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9', r == '-', r == '\'', r == '.':
+		default:
+			return false
+		}
+	}
+	return hasLetter
 }
 
 func arabidopsisGeneSearchTerm(value string) string {
@@ -5066,8 +5858,8 @@ func inferKeywordAutoLabelSource(group model.KeywordSearchGroup, label string) (
 		}
 	}
 	for _, row := range group.Rows {
-		if alias := firstAlias(row.Aliases); alias != "" && (label == "" || alias == label) {
-			return "first alias", alias
+		if alias := bestAlias(row.Aliases); alias != "" && (label == "" || alias == label) {
+			return "best alias candidate", alias
 		}
 	}
 	for _, row := range group.Rows {
@@ -5175,6 +5967,142 @@ func firstAlias(value string) string {
 	return ""
 }
 
+func bestAlias(value string) string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	})
+	best := ""
+	bestScore := -1
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		score := aliasPreferenceScore(part) + queryAliasPrimarySymbolBonus(part)
+		if score > bestScore || (score == bestScore && len(part) < len(best)) {
+			best = part
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func queryAliasPrimarySymbolBonus(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	upper := strings.ToUpper(value)
+	score := 0
+	if looksLikePrimaryAliasSymbol(upper) {
+		score += 30
+	}
+	if strings.HasPrefix(upper, "AT") && len(upper) > 4 {
+		score -= 8
+	}
+	return score
+}
+
+func looksLikePrimaryAliasSymbol(value string) bool {
+	hasLetter := false
+	hasDigit := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+func aliasPreferenceScore(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return -1
+	}
+	score := 0
+	hasLetter := false
+	hasDigit := false
+	upperCount := 0
+	lowerCount := 0
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+			upperCount++
+			score += 2
+		case r >= 'a' && r <= 'z':
+			hasLetter = true
+			lowerCount++
+			score += 1
+		case r >= '0' && r <= '9':
+			hasDigit = true
+			score += 1
+		case r == '-' || r == '\'':
+			score += 1
+		case r == '_' || r == '/' || r == '.':
+			score -= 2
+		case r == ' ' || r == '\t':
+			score -= 8
+		default:
+			score -= 4
+		}
+	}
+	upper := strings.ToUpper(value)
+	switch {
+	case strings.HasPrefix(upper, "AT") && hasDigit:
+		score -= 12
+	case strings.HasPrefix(upper, "CYP") && hasDigit:
+		score -= 6
+	case strings.HasPrefix(upper, "REF") && hasDigit:
+		score -= 6
+	}
+	if hasLetter && hasDigit {
+		score += 8
+	}
+	if strings.Contains(value, "'") {
+		score += 8
+	}
+	if aliasHasInternalDigitPattern(value) {
+		score += 6
+	}
+	if upperCount > 0 && lowerCount == 0 {
+		score += 4
+	}
+	if len(value) <= 8 {
+		score += 6
+	} else if len(value) <= 12 {
+		score += 2
+	} else {
+		score -= len(value) - 12
+	}
+	return score
+}
+
+func aliasHasInternalDigitPattern(value string) bool {
+	seenDigit := false
+	seenLetterAfterDigit := false
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			seenDigit = true
+		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+			if seenDigit {
+				seenLetterAfterDigit = true
+			}
+		}
+	}
+	if !seenLetterAfterDigit {
+		return false
+	}
+	last := rune(value[len(value)-1])
+	return last >= '0' && last <= '9'
+}
+
 func autoIdentifyBlastLabel(item blastQueryItem) string {
 	if label := fastaHeaderLabelNameFromInput(item.RawInput); label != "" {
 		return label
@@ -5234,10 +6162,10 @@ func querySourceAliasLabel(source *model.QuerySequenceSource) string {
 	if source == nil {
 		return ""
 	}
-	if label := firstAlias(source.Aliases); label != "" {
+	if label := strings.TrimSpace(source.LabelName); label != "" {
 		return label
 	}
-	if label := strings.TrimSpace(source.LabelName); label != "" {
+	if label := bestAlias(source.Aliases); label != "" {
 		return label
 	}
 	return ""

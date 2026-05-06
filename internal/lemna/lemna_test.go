@@ -2,6 +2,7 @@ package lemna
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -174,5 +175,31 @@ func TestBuildKeywordRowFromGFFKeepsProteinIDSeparateFromLabel(t *testing.T) {
 	}
 	if row.ProteinID != "prot123" {
 		t.Fatalf("unexpected protein id: %q", row.ProteinID)
+	}
+}
+
+func TestFetchUniProtAccessionsReplaySamples(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-backed lemna replay sample test in short mode")
+	}
+	client := NewClient(http.DefaultClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if _, err := client.FetchSpeciesCandidates(ctx); err != nil {
+		t.Fatalf("fetch species candidates: %v", err)
+	}
+
+	ids := []string{
+		"Sp9509d011g008180_T004",
+		"Sp9509d006g004400_T001",
+		"Sp9509d012g006190_T001",
+		"Sp9509d012g006280_T001",
+		"Sp9509d002g009930_T001",
+		"Sp9509d018g003250_T001",
+		"Sp9509d006g004900_T001",
+	}
+	for _, id := range ids {
+		accs, err := client.FetchUniProtAccessions(ctx, 18, id)
+		t.Logf("%s acc=%v err=%v", id, accs, err)
 	}
 }

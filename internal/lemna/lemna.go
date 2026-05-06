@@ -1122,6 +1122,60 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 	return nil, fmt.Errorf("no lemna.org gene or transcript matched %q", identifier)
 }
 
+func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
+	proteinID = strings.TrimSpace(proteinID)
+	if proteinID == "" {
+		return nil, nil
+	}
+	release, err := c.releaseForTargetID(ctx, targetID)
+	if err != nil {
+		return nil, err
+	}
+	ahrd, err := c.loadAHRDRecords(ctx, release)
+	if err != nil {
+		return nil, err
+	}
+	if len(ahrd) == 0 {
+		return nil, nil
+	}
+
+	candidates := normalizedIdentifierCandidates(proteinID)
+	protToTrans, transToGene, mapErr := c.cachedProteinTranscriptMaps(ctx, release)
+	if mapErr == nil {
+		seed := append([]string(nil), candidates...)
+		for _, candidate := range seed {
+			if transcriptID, ok := lookupNormalizedMapValue(protToTrans, candidate); ok {
+				candidates = append(candidates, normalizedIdentifierCandidates(transcriptID)...)
+				if geneID, ok := lookupNormalizedMapValue(transToGene, transcriptID); ok {
+					candidates = append(candidates, normalizedIdentifierCandidates(geneID)...)
+				}
+			}
+			if geneID, ok := lookupNormalizedMapValue(transToGene, candidate); ok {
+				candidates = append(candidates, normalizedIdentifierCandidates(geneID)...)
+			}
+		}
+	}
+	candidates = uniqueNormalizedStrings(candidates)
+
+	accessions := make([]string, 0, 2)
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		rec, ok := lookupAHRDRecord(ahrd, candidate)
+		if !ok {
+			continue
+		}
+		if accession := uniprotAccessionFromAHRD(rec); accession != "" {
+			key := strings.ToUpper(accession)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			accessions = append(accessions, accession)
+		}
+	}
+	return accessions, nil
+}
+
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
@@ -1506,6 +1560,23 @@ func parseAHRDOutput(reader io.Reader, records map[string]ahrdRecord) error {
 	return nil
 }
 
+func (c *Client) releaseForTargetID(ctx context.Context, targetID int) (releaseInfo, error) {
+	if targetID == 0 {
+		return releaseInfo{}, fmt.Errorf("missing lemna target id")
+	}
+	if _, err := c.FetchSpeciesCandidates(ctx); err != nil {
+		return releaseInfo{}, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, release := range c.releasesByJBrowseName {
+		if release.BlastNDBID == targetID {
+			return release, nil
+		}
+	}
+	return releaseInfo{}, fmt.Errorf("no lemna release for target id %d", targetID)
+}
+
 // buildProteinTranscriptMap scans the release GFF3 (if present) and builds mappings
 // that help relate protein accessions (or protein identifiers found in FASTA deflines)
 // back to transcript IDs and gene IDs. It returns two maps:
@@ -1553,23 +1624,14 @@ func (c *Client) buildProteinTranscriptMap(ctx context.Context, release releaseI
 		if transcriptID != "" && geneID != "" {
 			// ensure transcript -> gene mapping
 			transcriptToGene[transcriptID] = geneID
+			for _, alias := range normalizedIdentifierCandidates(transcriptID) {
+				transcriptToGene[alias] = geneID
+			}
 		}
 		if protID != "" {
-			// Map protein token(s) to transcript. Use both raw and simplified tokens.
-			proteinToTranscript[protID] = transcriptID
-			// also record variants: if protID contains pipe or dot, index tokens.
-			if strings.Contains(protID, "|") {
-				parts := strings.Split(protID, "|")
-				token := parts[len(parts)-1]
-				if token != "" {
-					proteinToTranscript[token] = transcriptID
-				}
-			}
-			if strings.Contains(protID, ".") {
-				base := strings.Split(protID, ".")[0]
-				if base != "" {
-					proteinToTranscript[base] = transcriptID
-				}
+			// Map protein token(s) to transcript, including normalized aliases.
+			for _, alias := range normalizedIdentifierCandidates(protID) {
+				proteinToTranscript[alias] = transcriptID
 			}
 		}
 		// For CDS/mRNA lines where protein_id not present but ID/Name exists, attempt to map:
@@ -1584,7 +1646,9 @@ func (c *Client) buildProteinTranscriptMap(ctx context.Context, release releaseI
 					token = parts[len(parts)-1]
 				}
 				if token != "" {
-					proteinToTranscript[token] = transcriptID
+					for _, alias := range normalizedIdentifierCandidates(token) {
+						proteinToTranscript[alias] = transcriptID
+					}
 				}
 			}
 		}
@@ -1809,7 +1873,7 @@ func buildKeywordRowFromGFF(species model.SpeciesCandidate, release releaseInfo,
 		Description:         description,
 		Comments:            firstNonEmpty(attrs["Note"], attrs["comment"]),
 		AutoDefine:          firstNonEmpty(attrs["product"], attrs["Name"]),
-		GeneReportURL:       release.ReleaseURL,
+		GeneReportURL:       lemnaGeneReportURL(release.RootDir, firstNonEmpty(parent, id)),
 		SequenceHeaderLabel: species.DisplayLabel(),
 		SequenceID:          sequenceID,
 		ExtraColumns:        extra,
@@ -2054,16 +2118,7 @@ func parseGFFAttributes(value string) map[string]string {
 }
 
 func sequenceAliases(sequenceID string) []string {
-	sequenceID = strings.TrimSpace(strings.TrimPrefix(sequenceID, ">"))
-	aliases := []string{sequenceID}
-	if strings.Contains(sequenceID, ".") {
-		aliases = append(aliases, strings.Split(sequenceID, ".")[0])
-	}
-	if strings.Contains(sequenceID, ":") {
-		parts := strings.Split(sequenceID, ":")
-		aliases = append(aliases, parts[len(parts)-1])
-	}
-	return aliases
+	return normalizedIdentifierCandidates(strings.TrimSpace(strings.TrimPrefix(sequenceID, ">")))
 }
 
 func fastaHeaderMatches(header string, aliases []string) bool {
@@ -2180,4 +2235,69 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizedIdentifierCandidates(value string) []string {
+	value = strings.TrimSpace(strings.TrimPrefix(value, ">"))
+	if value == "" {
+		return nil
+	}
+	out := []string{value}
+	if fields := strings.Fields(value); len(fields) > 0 {
+		out = append(out, fields[0])
+	}
+	if strings.Contains(value, "|") {
+		parts := strings.Split(value, "|")
+		out = append(out, parts[len(parts)-1])
+		if len(parts) > 1 {
+			out = append(out, parts[0])
+		}
+	}
+	if strings.Contains(value, ":") {
+		parts := strings.Split(value, ":")
+		out = append(out, parts[len(parts)-1])
+	}
+	seed := append([]string(nil), out...)
+	for _, candidate := range seed {
+		if strings.Contains(candidate, ".") {
+			out = append(out, strings.Split(candidate, ".")[0])
+		}
+	}
+	return uniqueNormalizedStrings(out)
+}
+
+func uniqueNormalizedStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func lookupNormalizedMapValue(values map[string]string, key string) (string, bool) {
+	for _, candidate := range normalizedIdentifierCandidates(key) {
+		if value, ok := values[candidate]; ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
+func lookupAHRDRecord(records map[string]ahrdRecord, key string) (ahrdRecord, bool) {
+	for _, candidate := range normalizedIdentifierCandidates(key) {
+		if record, ok := records[candidate]; ok {
+			return record, true
+		}
+	}
+	return ahrdRecord{}, false
 }

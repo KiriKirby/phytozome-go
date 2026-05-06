@@ -78,7 +78,7 @@ func SampleKeywordReportData() ReportData {
 				{SearchTerm: "phenylalanine ammonia lyase", FinalLabel: "PAL", SourceField: "user input", SourceValue: "PAL", Method: "manual label", Explanation: "The user-supplied label was preserved for row readability and sequence headers."},
 				{SearchTerm: "cinnamate 4-hydroxylase", FinalLabel: "C4H", SourceField: "user input", SourceValue: "C4H", Method: "manual label", Explanation: "The label was entered before keyword search and applied to rows from the term."},
 				{SearchTerm: "4CL", FinalLabel: "4CL", SourceField: "search term", SourceValue: "4CL", Method: "auto-identify", Explanation: "The short identifier-like term was retained as the final label in the sample data."},
-				{SearchTerm: "CCR2", FinalLabel: "CCR2", SourceField: "alias", SourceValue: "CCR2; CCR-like", Method: "auto-identify", Explanation: "The first alias in already-loaded row data supplied the label."},
+				{SearchTerm: "CCR2", FinalLabel: "CCR2", SourceField: "alias", SourceValue: "CCR2; CCR-like", Method: "auto-identify", Explanation: "The best alias candidate in already-loaded row data supplied the label."},
 				{SearchTerm: "CAD8", FinalLabel: "CAD8", SourceField: "search term", SourceValue: "CAD8", Method: "no-hit fallback in report data", Explanation: "No rows were found; the input term remains the traceable label. No extra lookup was run."},
 			},
 			Selection: KeywordSelectionStats{

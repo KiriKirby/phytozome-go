@@ -288,6 +288,27 @@ func TestDetectFamilyBlastGroupsIgnoresSuffixAfterMemberNumberByDefault(t *testi
 	}
 }
 
+func TestDetectFamilyBlastGroupsCanCollapseDistinctQuerySubgroupsWhenDisabled(t *testing.T) {
+	items := []blastQueryItem{
+		{LabelName: "IRX9"},
+		{LabelName: "IRX14"},
+		{LabelName: "IRX10"},
+		{LabelName: "IRX10-like"},
+	}
+	settings := model.DefaultFamilyBlastSettings()
+	settings.KeepDistinctQuerySubgroups = true
+	groups := detectFamilyBlastGroups(items, settings)
+	if len(groups) != 1 {
+		t.Fatalf("group count = %d, want 1 subgroup for IRX10 family labels: %#v", len(groups), groups)
+	}
+	if groups[0].Name != "IRX" {
+		t.Fatalf("family name = %q, want IRX", groups[0].Name)
+	}
+	if len(groups[0].Indexes) != 2 {
+		t.Fatalf("IRX subgroup size = %d, want 2", len(groups[0].Indexes))
+	}
+}
+
 func TestApplyFamilyBlastPlanMergesRunsByTarget(t *testing.T) {
 	prepared := []blastQueryItem{{LabelName: "PAL1"}, {LabelName: "PAL2"}}
 	runs := []blastQueryRun{
@@ -462,7 +483,7 @@ func TestAggregateBlastSequenceAuditMergesQuerySummaries(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyKeywordLabelsUsesFirstAlias(t *testing.T) {
+func TestAutoIdentifyKeywordLabelsUsesBestAliasCandidate(t *testing.T) {
 	groups := []model.KeywordSearchGroup{{
 		SearchTerm: "PAL",
 		Rows: []model.KeywordResultRow{{
@@ -473,11 +494,11 @@ func TestAutoIdentifyKeywordLabelsUsesFirstAlias(t *testing.T) {
 	}}
 
 	labels := autoIdentifyKeywordLabels(groups)
-	if len(labels) != 1 || labels[0] != "ATPAL1" {
+	if len(labels) != 1 || labels[0] != "PAL1" {
 		t.Fatalf("unexpected auto labels: %#v", labels)
 	}
 	applyKeywordIdentifications(groups, labels)
-	if groups[0].LabelName != "ATPAL1" || groups[0].Rows[0].LabelName != "ATPAL1" {
+	if groups[0].LabelName != "PAL1" || groups[0].Rows[0].LabelName != "PAL1" {
 		t.Fatalf("auto label was not applied to group and rows: %#v", groups)
 	}
 }
@@ -523,7 +544,7 @@ func TestArabidopsisGeneSearchTermNormalizesIDs(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyBlastLabelFromPhytozomeUsesProteinAlias(t *testing.T) {
+func TestAutoIdentifyBlastLabelFromPhytozomeUsesBestAliasCandidate(t *testing.T) {
 	w := &BlastWizard{}
 	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
 		"AT2G37040.1": {{
@@ -534,8 +555,29 @@ func TestAutoIdentifyBlastLabelFromPhytozomeUsesProteinAlias(t *testing.T) {
 	item := blastQueryItem{RawInput: ">A.thaliana TAIR10|AT2G37040.1\nMPEPTIDE"}
 
 	got := w.autoIdentifyBlastLabelFromPhytozome(context.Background(), src, model.SpeciesCandidate{ProteomeID: 167}, item)
-	if got != "ATPAL1" {
+	if got != "PAL1" {
 		t.Fatalf("unexpected label: %q", got)
+	}
+}
+
+func TestBestAliasPrefersCanonicalFamilyStyleOverInternalPrefix(t *testing.T) {
+	if got := bestAlias("ATPAL1; PAL1"); got != "PAL1" {
+		t.Fatalf("bestAlias()=%q want PAL1", got)
+	}
+	if got := bestAlias("CYP84A1; FAH1; F5H1"); got != "F5H1" {
+		t.Fatalf("bestAlias()=%q want F5H1", got)
+	}
+	if got := bestAlias("CYP98A3; REF8"); got != "CYP98A3" {
+		t.Fatalf("bestAlias()=%q want CYP98A3", got)
+	}
+}
+
+func TestLabelFromAutoDefineFindsCompactFunctionalAlias(t *testing.T) {
+	if got := labelFromAutoDefine("(1 of 2) K09755 - ferulate-5-hydroxylase (CYP84A, F5H)"); got != "F5H" {
+		t.Fatalf("labelFromAutoDefine()=%q want F5H", got)
+	}
+	if got := labelFromAutoDefine("(1 of 1) K09754 - coumaroylquinate(coumaroylshikimate) 3'-monooxygenase (CYP98A3, C3'H)"); got != "C3'H" {
+		t.Fatalf("labelFromAutoDefine()=%q want C3'H", got)
 	}
 }
 
@@ -618,6 +660,44 @@ func TestAutoIdentifyBlastLabelDoesNotFallbackForPlainProteinSequence(t *testing
 	}
 }
 
+func TestHarmonizeAutoIdentifiedBlastLabelsPreservesOrImprovesFamilyGrouping(t *testing.T) {
+	items := []blastQueryItem{
+		{LabelName: "IRX5", QuerySource: &model.QuerySequenceSource{LabelName: "IRX5", Aliases: "CESA4; IRX5; NWS2"}},
+		{LabelName: "IRX3", QuerySource: &model.QuerySequenceSource{LabelName: "IRX3", Aliases: "ATCESA7; CESA7; IRX3; MUR10"}},
+		{LabelName: "IRX1", QuerySource: &model.QuerySequenceSource{LabelName: "IRX1", Aliases: "ATCESA8; CESA8; IRX1; LEW2"}},
+		{LabelName: "GUT2", QuerySource: &model.QuerySequenceSource{LabelName: "GUT2", Aliases: "ATGUT1; GUT2; IRX10", AutoDefine: "IRX10"}},
+		{LabelName: "GUT1", QuerySource: &model.QuerySequenceSource{LabelName: "GUT1", Aliases: "GUT1; IRX10-L; XYS1", AutoDefine: "IRX10-like"}},
+	}
+
+	out := harmonizeAutoIdentifiedBlastLabels(items)
+	settings := model.DefaultFamilyBlastSettings()
+	before := detectFamilyBlastGroups(items, settings)
+	after := detectFamilyBlastGroups(out, settings)
+	if len(after) < len(before) {
+		t.Fatalf("family grouping regressed: before=%v after=%v", before, after)
+	}
+	if out[3].LabelName == "" || out[4].LabelName == "" {
+		t.Fatalf("expected harmonized labels to stay populated: %#v", out)
+	}
+}
+
+func TestHarmonizeAutoIdentifiedBlastLabelsRetainsCompactFunctionalCandidates(t *testing.T) {
+	items := []blastQueryItem{
+		{LabelName: "REF8", QuerySource: &model.QuerySequenceSource{LabelName: "REF8", Aliases: "CYP98A3; REF8", AutoDefine: "C3'H"}},
+		{LabelName: "FAH1", QuerySource: &model.QuerySequenceSource{LabelName: "FAH1", Aliases: "CYP84A1; FAH1", AutoDefine: "F5H1"}},
+	}
+
+	out := harmonizeAutoIdentifiedBlastLabels(items)
+	candidates0 := blastAutoLabelCandidates(items[0])
+	candidates1 := blastAutoLabelCandidates(items[1])
+	if !containsString(candidates0, out[0].LabelName) {
+		t.Fatalf("first harmonized label=%q not in candidates=%v", out[0].LabelName, candidates0)
+	}
+	if !containsString(candidates1, out[1].LabelName) {
+		t.Fatalf("second harmonized label=%q not in candidates=%v", out[1].LabelName, candidates1)
+	}
+}
+
 func TestApplyUniProtEntryPopulatesReferenceColumns(t *testing.T) {
 	row := model.BlastResultRow{TargetLength: 329}
 	applyUniProtEntry(&row, uniprot.Entry{
@@ -634,6 +714,15 @@ func TestApplyUniProtEntryPopulatesReferenceColumns(t *testing.T) {
 	if row.TargetUniProtCanonicalLengthPercent != "100.00" {
 		t.Fatalf("unexpected canonical length percent: %q", row.TargetUniProtCanonicalLengthPercent)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUniProtLookupGroupsDeduplicateEquivalentRows(t *testing.T) {
@@ -1246,6 +1335,33 @@ func TestResolveProteinReportSequencePreservesInputURLs(t *testing.T) {
 	}
 	if got.SourceProteomeID != 290 || got.SourceJBrowseName != "S_polyrhiza_v2" {
 		t.Fatalf("unexpected source species metadata: %#v", got)
+	}
+}
+
+func TestInterProQueryLookupRowCarriesQuerySourceMetadata(t *testing.T) {
+	w := &BlastWizard{}
+	item := blastQueryItem{
+		QuerySource: &model.QuerySequenceSource{
+			SourceDatabase:    "phytozome",
+			SourceProteomeID:  167,
+			SourceJBrowseName: "Athaliana_TAIR10",
+			ProteinID:         "AT2G30490.1",
+			TranscriptID:      "AT2G30490.1",
+			NormalizedURL:     "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+			Annotation:        "Cytochrome P450",
+			OrganismShort:     "A.thaliana",
+		},
+	}
+
+	row := w.interProQueryLookupRow(item, context.Background())
+	if row.TargetID != 167 {
+		t.Fatalf("TargetID = %d, want 167", row.TargetID)
+	}
+	if row.JBrowseName != "Athaliana_TAIR10" {
+		t.Fatalf("JBrowseName = %q, want Athaliana_TAIR10", row.JBrowseName)
+	}
+	if row.Protein != "AT2G30490.1" {
+		t.Fatalf("Protein = %q, want query protein id", row.Protein)
 	}
 }
 

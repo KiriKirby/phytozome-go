@@ -377,6 +377,59 @@ func TestDefaultBlastFilterSuggestionRequiresInterProEvidenceByDefault(t *testin
 	}
 }
 
+func TestDefaultBlastFilterSuggestionAllowsStrongBlastFallbackWithoutReferences(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                        "Spipo1_T001",
+		PercentIdentity:                62,
+		AlignLength:                    320,
+		QueryLength:                    340,
+		TargetLength:                   330,
+		EValue:                         "1e-120",
+		FamilyConsensusSupport:         3,
+		FamilyConsensusSize:            4,
+		FamilyConsensusCoveragePercent: "75",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if len(got.Selected) != 1 || !got.Selected[0] || got.Flags[0] {
+		t.Fatalf("strong BLAST fallback row should be kept, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionRejectsStrongFallbackWithoutFamilyConsensus(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:                        "Spipo1_T001",
+		PercentIdentity:                62,
+		AlignLength:                    320,
+		QueryLength:                    340,
+		TargetLength:                   330,
+		EValue:                         "1e-120",
+		FamilyConsensusSupport:         1,
+		FamilyConsensusSize:            4,
+		FamilyConsensusCoveragePercent: "25",
+	}}
+	settings := model.DefaultBlastFilterSettings()
+	settings.RequireFamilyConsensusForStrongFallback = true
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: settings})
+	if len(got.Selected) != 1 || got.Selected[0] || !got.Flags[0] {
+		t.Fatalf("strong fallback row without family consensus should be removed, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
+func TestDefaultBlastFilterSuggestionStillRejectsWeakNoReferenceRows(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		Protein:         "Spipo1_T001",
+		PercentIdentity: 28,
+		AlignLength:     120,
+		QueryLength:     340,
+		TargetLength:    330,
+		EValue:          "1e-20",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{Rows: rows, Settings: model.DefaultBlastFilterSettings()})
+	if len(got.Selected) != 1 || got.Selected[0] || !got.Flags[0] {
+		t.Fatalf("weak no-reference row should still be removed, got selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
 func TestDefaultBlastFilterSuggestionKeepsBestIsoformPerTargetGene(t *testing.T) {
 	rows := []model.BlastResultRow{
 		{

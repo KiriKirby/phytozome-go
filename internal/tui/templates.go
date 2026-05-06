@@ -884,17 +884,21 @@ type FamilyBlastResult struct {
 }
 
 type FamilyBlastSettings struct {
-	Enabled                 bool
-	GroupByDetectedPrefix   bool
-	MergeRowsByTarget       bool
-	KeepBestHitPerTarget    bool
-	PrependOnlyFirstQuery   bool
-	MinimumGroupSize        string
-	StripArabidopsisPrefix  bool
-	StripTrailingQueryIndex bool
-	StripAfterNumberSuffix  bool
-	UseUniProtReference     bool
-	UseInterProReference    bool
+	Enabled                    bool
+	GroupByDetectedPrefix      bool
+	MergeRowsByTarget          bool
+	KeepBestHitPerTarget       bool
+	PrependOnlyFirstQuery      bool
+	MinimumGroupSize           string
+	StripArabidopsisPrefix     bool
+	StripLeadingSpeciesPrefix  bool
+	StripTrailingQueryIndex    bool
+	StripAfterNumberSuffix     bool
+	NormalizeInnerPunctuation  bool
+	StripTerminalSubtypeSuffix bool
+	UseUniProtReference        bool
+	UseInterProReference       bool
+	RankingTieBreakerOrder     string
 }
 
 type BlastFilterSettings struct {
@@ -905,16 +909,34 @@ type BlastFilterSettings struct {
 	RequireTargetCanonicalLengthRatio         bool
 	MinTargetCanonicalLengthPercent           string
 	MaxTargetCanonicalLengthPercent           string
+	UseTargetQueryLengthRatio                 bool
+	RequireTargetQueryLengthRatio             bool
+	MinTargetQueryLengthPercent               string
+	MaxTargetQueryLengthPercent               string
 	RequireUniProtAccession                   bool
 	PreferUniProtReviewed                     bool
 	RejectUniProtFragments                    bool
 	RejectUniProtSequenceCautions             bool
+	InterProDomainMode                        string
 	RequireInterProConservedRegion            bool
 	AllowInterProPartial                      bool
 	RejectInterProMissing                     bool
 	RejectInterProUncertain                   bool
 	MinInterProCoveragePercent                string
 	RequireInterProCoverageWhenUsed           bool
+	AllowStrongBlastFallbackWithoutReferences bool
+	StrongBlastFallbackMinIdentityPercent     string
+	StrongBlastFallbackMaxEValue              string
+	StrongBlastFallbackMinTargetQueryPercent  string
+	StrongBlastFallbackMaxTargetQueryPercent  string
+	RequireFamilyConsensusForStrongFallback   bool
+	StrongFallbackMinFamilyConsensusSupport   string
+	StrongFallbackMinFamilyConsensusPercent   string
+	UseFamilySemanticAgreement                bool
+	RequireFamilySemanticAgreement            bool
+	FamilySemanticMinTokenMatches             string
+	FamilySemanticMinAgreementPercent         string
+	FamilySemanticAllowStrongReferenceBypass  bool
 	KeepBestIsoformPerTargetGene              bool
 	KeepTopHitsPerQuery                       bool
 	TopHitsPerQuery                           string
@@ -931,11 +953,13 @@ type BlastFilterSettings struct {
 	IdentityWeight                            string
 	CoverageWeight                            string
 	LengthRatioWeight                         string
+	TargetQueryLengthWeight                   string
 	InterProWeight                            string
 	InterProPartialWeight                     string
 	InterProCoverageWeight                    string
 	UniProtReviewedWeight                     string
 	UniProtAnnotationWeight                   string
+	FamilySemanticAgreementWeight             string
 	PenaltySequenceCaution                    string
 	PenaltyFragment                           string
 	InterProPresentReferenceScore             string
@@ -946,6 +970,7 @@ type BlastFilterSettings struct {
 	UniProtAccessionReferenceScore            string
 	UniProtReviewedReferenceScore             string
 	UniProtAnnotationReferenceScore           string
+	FamilySemanticReferenceScore              string
 	FragmentReferencePenaltyMultiplier        string
 	SequenceCautionReferencePenaltyMultiplier string
 	LengthNearDistancePercent                 string
@@ -4146,15 +4171,22 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	bestBox := newCheckboxModule("Keep best BLAST hit when one target is hit by multiple queries", func() bool { return settings.KeepBestHitPerTarget }, func() { settings.KeepBestHitPerTarget = !settings.KeepBestHitPerTarget })
 	prependFirstBox := newCheckboxModule("TXT prepends only the first family query record", func() bool { return settings.PrependOnlyFirstQuery }, func() { settings.PrependOnlyFirstQuery = !settings.PrependOnlyFirstQuery })
 	stripAtBox := newCheckboxModule("Strip Arabidopsis At/AT prefix only for family_name", func() bool { return settings.StripArabidopsisPrefix }, func() { settings.StripArabidopsisPrefix = !settings.StripArabidopsisPrefix })
+	stripSpeciesBox := newCheckboxModule("Strip leading species-style prefix before grouping", func() bool { return settings.StripLeadingSpeciesPrefix }, func() { settings.StripLeadingSpeciesPrefix = !settings.StripLeadingSpeciesPrefix })
 	stripIndexBox := newCheckboxModule("Strip trailing member number before grouping", func() bool { return settings.StripTrailingQueryIndex }, func() { settings.StripTrailingQueryIndex = !settings.StripTrailingQueryIndex })
 	stripAfterNumberBox := newCheckboxModule("Ignore suffix after member number before grouping", func() bool { return settings.StripAfterNumberSuffix }, func() { settings.StripAfterNumberSuffix = !settings.StripAfterNumberSuffix })
-	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripAtBox, stripIndexBox, stripAfterNumberBox} {
+	normalizePunctuationBox := newCheckboxModule("Normalize punctuation before family-root detection", func() bool { return settings.NormalizeInnerPunctuation }, func() { settings.NormalizeInnerPunctuation = !settings.NormalizeInnerPunctuation })
+	stripSubtypeBox := newCheckboxModule("Strip terminal subtype suffix before grouping", func() bool { return settings.StripTerminalSubtypeSuffix }, func() { settings.StripTerminalSubtypeSuffix = !settings.StripTerminalSubtypeSuffix })
+	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripAtBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, normalizePunctuationBox, stripSubtypeBox} {
 		box.SetBorder(false)
 	}
 	minGroupInput := tview.NewInputField().SetLabel("minimum queries per group ").SetText(settings.MinimumGroupSize).SetFieldWidth(8)
+	rankingOrderInput := tview.NewInputField().SetLabel("merge tie-break order ").SetText(settings.RankingTieBreakerOrder).SetFieldWidth(36)
 	minGroupInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
 	minGroupInput.SetLabelColor(tview.Styles.SecondaryTextColor)
 	minGroupInput.SetFieldBackgroundColor(colorPanel)
+	rankingOrderInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
+	rankingOrderInput.SetLabelColor(tview.Styles.SecondaryTextColor)
+	rankingOrderInput.SetFieldBackgroundColor(colorPanel)
 
 	detectedLines := make([]string, 0, len(page.Groups)+1)
 	if len(page.Groups) == 0 {
@@ -4180,13 +4212,13 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	settingsModule.SetTitleAlign(tview.AlignCenter)
 	settingsDescriptionHeight := 3
 	settingsModule.AddItem(textBlock("Family BLAST keeps query execution separate, then reviews and exports detected members as one gene-family result. This prevents NAME1/NAME2/NAME3-style inputs from becoming separate final files."), settingsDescriptionHeight, 0, false)
-	for _, primitive := range []tview.Primitive{enableBox, detectBox, stripIndexBox, stripAfterNumberBox, stripAtBox, minGroupInput, mergeBox, bestBox, prependFirstBox} {
+	for _, primitive := range []tview.Primitive{enableBox, detectBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, normalizePunctuationBox, stripAtBox, minGroupInput, rankingOrderInput, mergeBox, bestBox, prependFirstBox} {
 		settingsModule.AddItem(primitive, 1, 0, primitive == minGroupInput)
 	}
 	setFocusBorder(settingsModule.Box, true)
 	attachFocusBorder(settingsModule.Box)
 
-	controls := []tview.Primitive{enableBox, detectBox, stripIndexBox, stripAfterNumberBox, stripAtBox, minGroupInput, mergeBox, bestBox, prependFirstBox}
+	controls := []tview.Primitive{enableBox, detectBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, normalizePunctuationBox, stripAtBox, minGroupInput, rankingOrderInput, mergeBox, bestBox, prependFirstBox}
 	focusIndex := 0
 	setFocusAt := func(index int) {
 		if index < 0 {
@@ -4225,15 +4257,19 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	}
 	confirm := func() {
 		result.Settings = FamilyBlastSettings{
-			Enabled:                 settings.Enabled,
-			GroupByDetectedPrefix:   settings.GroupByDetectedPrefix,
-			MergeRowsByTarget:       settings.MergeRowsByTarget,
-			KeepBestHitPerTarget:    settings.KeepBestHitPerTarget,
-			PrependOnlyFirstQuery:   settings.PrependOnlyFirstQuery,
-			MinimumGroupSize:        minGroupInput.GetText(),
-			StripArabidopsisPrefix:  settings.StripArabidopsisPrefix,
-			StripTrailingQueryIndex: settings.StripTrailingQueryIndex,
-			StripAfterNumberSuffix:  settings.StripAfterNumberSuffix,
+			Enabled:                    settings.Enabled,
+			GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
+			MergeRowsByTarget:          settings.MergeRowsByTarget,
+			KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
+			PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+			MinimumGroupSize:           minGroupInput.GetText(),
+			StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
+			StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
+			StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
+			StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
+			NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
+			StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+			RankingTieBreakerOrder:     rankingOrderInput.GetText(),
 		}
 		app.Stop()
 	}
@@ -4396,17 +4432,29 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	maxEValue := newInput("max E-value", settings.MaxEValue, 10)
 	minLengthRatio := newInput("min length ratio", settings.MinTargetCanonicalLengthPercent, 6)
 	maxLengthRatio := newInput("max length ratio", settings.MaxTargetCanonicalLengthPercent, 6)
+	minTargetQueryRatio := newInput("min tgt/query %", settings.MinTargetQueryLengthPercent, 6)
+	maxTargetQueryRatio := newInput("max tgt/query %", settings.MaxTargetQueryLengthPercent, 6)
 	minInterProCoverage := newInput("min IPR cover", settings.MinInterProCoveragePercent, 6)
+	strongFallbackMinIdentity := newInput("fallback min id", settings.StrongBlastFallbackMinIdentityPercent, 6)
+	strongFallbackMaxEValue := newInput("fallback max E", settings.StrongBlastFallbackMaxEValue, 10)
+	strongFallbackMinTargetQuery := newInput("fallback min tq", settings.StrongBlastFallbackMinTargetQueryPercent, 6)
+	strongFallbackMaxTargetQuery := newInput("fallback max tq", settings.StrongBlastFallbackMaxTargetQueryPercent, 6)
+	strongFallbackMinConsensusSupport := newInput("fallback min support", settings.StrongFallbackMinFamilyConsensusSupport, 6)
+	strongFallbackMinConsensusPercent := newInput("fallback min family %", settings.StrongFallbackMinFamilyConsensusPercent, 6)
+	familySemanticMinMatches := newInput("semantic min hits", settings.FamilySemanticMinTokenMatches, 6)
+	familySemanticMinPercent := newInput("semantic min %", settings.FamilySemanticMinAgreementPercent, 6)
 	topHitsPerQuery := newInput("top hits/query", settings.TopHitsPerQuery, 6)
 	minSoftScore := newInput("min soft score", settings.MinSoftScore, 6)
 	identityWeight := newInput("identity wt", settings.IdentityWeight, 5)
 	coverageWeight := newInput("coverage wt", settings.CoverageWeight, 5)
 	lengthWeight := newInput("length wt", settings.LengthRatioWeight, 5)
+	targetQueryLengthWeight := newInput("tgt/query wt", settings.TargetQueryLengthWeight, 5)
 	interProWeight := newInput("InterPro wt", settings.InterProWeight, 5)
 	interProPartialWeight := newInput("partial wt", settings.InterProPartialWeight, 5)
 	interProCoverageWeight := newInput("IPR cov wt", settings.InterProCoverageWeight, 5)
 	reviewedWeight := newInput("reviewed wt", settings.UniProtReviewedWeight, 5)
 	annotationWeight := newInput("annotation wt", settings.UniProtAnnotationWeight, 5)
+	familySemanticWeight := newInput("semantic wt", settings.FamilySemanticAgreementWeight, 5)
 	sequenceCautionPenalty := newInput("caution pen", settings.PenaltySequenceCaution, 5)
 	fragmentPenalty := newInput("fragment pen", settings.PenaltyFragment, 5)
 	presentReferenceScore := newInput("present ref", settings.InterProPresentReferenceScore, 5)
@@ -4417,6 +4465,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	uniProtAccessionReferenceScore := newInput("accession ref", settings.UniProtAccessionReferenceScore, 5)
 	uniProtReviewedReferenceScore := newInput("reviewed ref", settings.UniProtReviewedReferenceScore, 5)
 	uniProtAnnotationReferenceScore := newInput("annotation ref", settings.UniProtAnnotationReferenceScore, 5)
+	familySemanticReferenceScore := newInput("semantic ref", settings.FamilySemanticReferenceScore, 5)
 	fragmentReferencePenaltyMultiplier := newInput("fragment x", settings.FragmentReferencePenaltyMultiplier, 5)
 	cautionReferencePenaltyMultiplier := newInput("caution x", settings.SequenceCautionReferencePenaltyMultiplier, 5)
 	lengthNearDistance := newInput("near dist", settings.LengthNearDistancePercent, 5)
@@ -4461,7 +4510,13 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	}, func() {
 		settings.UseTargetCanonicalLengthRatio = !settings.UseTargetCanonicalLengthRatio
 	})
+	targetQueryLengthBox := newCheckboxModule("Use target/query length rule", func() bool {
+		return settings.UseTargetQueryLengthRatio
+	}, func() {
+		settings.UseTargetQueryLengthRatio = !settings.UseTargetQueryLengthRatio
+	})
 	requireLengthRatio := newCheckboxModule("Require length ratio data", func() bool { return settings.RequireTargetCanonicalLengthRatio }, func() { settings.RequireTargetCanonicalLengthRatio = !settings.RequireTargetCanonicalLengthRatio })
+	requireTargetQueryRatio := newCheckboxModule("Require target/query ratio data", func() bool { return settings.RequireTargetQueryLengthRatio }, func() { settings.RequireTargetQueryLengthRatio = !settings.RequireTargetQueryLengthRatio })
 	requireUniProt := newCheckboxModule("Require UniProt accession", func() bool { return settings.RequireUniProtAccession }, func() { settings.RequireUniProtAccession = !settings.RequireUniProtAccession })
 	preferReviewed := newCheckboxModule("Prefer reviewed", func() bool { return settings.PreferUniProtReviewed }, func() { settings.PreferUniProtReviewed = !settings.PreferUniProtReviewed })
 	rejectFragments := newCheckboxModule("Reject fragments", func() bool { return settings.RejectUniProtFragments }, func() { settings.RejectUniProtFragments = !settings.RejectUniProtFragments })
@@ -4471,6 +4526,25 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	rejectMissing := newCheckboxModule("Reject InterPro missing", func() bool { return settings.RejectInterProMissing }, func() { settings.RejectInterProMissing = !settings.RejectInterProMissing })
 	rejectUncertain := newCheckboxModule("Reject InterPro uncertain", func() bool { return settings.RejectInterProUncertain }, func() { settings.RejectInterProUncertain = !settings.RejectInterProUncertain })
 	requireInterProCoverage := newCheckboxModule("Require InterPro coverage when used", func() bool { return settings.RequireInterProCoverageWhenUsed }, func() { settings.RequireInterProCoverageWhenUsed = !settings.RequireInterProCoverageWhenUsed })
+	strongFallback := newCheckboxModule("Allow strong BLAST fallback without references", func() bool { return settings.AllowStrongBlastFallbackWithoutReferences }, func() {
+		settings.AllowStrongBlastFallbackWithoutReferences = !settings.AllowStrongBlastFallbackWithoutReferences
+	})
+	requireFallbackConsensus := newCheckboxModule("Require family consensus for strong fallback", func() bool { return settings.RequireFamilyConsensusForStrongFallback }, func() {
+		settings.RequireFamilyConsensusForStrongFallback = !settings.RequireFamilyConsensusForStrongFallback
+	})
+	useFamilySemantic := newCheckboxModule("Use family semantic agreement", func() bool { return settings.UseFamilySemanticAgreement }, func() {
+		settings.UseFamilySemanticAgreement = !settings.UseFamilySemanticAgreement
+	})
+	requireFamilySemantic := newCheckboxModule("Require family semantic agreement", func() bool { return settings.RequireFamilySemanticAgreement }, func() {
+		settings.RequireFamilySemanticAgreement = !settings.RequireFamilySemanticAgreement
+	})
+	familySemanticBypass := newCheckboxModule("Allow strong reference bypass", func() bool { return settings.FamilySemanticAllowStrongReferenceBypass }, func() {
+		settings.FamilySemanticAllowStrongReferenceBypass = !settings.FamilySemanticAllowStrongReferenceBypass
+	})
+	interProAnyDomain := newCheckboxModule("InterPro domain mode: any_domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "any_domain") }, func() { settings.InterProDomainMode = "any_domain" })
+	interProConservedDomain := newCheckboxModule("InterPro domain mode: conserved_region", func() bool { return strings.EqualFold(settings.InterProDomainMode, "conserved_region") }, func() { settings.InterProDomainMode = "conserved_region" })
+	interProConsensusDomain := newCheckboxModule("InterPro domain mode: family_consensus_domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "family_consensus_domain") }, func() { settings.InterProDomainMode = "family_consensus_domain" })
+	interProOff := newCheckboxModule("InterPro domain mode: off", func() bool { return strings.EqualFold(settings.InterProDomainMode, "off") }, func() { settings.InterProDomainMode = "off" })
 	keepBestIsoform := newCheckboxModule("Keep best isoform per target gene", func() bool { return settings.KeepBestIsoformPerTargetGene }, func() { settings.KeepBestIsoformPerTargetGene = !settings.KeepBestIsoformPerTargetGene })
 	keepTopHits := newCheckboxModule("Keep top hits only", func() bool { return settings.KeepTopHitsPerQuery }, func() { settings.KeepTopHitsPerQuery = !settings.KeepTopHitsPerQuery })
 	rankingOrder := newInput("tie-break order", settings.RankingTieBreakerOrder, 36)
@@ -4483,7 +4557,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	hardFail := newCheckboxModule("Hard-rule reject", func() bool { return settings.RejectIfAnyHardRuleFails }, func() { settings.RejectIfAnyHardRuleFails = !settings.RejectIfAnyHardRuleFails })
 	enableSoftScore := newCheckboxModule("Use soft score", func() bool { return settings.EnableSoftScore }, func() { settings.EnableSoftScore = !settings.EnableSoftScore })
 
-	for _, box := range []*checkboxModule{identityBox, coverageBox, eValueBox, lengthBox, requireLengthRatio, requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, keepBestIsoform, keepTopHits, preferEValue, preferIdentity, preferCoverage, preferReference, preferFilterScore, preferBitscore, hardFail, enableSoftScore} {
+	for _, box := range []*checkboxModule{identityBox, coverageBox, eValueBox, lengthBox, targetQueryLengthBox, requireLengthRatio, requireTargetQueryRatio, requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, strongFallback, requireFallbackConsensus, useFamilySemantic, requireFamilySemantic, familySemanticBypass, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, keepBestIsoform, keepTopHits, preferEValue, preferIdentity, preferCoverage, preferReference, preferFilterScore, preferBitscore, hardFail, enableSoftScore} {
 		box.SetBorder(false)
 	}
 
@@ -4508,23 +4582,38 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	thresholdModule.SetBorder(true)
 	thresholdModule.SetTitle(" Sequence similarity and length ")
 	thresholdModule.SetTitleAlign(tview.AlignCenter)
-	thresholdModule.AddItem(textBlock("Default hard checks emphasize amino-acid length sanity and conserved-region evidence. Identity, query coverage, and E-value are optional extra strict rules."), 4, 0, false)
+	thresholdModule.AddItem(textBlock("Default hard checks now separate search strength, target/query length sanity, canonical-length sanity, and domain evidence. Identity, query coverage, and E-value remain optional stricter rules."), 4, 0, false)
 	thresholdModule.AddItem(identityBox, 1, 0, false)
 	thresholdModule.AddItem(minIdentity, 1, 0, true)
 	thresholdModule.AddItem(coverageBox, 1, 0, false)
 	thresholdModule.AddItem(minQueryCoverage, 1, 0, true)
 	thresholdModule.AddItem(eValueBox, 1, 0, false)
 	thresholdModule.AddItem(maxEValue, 1, 0, true)
+	thresholdModule.AddItem(targetQueryLengthBox, 1, 0, false)
+	thresholdModule.AddItem(requireTargetQueryRatio, 1, 0, false)
+	thresholdModule.AddItem(minTargetQueryRatio, 1, 0, true)
+	thresholdModule.AddItem(maxTargetQueryRatio, 1, 0, true)
 	thresholdModule.AddItem(lengthBox, 1, 0, false)
 	thresholdModule.AddItem(requireLengthRatio, 1, 0, false)
 	thresholdModule.AddItem(minLengthRatio, 1, 0, true)
 	thresholdModule.AddItem(maxLengthRatio, 1, 0, true)
 
+	semanticModule := newButtonFlex()
+	semanticModule.SetBorder(true)
+	semanticModule.SetTitle(" Family semantic agreement ")
+	semanticModule.SetTitleAlign(tview.AlignCenter)
+	semanticModule.AddItem(textBlock("Compare family/query labels with enriched annotation text so neighbor families with valid but mismatched annotation can be demoted or rejected without family-specific whitelists."), 4, 0, false)
+	semanticModule.AddItem(useFamilySemantic, 1, 0, false)
+	semanticModule.AddItem(requireFamilySemantic, 1, 0, false)
+	semanticModule.AddItem(familySemanticBypass, 1, 0, false)
+	semanticModule.AddItem(familySemanticMinMatches, 1, 0, true)
+	semanticModule.AddItem(familySemanticMinPercent, 1, 0, true)
+
 	referenceModule := newButtonFlex()
 	referenceModule.SetBorder(true)
 	referenceModule.SetTitle(" UniProt and InterPro evidence ")
 	referenceModule.SetTitleAlign(tview.AlignCenter)
-	for _, primitive := range []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage} {
+	for _, primitive := range []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent} {
 		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
 	}
 
@@ -4544,10 +4633,10 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	referenceScoreModule := newButtonFlex()
 	referenceScoreModule.SetBorder(true)
 	referenceScoreModule.SetTitle(" Reference ranking scores ")
-	for _, primitive := range []tview.Primitive{identityWeight, coverageWeight, lengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, sequenceCautionPenalty, fragmentPenalty} {
+	for _, primitive := range []tview.Primitive{identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty} {
 		softScoreModule.AddItem(primitive, 1, 0, false)
 	}
-	for _, primitive := range []tview.Primitive{presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty} {
+	for _, primitive := range []tview.Primitive{presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty} {
 		referenceScoreModule.AddItem(primitive, 1, 0, false)
 	}
 	scoreColumns.AddItem(softScoreModule, 0, 1, false)
@@ -4559,9 +4648,10 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		box      *buttonFlex
 		controls []tview.Primitive
 	}{
-		{page: 0, box: thresholdModule, controls: []tview.Primitive{identityBox, minIdentity, coverageBox, minQueryCoverage, eValueBox, maxEValue, lengthBox, requireLengthRatio, minLengthRatio, maxLengthRatio}},
-		{page: 0, box: referenceModule, controls: []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage}},
-		{page: 1, box: rankingModule, controls: []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore, identityWeight, coverageWeight, lengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, sequenceCautionPenalty, fragmentPenalty, presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty}},
+		{page: 0, box: thresholdModule, controls: []tview.Primitive{identityBox, minIdentity, coverageBox, minQueryCoverage, eValueBox, maxEValue, targetQueryLengthBox, requireTargetQueryRatio, minTargetQueryRatio, maxTargetQueryRatio, lengthBox, requireLengthRatio, minLengthRatio, maxLengthRatio}},
+		{page: 0, box: referenceModule, controls: []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent}},
+		{page: 0, box: semanticModule, controls: []tview.Primitive{useFamilySemantic, requireFamilySemantic, familySemanticBypass, familySemanticMinMatches, familySemanticMinPercent}},
+		{page: 1, box: rankingModule, controls: []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore, identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty, presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty}},
 	}
 	pageIndicator := tview.NewTextView().
 		SetDynamicColors(true).
@@ -4572,6 +4662,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	pageOne := tview.NewFlex().SetDirection(tview.FlexColumn)
 	pageOne.AddItem(thresholdModule, 0, 1, true)
 	pageOne.AddItem(referenceModule, 0, 1, false)
+	pageOne.AddItem(semanticModule, 0, 1, false)
 
 	pageTwo := tview.NewFlex().SetDirection(tview.FlexColumn)
 	pageTwo.AddItem(rankingModule, 0, 1, true)
@@ -4695,6 +4786,19 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			RejectInterProUncertain:                   settings.RejectInterProUncertain,
 			RequireInterProCoverageWhenUsed:           settings.RequireInterProCoverageWhenUsed,
 			MinInterProCoveragePercent:                minInterProCoverage.GetText(),
+			AllowStrongBlastFallbackWithoutReferences: settings.AllowStrongBlastFallbackWithoutReferences,
+			StrongBlastFallbackMinIdentityPercent:     strongFallbackMinIdentity.GetText(),
+			StrongBlastFallbackMaxEValue:              strongFallbackMaxEValue.GetText(),
+			StrongBlastFallbackMinTargetQueryPercent:  strongFallbackMinTargetQuery.GetText(),
+			StrongBlastFallbackMaxTargetQueryPercent:  strongFallbackMaxTargetQuery.GetText(),
+			RequireFamilyConsensusForStrongFallback:   settings.RequireFamilyConsensusForStrongFallback,
+			StrongFallbackMinFamilyConsensusSupport:   strongFallbackMinConsensusSupport.GetText(),
+			StrongFallbackMinFamilyConsensusPercent:   strongFallbackMinConsensusPercent.GetText(),
+			UseFamilySemanticAgreement:                settings.UseFamilySemanticAgreement,
+			RequireFamilySemanticAgreement:            settings.RequireFamilySemanticAgreement,
+			FamilySemanticMinTokenMatches:             familySemanticMinMatches.GetText(),
+			FamilySemanticMinAgreementPercent:         familySemanticMinPercent.GetText(),
+			FamilySemanticAllowStrongReferenceBypass:  settings.FamilySemanticAllowStrongReferenceBypass,
 			KeepBestIsoformPerTargetGene:              settings.KeepBestIsoformPerTargetGene,
 			KeepTopHitsPerQuery:                       settings.KeepTopHitsPerQuery,
 			TopHitsPerQuery:                           topHitsPerQuery.GetText(),
@@ -4716,6 +4820,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			InterProCoverageWeight:                    interProCoverageWeight.GetText(),
 			UniProtReviewedWeight:                     reviewedWeight.GetText(),
 			UniProtAnnotationWeight:                   annotationWeight.GetText(),
+			FamilySemanticAgreementWeight:             familySemanticWeight.GetText(),
 			PenaltySequenceCaution:                    sequenceCautionPenalty.GetText(),
 			PenaltyFragment:                           fragmentPenalty.GetText(),
 			InterProPresentReferenceScore:             presentReferenceScore.GetText(),
@@ -4726,6 +4831,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			UniProtAccessionReferenceScore:            uniProtAccessionReferenceScore.GetText(),
 			UniProtReviewedReferenceScore:             uniProtReviewedReferenceScore.GetText(),
 			UniProtAnnotationReferenceScore:           uniProtAnnotationReferenceScore.GetText(),
+			FamilySemanticReferenceScore:              familySemanticReferenceScore.GetText(),
 			FragmentReferencePenaltyMultiplier:        fragmentReferencePenaltyMultiplier.GetText(),
 			SequenceCautionReferencePenaltyMultiplier: cautionReferencePenaltyMultiplier.GetText(),
 			LengthNearDistancePercent:                 lengthNearDistance.GetText(),
@@ -4872,8 +4978,44 @@ func normalizeTUIBlastFilterSettings(settings BlastFilterSettings) BlastFilterSe
 	if strings.TrimSpace(settings.MaxTargetCanonicalLengthPercent) == "" {
 		settings.MaxTargetCanonicalLengthPercent = "130"
 	}
+	if !settings.UseTargetQueryLengthRatio {
+		settings.RequireTargetQueryLengthRatio = false
+	}
+	if strings.TrimSpace(settings.MinTargetQueryLengthPercent) == "" {
+		settings.MinTargetQueryLengthPercent = "60"
+	}
+	if strings.TrimSpace(settings.MaxTargetQueryLengthPercent) == "" {
+		settings.MaxTargetQueryLengthPercent = "160"
+	}
+	if strings.TrimSpace(settings.InterProDomainMode) == "" {
+		settings.InterProDomainMode = "conserved_region"
+	}
 	if strings.TrimSpace(settings.MinInterProCoveragePercent) == "" {
 		settings.MinInterProCoveragePercent = "0"
+	}
+	if strings.TrimSpace(settings.StrongBlastFallbackMinIdentityPercent) == "" {
+		settings.StrongBlastFallbackMinIdentityPercent = "40"
+	}
+	if strings.TrimSpace(settings.StrongBlastFallbackMaxEValue) == "" {
+		settings.StrongBlastFallbackMaxEValue = "1e-80"
+	}
+	if strings.TrimSpace(settings.StrongBlastFallbackMinTargetQueryPercent) == "" {
+		settings.StrongBlastFallbackMinTargetQueryPercent = "80"
+	}
+	if strings.TrimSpace(settings.StrongBlastFallbackMaxTargetQueryPercent) == "" {
+		settings.StrongBlastFallbackMaxTargetQueryPercent = "120"
+	}
+	if strings.TrimSpace(settings.StrongFallbackMinFamilyConsensusSupport) == "" {
+		settings.StrongFallbackMinFamilyConsensusSupport = "2"
+	}
+	if strings.TrimSpace(settings.StrongFallbackMinFamilyConsensusPercent) == "" {
+		settings.StrongFallbackMinFamilyConsensusPercent = "35"
+	}
+	if strings.TrimSpace(settings.FamilySemanticMinTokenMatches) == "" {
+		settings.FamilySemanticMinTokenMatches = "1"
+	}
+	if strings.TrimSpace(settings.FamilySemanticMinAgreementPercent) == "" {
+		settings.FamilySemanticMinAgreementPercent = "20"
 	}
 	if strings.TrimSpace(settings.RankingTieBreakerOrder) == "" {
 		settings.RankingTieBreakerOrder = "score,identity,coverage,reference,evalue,bitscore"
@@ -4893,6 +5035,9 @@ func normalizeTUIBlastFilterSettings(settings BlastFilterSettings) BlastFilterSe
 	if strings.TrimSpace(settings.LengthRatioWeight) == "" {
 		settings.LengthRatioWeight = "2"
 	}
+	if strings.TrimSpace(settings.TargetQueryLengthWeight) == "" {
+		settings.TargetQueryLengthWeight = "2"
+	}
 	if strings.TrimSpace(settings.InterProWeight) == "" {
 		settings.InterProWeight = "3"
 	}
@@ -4907,6 +5052,9 @@ func normalizeTUIBlastFilterSettings(settings BlastFilterSettings) BlastFilterSe
 	}
 	if strings.TrimSpace(settings.UniProtAnnotationWeight) == "" {
 		settings.UniProtAnnotationWeight = "1"
+	}
+	if strings.TrimSpace(settings.FamilySemanticAgreementWeight) == "" {
+		settings.FamilySemanticAgreementWeight = "2"
 	}
 	if strings.TrimSpace(settings.PenaltySequenceCaution) == "" {
 		settings.PenaltySequenceCaution = "2"
@@ -4938,6 +5086,9 @@ func normalizeTUIBlastFilterSettings(settings BlastFilterSettings) BlastFilterSe
 	if strings.TrimSpace(settings.UniProtAnnotationReferenceScore) == "" {
 		settings.UniProtAnnotationReferenceScore = "10"
 	}
+	if strings.TrimSpace(settings.FamilySemanticReferenceScore) == "" {
+		settings.FamilySemanticReferenceScore = "20"
+	}
 	if strings.TrimSpace(settings.FragmentReferencePenaltyMultiplier) == "" {
 		settings.FragmentReferencePenaltyMultiplier = "10"
 	}
@@ -4968,6 +5119,9 @@ func normalizeTUIBlastFilterSettings(settings BlastFilterSettings) BlastFilterSe
 func normalizeTUIFamilyBlastSettings(settings FamilyBlastSettings) FamilyBlastSettings {
 	if strings.TrimSpace(settings.MinimumGroupSize) == "" {
 		settings.MinimumGroupSize = "2"
+	}
+	if strings.TrimSpace(settings.RankingTieBreakerOrder) == "" {
+		settings.RankingTieBreakerOrder = "evalue,reference,identity,coverage,bitscore"
 	}
 	if settings.PrependOnlyFirstQuery {
 		settings.PrependOnlyFirstQuery = true

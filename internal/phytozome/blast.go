@@ -788,7 +788,8 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 func applyPhytozomeQueryLabels(source *model.QuerySequenceSource, gene geneRecord) {
 	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
 	source.Aliases = strings.Join(aliases, "; ")
-	source.LabelName = firstAlias(source.Aliases)
+	source.AutoDefine = strings.TrimSpace(gene.AutoDefline)
+	source.LabelName = bestQuerySourceLabel(source.Aliases, gene.AutoDefline)
 }
 
 func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
@@ -1003,10 +1004,7 @@ func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, ge
 	}
 
 	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
-	labelName := ""
-	if len(aliases) > 0 {
-		labelName = strings.TrimSpace(aliases[0])
-	}
+	labelName := bestAlias(strings.Join(aliases, "; "))
 	uniprotValues := make([]string, 0, len(transcript.Uniprot))
 	for _, value := range transcript.Uniprot {
 		value = strings.TrimSpace(value)
@@ -1183,6 +1181,277 @@ func firstAlias(value string) string {
 		}
 	}
 	return ""
+}
+
+func bestAlias(value string) string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	})
+	best := ""
+	bestScore := -1
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		score := aliasPreferenceScore(part)
+		if score > bestScore || (score == bestScore && len(part) < len(best)) {
+			best = part
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func bestQuerySourceLabel(aliases string, autoDefine string) string {
+	candidates := querySourceAliasCandidates(aliases)
+	if label := labelFromAutoDefine(autoDefine); label != "" {
+		candidates = append(candidates, label)
+	}
+	best := ""
+	bestScore := -1
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		score := aliasPreferenceScore(candidate) + querySourceLabelPreferenceBonus(candidate)
+		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func querySourceAliasCandidates(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key := strings.ToUpper(part)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, part)
+	}
+	return out
+}
+
+func querySourceLabelPreferenceBonus(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	score := 0
+	upper := strings.ToUpper(value)
+	if looksLikePrimaryFamilySymbol(upper) {
+		score += 30
+	}
+	if strings.HasPrefix(upper, "AT") && len(value) > 4 {
+		score -= 8
+	}
+	return score
+}
+
+func looksLikePrimaryFamilySymbol(value string) bool {
+	if value == "" {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+func aliasPreferenceScore(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return -1
+	}
+	score := 0
+	hasLetter := false
+	hasDigit := false
+	upperCount := 0
+	lowerCount := 0
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+			upperCount++
+			score += 2
+		case r >= 'a' && r <= 'z':
+			hasLetter = true
+			lowerCount++
+			score += 1
+		case r >= '0' && r <= '9':
+			hasDigit = true
+			score += 1
+		case r == '-' || r == '\'':
+			score += 1
+		case r == '_' || r == '/' || r == '.':
+			score -= 2
+		case r == ' ' || r == '\t':
+			score -= 8
+		default:
+			score -= 4
+		}
+	}
+	upper := strings.ToUpper(value)
+	switch {
+	case strings.HasPrefix(upper, "AT") && hasDigit:
+		score -= 12
+	case strings.HasPrefix(upper, "CYP") && hasDigit:
+		score -= 10
+	case strings.HasPrefix(upper, "REF") && hasDigit:
+		score -= 6
+	}
+	if hasLetter && hasDigit {
+		score += 8
+	}
+	if noLowercase(value) && len(value) <= 4 {
+		score += 8
+	}
+	if aliasHasInternalDigitPattern(value) {
+		score += 2
+	}
+	if upperCount > 0 && lowerCount == 0 {
+		score += 4
+	}
+	if len(value) <= 8 {
+		score += 6
+	} else if len(value) <= 12 {
+		score += 2
+	} else {
+		score -= len(value) - 12
+	}
+	return score
+}
+
+func noLowercase(value string) bool {
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+func aliasHasInternalDigitPattern(value string) bool {
+	seenDigit := false
+	seenLetterAfterDigit := false
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			seenDigit = true
+		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+			if seenDigit {
+				seenLetterAfterDigit = true
+			}
+		}
+	}
+	if !seenLetterAfterDigit {
+		return false
+	}
+	last := rune(value[len(value)-1])
+	return last >= '0' && last <= '9'
+}
+
+func labelFromAutoDefine(value string) string {
+	best := ""
+	bestScore := -1
+	for _, candidate := range autoDefineCandidates(value) {
+		score := autoDefineLabelScore(candidate)
+		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func autoDefineCandidates(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '(' || r == ')' || r == ',' || r == ';' || r == '/' || r == '\t' || r == '\r' || r == '\n'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if !looksLikeAliasToken(part) {
+			continue
+		}
+		key := strings.ToUpper(part)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, part)
+	}
+	return out
+}
+
+func autoDefineLabelScore(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return -1
+	}
+	score := aliasPreferenceScore(value)
+	if strings.Contains(value, "'") {
+		score += 10
+	}
+	if len(value) <= 4 {
+		score += 12
+	} else if len(value) <= 6 {
+		score += 8
+	} else if len(value) <= 8 {
+		score += 4
+	} else {
+		score -= len(value) - 8
+	}
+	upper := strings.ToUpper(value)
+	if strings.HasPrefix(upper, "CYP") && len(value) > 5 {
+		score -= 8
+	}
+	return score
+}
+
+func looksLikeAliasToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 16 {
+		return false
+	}
+	hasLetter := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9', r == '-', r == '\'', r == '.':
+		default:
+			return false
+		}
+	}
+	return hasLetter
 }
 
 func copyStringSlice(values []string) []string {

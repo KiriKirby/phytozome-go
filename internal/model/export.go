@@ -55,6 +55,7 @@ type QuerySequenceSource struct {
 	SourceGenomeLabel string
 	LabelName         string
 	Aliases           string
+	AutoDefine        string
 	GeneID            string
 	TranscriptID      string
 	ProteinID         string

@@ -281,28 +281,12 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 
 	const sheet = "BLAST Results"
 	file.SetSheetName(file.GetSheetName(0), sheet)
+	if err := writeBlastMetadataSheet(file, metadata); err != nil {
+		return err
+	}
 
 	headerRow := 1
 	dataStartRow := 2
-
-	if metadata != nil && (metadata.GeneName != "" || metadata.GeneID != "" || metadata.GeneReportURL != "") {
-		metaValues := []any{
-			"gene_name", metadata.GeneName,
-			"gene_id", metadata.GeneID,
-			"gene_report_url", metadata.GeneReportURL,
-		}
-		for col, value := range metaValues {
-			cell, err := excelize.CoordinatesToCellName(col+1, 1)
-			if err != nil {
-				return fmt.Errorf("build metadata cell: %w", err)
-			}
-			if err := file.SetCellValue(sheet, cell, value); err != nil {
-				return fmt.Errorf("write metadata col %d: %w", col+1, err)
-			}
-		}
-		headerRow = 2
-		dataStartRow = 3
-	}
 
 	headers := blastHeadersForRows(rows)
 	headerStyles := map[string]int{}
@@ -351,6 +335,50 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 		return fmt.Errorf("save excel file: %w", err)
 	}
 
+	return nil
+}
+
+func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata) error {
+	if file == nil || metadata == nil {
+		return nil
+	}
+	values := []struct {
+		key   string
+		value string
+	}{
+		{key: "gene_name", value: strings.TrimSpace(metadata.GeneName)},
+		{key: "gene_id", value: strings.TrimSpace(metadata.GeneID)},
+		{key: "gene_report_url", value: strings.TrimSpace(metadata.GeneReportURL)},
+	}
+	hasValues := false
+	for _, item := range values {
+		if item.value != "" {
+			hasValues = true
+			break
+		}
+	}
+	if !hasValues {
+		return nil
+	}
+	const sheet = "Query Metadata"
+	if _, err := file.NewSheet(sheet); err != nil {
+		return fmt.Errorf("create metadata sheet: %w", err)
+	}
+	if err := file.SetCellValue(sheet, "A1", "field"); err != nil {
+		return fmt.Errorf("write metadata header field: %w", err)
+	}
+	if err := file.SetCellValue(sheet, "B1", "value"); err != nil {
+		return fmt.Errorf("write metadata header value: %w", err)
+	}
+	for i, item := range values {
+		row := i + 2
+		if err := file.SetCellValue(sheet, fmt.Sprintf("A%d", row), item.key); err != nil {
+			return fmt.Errorf("write metadata key %d: %w", i, err)
+		}
+		if err := file.SetCellValue(sheet, fmt.Sprintf("B%d", row), item.value); err != nil {
+			return fmt.Errorf("write metadata value %d: %w", i, err)
+		}
+	}
 	return nil
 }
 

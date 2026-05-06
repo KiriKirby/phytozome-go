@@ -198,7 +198,7 @@ func renderLabels(r *pdfReportRenderer, k KeywordReportData) {
 		rows = append(rows, []string{trace.SearchTerm, trace.FinalLabel, trace.SourceField, trace.SourceValue, trace.Method})
 	}
 	r.table([]string{"Search term", "Final label", "Source field", "Source value", "Method"}, rows, []float64{92, 68, 74, 145, 128})
-	r.note("Label method note: manual labels come from the user's label-name input. Auto-identify checks existing row label_name, then first alias, then gene/transcript/sequence identifiers. In lemna mode, the Arabidopsis/Phytozome label fallback is reported only if it already ran during the actual label step; the report never runs it.")
+	r.note("Label method note: manual labels come from the user's label-name input. Auto-identify checks existing row label_name, then the best alias candidate, then gene/transcript/sequence identifiers. In lemna mode, the Arabidopsis/Phytozome label fallback is reported only if it already ran during the actual label step; the report never runs it.")
 	r.paragraph("This label trace is deliberately conservative. It records the final label that affected exported rows and the best already-known source for that label. It does not treat a polished label as proof of biological identity; biological interpretation remains tied to the result rows, source annotations, and user selection.", 8.8, colorMuted, pageWidth-marginLeft-marginRight)
 }
 

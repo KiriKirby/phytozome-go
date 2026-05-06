@@ -562,6 +562,7 @@ type BlastFilterRequest struct {
 	SelectedByRun [][]bool
 	Settings      model.BlastFilterSettings
 	CurrentRun    int
+	Profile       string
 }
 
 type BlastFilterSuggestion struct {
@@ -1126,17 +1127,21 @@ func (p *Prompter) FamilyBlastSettings(groups []FamilyBlastGroup, references mod
 		Reference: familyBlastReferenceMessage(defaults.UseUniProtReference, defaults.UseInterProReference),
 		Groups:    tuiFamilyBlastGroups(groups),
 		Settings: tui.FamilyBlastSettings{
-			Enabled:                 defaults.Enabled,
-			GroupByDetectedPrefix:   defaults.GroupByDetectedPrefix,
-			MergeRowsByTarget:       defaults.MergeRowsByTarget,
-			KeepBestHitPerTarget:    defaults.KeepBestHitPerTarget,
-			PrependOnlyFirstQuery:   defaults.PrependOnlyFirstQuery,
-			MinimumGroupSize:        strconv.Itoa(defaults.MinimumGroupSize),
-			StripArabidopsisPrefix:  defaults.StripArabidopsisPrefix,
-			StripTrailingQueryIndex: defaults.StripTrailingQueryIndex,
-			StripAfterNumberSuffix:  defaults.StripAfterNumberSuffix,
-			UseUniProtReference:     defaults.UseUniProtReference,
-			UseInterProReference:    defaults.UseInterProReference,
+			Enabled:                    defaults.Enabled,
+			GroupByDetectedPrefix:      defaults.GroupByDetectedPrefix,
+			MergeRowsByTarget:          defaults.MergeRowsByTarget,
+			KeepBestHitPerTarget:       defaults.KeepBestHitPerTarget,
+			PrependOnlyFirstQuery:      defaults.PrependOnlyFirstQuery,
+			MinimumGroupSize:           strconv.Itoa(defaults.MinimumGroupSize),
+			StripArabidopsisPrefix:     defaults.StripArabidopsisPrefix,
+			StripLeadingSpeciesPrefix:  defaults.StripLeadingSpeciesPrefix,
+			StripTrailingQueryIndex:    defaults.StripTrailingQueryIndex,
+			StripAfterNumberSuffix:     defaults.StripAfterNumberSuffix,
+			NormalizeInnerPunctuation:  defaults.NormalizeInnerPunctuation,
+			StripTerminalSubtypeSuffix: defaults.StripTerminalSubtypeSuffix,
+			UseUniProtReference:        defaults.UseUniProtReference,
+			UseInterProReference:       defaults.UseInterProReference,
+			RankingTieBreakerOrder:     defaults.RankingTieBreakerOrder,
 		},
 		AllowBack:   true,
 		AllowHome:   true,
@@ -1150,17 +1155,21 @@ func (p *Prompter) FamilyBlastSettings(groups []FamilyBlastGroup, references mod
 	}
 	settings := result.Settings
 	out := model.FamilyBlastSettings{
-		Enabled:                 settings.Enabled,
-		GroupByDetectedPrefix:   settings.GroupByDetectedPrefix,
-		MergeRowsByTarget:       settings.MergeRowsByTarget,
-		KeepBestHitPerTarget:    settings.KeepBestHitPerTarget,
-		PrependOnlyFirstQuery:   settings.PrependOnlyFirstQuery,
-		MinimumGroupSize:        parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
-		StripArabidopsisPrefix:  settings.StripArabidopsisPrefix,
-		StripTrailingQueryIndex: settings.StripTrailingQueryIndex,
-		StripAfterNumberSuffix:  settings.StripAfterNumberSuffix,
-		UseUniProtReference:     defaults.UseUniProtReference,
-		UseInterProReference:    defaults.UseInterProReference,
+		Enabled:                    settings.Enabled,
+		GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
+		MergeRowsByTarget:          settings.MergeRowsByTarget,
+		KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
+		PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+		MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
+		StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
+		StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
+		StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
+		StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
+		NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
+		StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+		UseUniProtReference:        defaults.UseUniProtReference,
+		UseInterProReference:       defaults.UseInterProReference,
+		RankingTieBreakerOrder:     settings.RankingTieBreakerOrder,
 	}
 	if out.MinimumGroupSize < 2 {
 		out.MinimumGroupSize = 2
@@ -1240,16 +1249,34 @@ func tuiBlastFilterSettings(settings model.BlastFilterSettings) tui.BlastFilterS
 		RequireTargetCanonicalLengthRatio:         settings.RequireTargetCanonicalLengthRatio,
 		MinTargetCanonicalLengthPercent:           fmt.Sprintf("%.0f", settings.MinTargetCanonicalLengthPercent),
 		MaxTargetCanonicalLengthPercent:           fmt.Sprintf("%.0f", settings.MaxTargetCanonicalLengthPercent),
+		UseTargetQueryLengthRatio:                 settings.UseTargetQueryLengthRatio,
+		RequireTargetQueryLengthRatio:             settings.RequireTargetQueryLengthRatio,
+		MinTargetQueryLengthPercent:               fmt.Sprintf("%.0f", settings.MinTargetQueryLengthPercent),
+		MaxTargetQueryLengthPercent:               fmt.Sprintf("%.0f", settings.MaxTargetQueryLengthPercent),
 		RequireUniProtAccession:                   settings.RequireUniProtAccession,
 		PreferUniProtReviewed:                     settings.PreferUniProtReviewed,
 		RejectUniProtFragments:                    settings.RejectUniProtFragments,
 		RejectUniProtSequenceCautions:             settings.RejectUniProtSequenceCautions,
+		InterProDomainMode:                        settings.InterProDomainMode,
 		RequireInterProConservedRegion:            settings.RequireInterProConservedRegion,
 		AllowInterProPartial:                      settings.AllowInterProPartial,
 		RejectInterProMissing:                     settings.RejectInterProMissing,
 		RejectInterProUncertain:                   settings.RejectInterProUncertain,
 		MinInterProCoveragePercent:                fmt.Sprintf("%.0f", settings.MinInterProCoveragePercent),
 		RequireInterProCoverageWhenUsed:           settings.RequireInterProCoverageWhenUsed,
+		AllowStrongBlastFallbackWithoutReferences: settings.AllowStrongBlastFallbackWithoutReferences,
+		StrongBlastFallbackMinIdentityPercent:     fmt.Sprintf("%.0f", settings.StrongBlastFallbackMinIdentityPercent),
+		StrongBlastFallbackMaxEValue:              formatScientificSetting(settings.StrongBlastFallbackMaxEValue),
+		StrongBlastFallbackMinTargetQueryPercent:  fmt.Sprintf("%.0f", settings.StrongBlastFallbackMinTargetQueryPercent),
+		StrongBlastFallbackMaxTargetQueryPercent:  fmt.Sprintf("%.0f", settings.StrongBlastFallbackMaxTargetQueryPercent),
+		RequireFamilyConsensusForStrongFallback:   settings.RequireFamilyConsensusForStrongFallback,
+		StrongFallbackMinFamilyConsensusSupport:   strconv.Itoa(settings.StrongFallbackMinFamilyConsensusSupport),
+		StrongFallbackMinFamilyConsensusPercent:   fmt.Sprintf("%.0f", settings.StrongFallbackMinFamilyConsensusPercent),
+		UseFamilySemanticAgreement:                settings.UseFamilySemanticAgreement,
+		RequireFamilySemanticAgreement:            settings.RequireFamilySemanticAgreement,
+		FamilySemanticMinTokenMatches:             strconv.Itoa(settings.FamilySemanticMinTokenMatches),
+		FamilySemanticMinAgreementPercent:         fmt.Sprintf("%.0f", settings.FamilySemanticMinAgreementPercent),
+		FamilySemanticAllowStrongReferenceBypass:  settings.FamilySemanticAllowStrongReferenceBypass,
 		KeepBestIsoformPerTargetGene:              settings.KeepBestIsoformPerTargetGene,
 		KeepTopHitsPerQuery:                       settings.KeepTopHitsPerQuery,
 		TopHitsPerQuery:                           strconv.Itoa(settings.TopHitsPerQuery),
@@ -1266,11 +1293,13 @@ func tuiBlastFilterSettings(settings model.BlastFilterSettings) tui.BlastFilterS
 		IdentityWeight:                            strconv.Itoa(settings.IdentityWeight),
 		CoverageWeight:                            strconv.Itoa(settings.CoverageWeight),
 		LengthRatioWeight:                         strconv.Itoa(settings.LengthRatioWeight),
+		TargetQueryLengthWeight:                   strconv.Itoa(settings.TargetQueryLengthWeight),
 		InterProWeight:                            strconv.Itoa(settings.InterProWeight),
 		InterProPartialWeight:                     strconv.Itoa(settings.InterProPartialWeight),
 		InterProCoverageWeight:                    strconv.Itoa(settings.InterProCoverageWeight),
 		UniProtReviewedWeight:                     strconv.Itoa(settings.UniProtReviewedWeight),
 		UniProtAnnotationWeight:                   strconv.Itoa(settings.UniProtAnnotationWeight),
+		FamilySemanticAgreementWeight:             strconv.Itoa(settings.FamilySemanticAgreementWeight),
 		PenaltySequenceCaution:                    strconv.Itoa(settings.PenaltySequenceCaution),
 		PenaltyFragment:                           strconv.Itoa(settings.PenaltyFragment),
 		InterProPresentReferenceScore:             strconv.Itoa(settings.InterProPresentReferenceScore),
@@ -1281,6 +1310,7 @@ func tuiBlastFilterSettings(settings model.BlastFilterSettings) tui.BlastFilterS
 		UniProtAccessionReferenceScore:            strconv.Itoa(settings.UniProtAccessionReferenceScore),
 		UniProtReviewedReferenceScore:             strconv.Itoa(settings.UniProtReviewedReferenceScore),
 		UniProtAnnotationReferenceScore:           strconv.Itoa(settings.UniProtAnnotationReferenceScore),
+		FamilySemanticReferenceScore:              strconv.Itoa(settings.FamilySemanticReferenceScore),
 		FragmentReferencePenaltyMultiplier:        strconv.Itoa(settings.FragmentReferencePenaltyMultiplier),
 		SequenceCautionReferencePenaltyMultiplier: strconv.Itoa(settings.SequenceCautionReferencePenaltyMultiplier),
 		LengthNearDistancePercent:                 fmt.Sprintf("%.0f", settings.LengthNearDistancePercent),
@@ -1295,35 +1325,53 @@ func tuiBlastFilterSettings(settings model.BlastFilterSettings) tui.BlastFilterS
 func parseBlastFilterSettings(settings tui.BlastFilterSettings) model.BlastFilterSettings {
 	defaults := model.DefaultBlastFilterSettings()
 	out := model.BlastFilterSettings{
-		UseTargetCanonicalLengthRatio:      settings.UseTargetCanonicalLengthRatio,
-		RequireTargetCanonicalLengthRatio:  settings.RequireTargetCanonicalLengthRatio,
-		RequireUniProtAccession:            settings.RequireUniProtAccession,
-		PreferUniProtReviewed:              settings.PreferUniProtReviewed,
-		RejectUniProtFragments:             settings.RejectUniProtFragments,
-		RejectUniProtSequenceCautions:      settings.RejectUniProtSequenceCautions,
-		RequireInterProConservedRegion:     settings.RequireInterProConservedRegion,
-		AllowInterProPartial:               settings.AllowInterProPartial,
-		RejectInterProMissing:              settings.RejectInterProMissing,
-		RejectInterProUncertain:            settings.RejectInterProUncertain,
-		RequireInterProCoverageWhenUsed:    settings.RequireInterProCoverageWhenUsed,
-		KeepBestIsoformPerTargetGene:       settings.KeepBestIsoformPerTargetGene,
-		KeepTopHitsPerQuery:                settings.KeepTopHitsPerQuery,
-		RankingTieBreakerOrder:             settings.RankingTieBreakerOrder,
-		PreferHigherFilterScoreWhenRanking: settings.PreferHigherFilterScoreWhenRanking,
-		PreferLowerEValueWhenTies:          settings.PreferLowerEValueWhenTies,
-		PreferHigherIdentityWhenTies:       settings.PreferHigherIdentityWhenTies,
-		PreferHigherCoverageWhenTies:       settings.PreferHigherCoverageWhenTies,
-		PreferHigherReferenceScoreWhenTies: settings.PreferHigherReferenceScoreWhenTies,
-		PreferHigherBitscoreWhenTies:       settings.PreferHigherBitscoreWhenTies,
-		RejectIfAnyHardRuleFails:           settings.RejectIfAnyHardRuleFails,
-		EnableSoftScore:                    settings.EnableSoftScore,
+		UseTargetCanonicalLengthRatio:             settings.UseTargetCanonicalLengthRatio,
+		RequireTargetCanonicalLengthRatio:         settings.RequireTargetCanonicalLengthRatio,
+		UseTargetQueryLengthRatio:                 settings.UseTargetQueryLengthRatio,
+		RequireTargetQueryLengthRatio:             settings.RequireTargetQueryLengthRatio,
+		RequireUniProtAccession:                   settings.RequireUniProtAccession,
+		PreferUniProtReviewed:                     settings.PreferUniProtReviewed,
+		RejectUniProtFragments:                    settings.RejectUniProtFragments,
+		RejectUniProtSequenceCautions:             settings.RejectUniProtSequenceCautions,
+		InterProDomainMode:                        settings.InterProDomainMode,
+		RequireInterProConservedRegion:            settings.RequireInterProConservedRegion,
+		AllowInterProPartial:                      settings.AllowInterProPartial,
+		RejectInterProMissing:                     settings.RejectInterProMissing,
+		RejectInterProUncertain:                   settings.RejectInterProUncertain,
+		RequireInterProCoverageWhenUsed:           settings.RequireInterProCoverageWhenUsed,
+		AllowStrongBlastFallbackWithoutReferences: settings.AllowStrongBlastFallbackWithoutReferences,
+		RequireFamilyConsensusForStrongFallback:   settings.RequireFamilyConsensusForStrongFallback,
+		UseFamilySemanticAgreement:                settings.UseFamilySemanticAgreement,
+		RequireFamilySemanticAgreement:            settings.RequireFamilySemanticAgreement,
+		FamilySemanticAllowStrongReferenceBypass:  settings.FamilySemanticAllowStrongReferenceBypass,
+		KeepBestIsoformPerTargetGene:              settings.KeepBestIsoformPerTargetGene,
+		KeepTopHitsPerQuery:                       settings.KeepTopHitsPerQuery,
+		RankingTieBreakerOrder:                    settings.RankingTieBreakerOrder,
+		PreferHigherFilterScoreWhenRanking:        settings.PreferHigherFilterScoreWhenRanking,
+		PreferLowerEValueWhenTies:                 settings.PreferLowerEValueWhenTies,
+		PreferHigherIdentityWhenTies:              settings.PreferHigherIdentityWhenTies,
+		PreferHigherCoverageWhenTies:              settings.PreferHigherCoverageWhenTies,
+		PreferHigherReferenceScoreWhenTies:        settings.PreferHigherReferenceScoreWhenTies,
+		PreferHigherBitscoreWhenTies:              settings.PreferHigherBitscoreWhenTies,
+		RejectIfAnyHardRuleFails:                  settings.RejectIfAnyHardRuleFails,
+		EnableSoftScore:                           settings.EnableSoftScore,
 	}
 	out.MinIdentityPercent = parseFloatDefaultAllowZero(settings.MinIdentityPercent, defaults.MinIdentityPercent)
 	out.MinAlignQueryCoveragePercent = parseFloatDefaultAllowZero(settings.MinAlignQueryCoveragePercent, defaults.MinAlignQueryCoveragePercent)
 	out.MaxEValue = parseFloatDefaultAllowZero(settings.MaxEValue, defaults.MaxEValue)
 	out.MinTargetCanonicalLengthPercent = parseFloatDefault(settings.MinTargetCanonicalLengthPercent, defaults.MinTargetCanonicalLengthPercent)
 	out.MaxTargetCanonicalLengthPercent = parseFloatDefault(settings.MaxTargetCanonicalLengthPercent, defaults.MaxTargetCanonicalLengthPercent)
+	out.MinTargetQueryLengthPercent = parseFloatDefault(settings.MinTargetQueryLengthPercent, defaults.MinTargetQueryLengthPercent)
+	out.MaxTargetQueryLengthPercent = parseFloatDefault(settings.MaxTargetQueryLengthPercent, defaults.MaxTargetQueryLengthPercent)
 	out.MinInterProCoveragePercent = parseFloatDefaultAllowZero(settings.MinInterProCoveragePercent, defaults.MinInterProCoveragePercent)
+	out.StrongBlastFallbackMinIdentityPercent = parseFloatDefault(settings.StrongBlastFallbackMinIdentityPercent, defaults.StrongBlastFallbackMinIdentityPercent)
+	out.StrongBlastFallbackMaxEValue = parseFloatDefaultAllowZero(settings.StrongBlastFallbackMaxEValue, defaults.StrongBlastFallbackMaxEValue)
+	out.StrongBlastFallbackMinTargetQueryPercent = parseFloatDefault(settings.StrongBlastFallbackMinTargetQueryPercent, defaults.StrongBlastFallbackMinTargetQueryPercent)
+	out.StrongBlastFallbackMaxTargetQueryPercent = parseFloatDefault(settings.StrongBlastFallbackMaxTargetQueryPercent, defaults.StrongBlastFallbackMaxTargetQueryPercent)
+	out.StrongFallbackMinFamilyConsensusSupport = parseIntDefault(settings.StrongFallbackMinFamilyConsensusSupport, defaults.StrongFallbackMinFamilyConsensusSupport)
+	out.StrongFallbackMinFamilyConsensusPercent = parseFloatDefault(settings.StrongFallbackMinFamilyConsensusPercent, defaults.StrongFallbackMinFamilyConsensusPercent)
+	out.FamilySemanticMinTokenMatches = parseIntDefault(settings.FamilySemanticMinTokenMatches, defaults.FamilySemanticMinTokenMatches)
+	out.FamilySemanticMinAgreementPercent = parseFloatDefaultAllowZero(settings.FamilySemanticMinAgreementPercent, defaults.FamilySemanticMinAgreementPercent)
 	if len(parseBlastFilterRankingOrder(out.RankingTieBreakerOrder)) == 0 {
 		out.RankingTieBreakerOrder = defaults.RankingTieBreakerOrder
 	}
@@ -1332,11 +1380,13 @@ func parseBlastFilterSettings(settings tui.BlastFilterSettings) model.BlastFilte
 	out.IdentityWeight = parseIntDefault(settings.IdentityWeight, defaults.IdentityWeight)
 	out.CoverageWeight = parseIntDefault(settings.CoverageWeight, defaults.CoverageWeight)
 	out.LengthRatioWeight = parseIntDefault(settings.LengthRatioWeight, defaults.LengthRatioWeight)
+	out.TargetQueryLengthWeight = parseIntDefault(settings.TargetQueryLengthWeight, defaults.TargetQueryLengthWeight)
 	out.InterProWeight = parseIntDefault(settings.InterProWeight, defaults.InterProWeight)
 	out.InterProPartialWeight = parseIntDefault(settings.InterProPartialWeight, defaults.InterProPartialWeight)
 	out.InterProCoverageWeight = parseIntDefault(settings.InterProCoverageWeight, defaults.InterProCoverageWeight)
 	out.UniProtReviewedWeight = parseIntDefault(settings.UniProtReviewedWeight, defaults.UniProtReviewedWeight)
 	out.UniProtAnnotationWeight = parseIntDefault(settings.UniProtAnnotationWeight, defaults.UniProtAnnotationWeight)
+	out.FamilySemanticAgreementWeight = parseIntDefault(settings.FamilySemanticAgreementWeight, defaults.FamilySemanticAgreementWeight)
 	out.PenaltySequenceCaution = parseIntDefault(settings.PenaltySequenceCaution, defaults.PenaltySequenceCaution)
 	out.PenaltyFragment = parseIntDefault(settings.PenaltyFragment, defaults.PenaltyFragment)
 	out.InterProPresentReferenceScore = parseIntDefault(settings.InterProPresentReferenceScore, defaults.InterProPresentReferenceScore)
@@ -1347,6 +1397,7 @@ func parseBlastFilterSettings(settings tui.BlastFilterSettings) model.BlastFilte
 	out.UniProtAccessionReferenceScore = parseIntDefault(settings.UniProtAccessionReferenceScore, defaults.UniProtAccessionReferenceScore)
 	out.UniProtReviewedReferenceScore = parseIntDefault(settings.UniProtReviewedReferenceScore, defaults.UniProtReviewedReferenceScore)
 	out.UniProtAnnotationReferenceScore = parseIntDefault(settings.UniProtAnnotationReferenceScore, defaults.UniProtAnnotationReferenceScore)
+	out.FamilySemanticReferenceScore = parseIntDefault(settings.FamilySemanticReferenceScore, defaults.FamilySemanticReferenceScore)
 	out.FragmentReferencePenaltyMultiplier = parseIntDefault(settings.FragmentReferencePenaltyMultiplier, defaults.FragmentReferencePenaltyMultiplier)
 	out.SequenceCautionReferencePenaltyMultiplier = parseIntDefault(settings.SequenceCautionReferencePenaltyMultiplier, defaults.SequenceCautionReferencePenaltyMultiplier)
 	out.LengthNearDistancePercent = parseFloatDefault(settings.LengthNearDistancePercent, defaults.LengthNearDistancePercent)
@@ -1357,6 +1408,9 @@ func parseBlastFilterSettings(settings tui.BlastFilterSettings) model.BlastFilte
 	out.LengthFarReferencePenalty = parseIntDefault(settings.LengthFarReferencePenalty, defaults.LengthFarReferencePenalty)
 	if out.MaxTargetCanonicalLengthPercent < out.MinTargetCanonicalLengthPercent {
 		out.MaxTargetCanonicalLengthPercent = out.MinTargetCanonicalLengthPercent
+	}
+	if out.MaxTargetQueryLengthPercent < out.MinTargetQueryLengthPercent {
+		out.MaxTargetQueryLengthPercent = out.MinTargetQueryLengthPercent
 	}
 	return out
 }
@@ -1509,6 +1563,10 @@ func defaultBlastFilterSuggestion(request BlastFilterRequest) BlastFilterSuggest
 	return out
 }
 
+func DefaultBlastFilterSuggestion(request BlastFilterRequest) BlastFilterSuggestion {
+	return defaultBlastFilterSuggestion(request)
+}
+
 func blastFilterSuggestRows(rows []model.BlastResultRow, selected []bool, settings model.BlastFilterSettings) BlastFilterSuggestion {
 	outSelected := normalizePromptSelection(nil, len(rows), true)
 	flags := make([]bool, len(rows))
@@ -1575,6 +1633,18 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 			hardFailed = true
 		}
 	}
+	if settings.UseTargetQueryLengthRatio {
+		targetQueryRatio := blastTargetQueryLengthRatio(row)
+		if targetQueryRatio > 0 {
+			if targetQueryRatio >= settings.MinTargetQueryLengthPercent && targetQueryRatio <= settings.MaxTargetQueryLengthPercent {
+				evaluation.Score += settings.TargetQueryLengthWeight
+			} else {
+				hardFailed = true
+			}
+		} else if settings.RequireTargetQueryLengthRatio {
+			hardFailed = true
+		}
+	}
 	if settings.RequireUniProtAccession && strings.TrimSpace(row.UniProtAccession) == "" {
 		hardFailed = true
 	}
@@ -1583,6 +1653,14 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 	}
 	if hasUniProtAnnotation(row) {
 		evaluation.Score += settings.UniProtAnnotationWeight
+	}
+	if settings.UseFamilySemanticAgreement && blastRowHasSemanticTokens(row) && row.FamilySemanticAnnotationMatchCount > 0 {
+		evaluation.Score += settings.FamilySemanticAgreementWeight
+	}
+	if settings.UseFamilySemanticAgreement && settings.RequireFamilySemanticAgreement && blastRowHasSemanticTokens(row) && blastRowHasSemanticReferenceSurface(row) && !blastRowHasSemanticAgreement(row, settings) {
+		if !(settings.FamilySemanticAllowStrongReferenceBypass && !blastRowHasSemanticReferenceSurface(row) && blastFilterReferenceScore(row, settings) >= strongReferenceBypassScore(settings)) {
+			hardFailed = true
+		}
 	}
 	if settings.RejectUniProtFragments && isTruthyAnnotation(row.UniProtFragment) {
 		hardFailed = true
@@ -1593,27 +1671,41 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 		evaluation.Score -= settings.PenaltySequenceCaution
 	}
 	status := strings.ToLower(strings.TrimSpace(row.InterProConservedRegionStatus))
-	switch status {
-	case "present":
-		evaluation.Score += settings.InterProWeight
-	case "partial":
-		if settings.AllowInterProPartial {
-			evaluation.Score += settings.InterProPartialWeight
+	switch strings.ToLower(strings.TrimSpace(settings.InterProDomainMode)) {
+	case "off":
+	case "conserved_region":
+		switch status {
+		case "present":
+			evaluation.Score += settings.InterProWeight
+		case "partial":
+			if settings.AllowInterProPartial {
+				evaluation.Score += settings.InterProPartialWeight
+			}
+			if settings.RequireInterProConservedRegion && !settings.AllowInterProPartial {
+				hardFailed = true
+			}
+		case "missing":
+			if settings.RejectInterProMissing || settings.RequireInterProConservedRegion {
+				hardFailed = true
+			}
+		case "uncertain":
+			if settings.RejectInterProUncertain || settings.RequireInterProConservedRegion {
+				hardFailed = true
+			}
+		case "":
+			if settings.RequireInterProConservedRegion || settings.RejectInterProMissing {
+				hardFailed = true
+			}
 		}
-		if settings.RequireInterProConservedRegion && !settings.AllowInterProPartial {
+	case "family_consensus_domain", "any_domain":
+		if blastRowHasAnyInterProDomain(row) {
+			evaluation.Score += settings.InterProWeight
+		} else {
 			hardFailed = true
 		}
-	case "missing":
-		if settings.RejectInterProMissing || settings.RequireInterProConservedRegion {
-			hardFailed = true
-		}
-	case "uncertain":
-		if settings.RejectInterProUncertain || settings.RequireInterProConservedRegion {
-			hardFailed = true
-		}
-	case "":
-		if settings.RequireInterProConservedRegion {
-			hardFailed = true
+	default:
+		if blastRowHasAnyInterProDomain(row) {
+			evaluation.Score += settings.InterProWeight
 		}
 	}
 	if settings.MinInterProCoveragePercent > 0 {
@@ -1628,6 +1720,9 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 			hardFailed = true
 		}
 	}
+	if hardFailed && settings.AllowStrongBlastFallbackWithoutReferences && blastRowMissingReferenceAnchors(row) && blastRowMeetsStrongFallback(row, evaluation.EValue, settings) {
+		hardFailed = false
+	}
 	if settings.RejectIfAnyHardRuleFails && hardFailed {
 		evaluation.Reject = true
 	}
@@ -1635,6 +1730,67 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 		evaluation.Reject = true
 	}
 	return evaluation
+}
+
+func blastRowMissingReferenceAnchors(row model.BlastResultRow) bool {
+	return strings.TrimSpace(row.UniProtAccession) == "" && strings.TrimSpace(row.InterProConservedRegionStatus) == ""
+}
+
+func blastRowMeetsStrongFallback(row model.BlastResultRow, eValue float64, settings model.BlastFilterSettings) bool {
+	if row.PercentIdentity < settings.StrongBlastFallbackMinIdentityPercent {
+		return false
+	}
+	if settings.StrongBlastFallbackMaxEValue > 0 && eValue > settings.StrongBlastFallbackMaxEValue {
+		return false
+	}
+	ratio := blastTargetQueryLengthRatio(row)
+	if ratio <= 0 {
+		return false
+	}
+	if ratio < settings.StrongBlastFallbackMinTargetQueryPercent || ratio > settings.StrongBlastFallbackMaxTargetQueryPercent {
+		return false
+	}
+	if settings.RequireFamilyConsensusForStrongFallback && !blastRowMeetsStrongFallbackConsensus(row, settings) {
+		return false
+	}
+	return true
+}
+
+func blastRowMeetsStrongFallbackConsensus(row model.BlastResultRow, settings model.BlastFilterSettings) bool {
+	support := row.FamilyConsensusSupport
+	if support < settings.StrongFallbackMinFamilyConsensusSupport {
+		return false
+	}
+	if settings.StrongFallbackMinFamilyConsensusPercent <= 0 {
+		return true
+	}
+	coverage := parseFirstFloat(row.FamilyConsensusCoveragePercent)
+	return coverage >= settings.StrongFallbackMinFamilyConsensusPercent
+}
+
+func blastTargetQueryLengthRatio(row model.BlastResultRow) float64 {
+	if row.TargetLength <= 0 || row.QueryLength <= 0 {
+		return 0
+	}
+	return float64(row.TargetLength) / float64(row.QueryLength) * 100
+}
+
+func blastRowHasAnyInterProDomain(row model.BlastResultRow) bool {
+	for _, value := range []string{
+		row.InterProConservedRegionStatus,
+		row.InterProAccessions,
+		row.InterProSignatureAccessions,
+		row.InterProPfamAccessions,
+		row.PfamDomain,
+		row.UniProtPfam,
+		row.UniProtInterPro,
+		row.UniProtDomain,
+	} {
+		if strings.TrimSpace(value) != "" && !strings.EqualFold(strings.TrimSpace(value), "missing") {
+			return true
+		}
+	}
+	return false
 }
 
 func applyTopHitLimit(rows []model.BlastResultRow, evaluations []blastFilterEvaluation, selected []bool, flags []bool, settings model.BlastFilterSettings) {
@@ -1803,6 +1959,9 @@ func blastFilterReferenceScore(row model.BlastResultRow, settings model.BlastFil
 	if hasUniProtAnnotation(row) {
 		score += settings.UniProtAnnotationReferenceScore
 	}
+	if settings.UseFamilySemanticAgreement && blastRowHasSemanticTokens(row) && blastRowHasSemanticAgreement(row, settings) {
+		score += settings.FamilySemanticReferenceScore
+	}
 	if isTruthyAnnotation(row.UniProtFragment) {
 		score -= settings.PenaltyFragment * settings.FragmentReferencePenaltyMultiplier
 	}
@@ -1822,6 +1981,52 @@ func blastFilterReferenceScore(row model.BlastResultRow, settings model.BlastFil
 		case distance >= settings.LengthFarDistancePercent:
 			score -= settings.LengthFarReferencePenalty
 		}
+	}
+	return score
+}
+
+func blastRowHasSemanticAgreement(row model.BlastResultRow, settings model.BlastFilterSettings) bool {
+	if !blastRowHasSemanticTokens(row) {
+		return true
+	}
+	if row.FamilySemanticAnnotationMatchCount < settings.FamilySemanticMinTokenMatches {
+		return false
+	}
+	if settings.FamilySemanticMinAgreementPercent <= 0 {
+		return true
+	}
+	return parseFirstFloat(row.FamilySemanticAgreementPercent) >= settings.FamilySemanticMinAgreementPercent
+}
+
+func blastRowHasSemanticTokens(row model.BlastResultRow) bool {
+	return strings.TrimSpace(row.FamilySemanticTokens) != "" || strings.TrimSpace(row.FamilySemanticAliasTokens) != ""
+}
+
+func blastRowHasSemanticReferenceSurface(row model.BlastResultRow) bool {
+	for _, value := range []string{
+		row.UniProtProteinName,
+		row.UniProtEntryName,
+		row.UniProtGeneNames,
+		row.UniProtKeywords,
+		row.UniProtFunction,
+		row.UniProtCatalyticActivity,
+		row.UniProtPathway,
+		row.UniProtDomain,
+		row.UniProtInterPro,
+		row.PfamDomain,
+		row.InterProEntryName,
+	} {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func strongReferenceBypassScore(settings model.BlastFilterSettings) int {
+	score := settings.InterProPresentReferenceScore + settings.UniProtAccessionReferenceScore + settings.UniProtAnnotationReferenceScore
+	if score <= 0 {
+		return 100
 	}
 	return score
 }
@@ -1946,8 +2151,26 @@ func normalizeBlastFilterSettings(settings model.BlastFilterSettings) model.Blas
 	if !settings.UseTargetCanonicalLengthRatio {
 		settings.RequireTargetCanonicalLengthRatio = false
 	}
+	if settings.MinTargetQueryLengthPercent <= 0 {
+		settings.MinTargetQueryLengthPercent = defaults.MinTargetQueryLengthPercent
+	}
+	if settings.MaxTargetQueryLengthPercent <= 0 {
+		settings.MaxTargetQueryLengthPercent = defaults.MaxTargetQueryLengthPercent
+	}
+	if settings.MaxTargetQueryLengthPercent < settings.MinTargetQueryLengthPercent {
+		settings.MaxTargetQueryLengthPercent = settings.MinTargetQueryLengthPercent
+	}
+	if !settings.UseTargetQueryLengthRatio {
+		settings.RequireTargetQueryLengthRatio = false
+	}
+	if strings.TrimSpace(settings.InterProDomainMode) == "" {
+		settings.InterProDomainMode = defaults.InterProDomainMode
+	}
 	if settings.TopHitsPerQuery <= 0 {
 		settings.TopHitsPerQuery = defaults.TopHitsPerQuery
+	}
+	if settings.FamilySemanticMinTokenMatches <= 0 {
+		settings.FamilySemanticMinTokenMatches = defaults.FamilySemanticMinTokenMatches
 	}
 	if settings.MinSoftScore <= 0 {
 		settings.MinSoftScore = defaults.MinSoftScore
@@ -1964,6 +2187,9 @@ func normalizeBlastFilterSettings(settings model.BlastFilterSettings) model.Blas
 	if settings.LengthRatioWeight <= 0 {
 		settings.LengthRatioWeight = defaults.LengthRatioWeight
 	}
+	if settings.TargetQueryLengthWeight <= 0 {
+		settings.TargetQueryLengthWeight = defaults.TargetQueryLengthWeight
+	}
 	if settings.InterProWeight <= 0 {
 		settings.InterProWeight = defaults.InterProWeight
 	}
@@ -1978,6 +2204,9 @@ func normalizeBlastFilterSettings(settings model.BlastFilterSettings) model.Blas
 	}
 	if settings.UniProtAnnotationWeight <= 0 {
 		settings.UniProtAnnotationWeight = defaults.UniProtAnnotationWeight
+	}
+	if settings.FamilySemanticAgreementWeight <= 0 {
+		settings.FamilySemanticAgreementWeight = defaults.FamilySemanticAgreementWeight
 	}
 	if settings.PenaltySequenceCaution <= 0 {
 		settings.PenaltySequenceCaution = defaults.PenaltySequenceCaution
@@ -2008,6 +2237,9 @@ func normalizeBlastFilterSettings(settings model.BlastFilterSettings) model.Blas
 	}
 	if settings.UniProtAnnotationReferenceScore <= 0 {
 		settings.UniProtAnnotationReferenceScore = defaults.UniProtAnnotationReferenceScore
+	}
+	if settings.FamilySemanticReferenceScore <= 0 {
+		settings.FamilySemanticReferenceScore = defaults.FamilySemanticReferenceScore
 	}
 	if settings.FragmentReferencePenaltyMultiplier <= 0 {
 		settings.FragmentReferencePenaltyMultiplier = defaults.FragmentReferencePenaltyMultiplier

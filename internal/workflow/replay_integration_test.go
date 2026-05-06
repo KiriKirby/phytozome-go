@@ -1,0 +1,1020 @@
+package workflow
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/KiriKirby/phytozome-go/internal/lemna"
+	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/phytozome"
+	"github.com/KiriKirby/phytozome-go/internal/prompt"
+	"github.com/xuri/excelize/v2"
+)
+
+func TestReplayMonolignolTable17_LemnaLocalBlastP(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY") == "" {
+		t.Skip("set PHYTO_REPLAY=1 to run integration replay")
+	}
+
+	txtPath := `C:\Users\wangsychn\Desktop\新建文件夹\Monolignol Biosynthesis.txt`
+	xlsxPath := `C:\Users\wangsychn\Desktop\新建文件夹\Monolignol Biosynthesis.xlsx`
+
+	manualItems, err := loadReplayFastaItems(txtPath)
+	if err != nil {
+		t.Fatalf("load manual replay FASTA: %v", err)
+	}
+	if len(manualItems) == 0 {
+		t.Fatal("no manual replay items loaded")
+	}
+
+	w := NewBlastWizard(os.Stdout)
+	lc := lemna.NewClient(nil)
+	w.source = lc
+	selected := model.SpeciesCandidate{
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		JBrowseName: "Sp_polyrhiza_9509",
+		ProteomeID:  18,
+		IsOfficial:  true,
+		CommonName:  "giant duckweed",
+	}
+
+	arabidopsis := model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+		SearchAlias: "Arabidopsis thaliana",
+	}
+
+	req := model.BlastRequest{
+		Species:          selected,
+		SequenceKind:     model.SequenceProtein,
+		TargetType:       "proteome",
+		Program:          "local:BLASTP",
+		EValue:           "1e-30",
+		ComparisonMatrix: "BLOSUM62",
+		WordLength:       "default",
+		AlignmentsToShow: 100,
+		AllowGaps:        true,
+		FilterQuery:      true,
+	}
+	references := externalReferenceConfig{
+		UseUniProt:       true,
+		UseInterPro:      true,
+		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+	}
+	filterSettings := model.DefaultBlastFilterSettings()
+	targets := map[string]int{
+		"4CL":    9,
+		"C3H":    1,
+		"C4H":    3,
+		"CAD":    4,
+		"CCOAMT": 1,
+		"CCR":    21,
+		"COMT":   5,
+		"F5H":    3,
+		"HCT":    20,
+		"PAL":    3,
+	}
+
+	manualResult, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, filterSettings, manualItems, false)
+	if err != nil {
+		t.Fatalf("manual replay: %v", err)
+	}
+	t.Log("Manual labels from TXT")
+	logReplayResult(t, manualResult, targets)
+
+	autoItems, err := loadReplayItemsFromExcel(context.Background(), xlsxPath, arabidopsis, w.httpClient)
+	if err != nil {
+		t.Fatalf("load auto-label replay items: %v", err)
+	}
+	if len(autoItems) == 0 {
+		t.Fatal("no auto-label replay items loaded")
+	}
+	labeledAutoItems := cloneBlastQueryItems(autoItems)
+	phytozomeSource := phytozome.NewClient(w.httpClient)
+	for i := range labeledAutoItems {
+		labeledAutoItems[i].LabelName = w.autoIdentifyBlastLabel(context.Background(), phytozomeSource, arabidopsis, labeledAutoItems[i])
+	}
+	logReplayLabels(t, "Auto-label assignments", labeledAutoItems, model.DefaultFamilyBlastSettings())
+	autoResult, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, filterSettings, autoItems, true)
+	if err != nil {
+		t.Fatalf("auto-label replay: %v", err)
+	}
+	t.Log("Auto labels from Excel protein IDs / Phytozome metadata")
+	logReplayResult(t, autoResult, targets)
+}
+
+type replayScenarioResult struct {
+	RawByFamily    map[string]int
+	MergedByFamily map[string]int
+	KeptByFamily   map[string]int
+}
+
+func runReplayScenario(ctx context.Context, w *BlastWizard, selected model.SpeciesCandidate, labelSpecies model.SpeciesCandidate, req model.BlastRequest, references externalReferenceConfig, filterSettings model.BlastFilterSettings, items []blastQueryItem, autoLabel bool) (replayScenarioResult, error) {
+	items = cloneBlastQueryItems(items)
+	if autoLabel {
+		labeled, err := w.autoIdentifyBlastLabelsWithProgress(ctx, labelSpecies, items)
+		if err != nil {
+			return replayScenarioResult{}, err
+		}
+		items = labeled
+	}
+	runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, req, references)
+	if err != nil {
+		return replayScenarioResult{}, err
+	}
+	result := replayScenarioResult{
+		RawByFamily:    map[string]int{},
+		MergedByFamily: map[string]int{},
+		KeptByFamily:   map[string]int{},
+	}
+	for _, run := range runs {
+		family := replayRunFamily(run, model.DefaultFamilyBlastSettings())
+		result.RawByFamily[family] += len(run.Results.Rows)
+	}
+	familySettings := model.DefaultFamilyBlastSettings()
+	plan := &familyBlastPlan{
+		Settings: familySettings,
+		Groups:   detectFamilyBlastGroups(items, familySettings),
+	}
+	_, mergedRuns := applyFamilyBlastPlan(items, runs, plan)
+	for _, run := range mergedRuns {
+		family := replayRunFamily(run, familySettings)
+		result.MergedByFamily[family] += len(run.Results.Rows)
+		suggestion := prompt.DefaultBlastFilterSuggestion(prompt.BlastFilterRequest{
+			Rows:     run.Results.Rows,
+			Settings: filterSettings,
+		})
+		for _, keep := range suggestion.Selected {
+			if keep {
+				result.KeptByFamily[family]++
+			}
+		}
+	}
+	return result, nil
+}
+
+func TestReplayMonolignolVariants_LemnaLocalBlastP(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY") == "" {
+		t.Skip("set PHYTO_REPLAY=1 to run integration replay")
+	}
+
+	txtPath := `C:\Users\wangsychn\Desktop\新建文件夹\Monolignol Biosynthesis.txt`
+	manualItems, err := loadReplayFastaItems(txtPath)
+	if err != nil {
+		t.Fatalf("load manual replay FASTA: %v", err)
+	}
+	w := NewBlastWizard(os.Stdout)
+	w.source = lemna.NewClient(nil)
+	selected := model.SpeciesCandidate{
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		JBrowseName: "Sp_polyrhiza_9509",
+		ProteomeID:  18,
+		IsOfficial:  true,
+		CommonName:  "giant duckweed",
+	}
+	arabidopsis := model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+		SearchAlias: "Arabidopsis thaliana",
+	}
+	req := model.BlastRequest{
+		Species:          selected,
+		SequenceKind:     model.SequenceProtein,
+		TargetType:       "proteome",
+		Program:          "local:BLASTP",
+		EValue:           "1e-30",
+		ComparisonMatrix: "BLOSUM62",
+		WordLength:       "default",
+		AlignmentsToShow: 100,
+		AllowGaps:        true,
+		FilterQuery:      true,
+	}
+	references := externalReferenceConfig{
+		UseUniProt:       true,
+		UseInterPro:      true,
+		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+	}
+	baseFamily := model.DefaultFamilyBlastSettings()
+	baseFamily.StripArabidopsisPrefix = true
+	baseFilter := model.DefaultBlastFilterSettings()
+
+	cases := []struct {
+		name   string
+		family model.FamilyBlastSettings
+		filter model.BlastFilterSettings
+	}{
+		{name: "baseline", family: baseFamily, filter: baseFilter},
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireInterProConservedRegion = false
+			f.RejectInterProMissing = false
+			f.RejectInterProUncertain = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "no-interpro-hard-reject", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireTargetCanonicalLengthRatio = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "allow-missing-canonical-ratio", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireInterProConservedRegion = false
+			f.RejectInterProMissing = false
+			f.RejectInterProUncertain = false
+			f.RequireTargetCanonicalLengthRatio = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "relaxed-interpro-and-ratio", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			fam := baseFamily
+			fam.RankingTieBreakerOrder = "evalue,identity,coverage,reference,bitscore"
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "family-evalue-first", family: fam, filter: baseFilter}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.InterProDomainMode = "any_domain"
+			f.RequireInterProConservedRegion = false
+			f.RejectInterProMissing = false
+			f.RejectInterProUncertain = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "interpro-any-domain", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.InterProDomainMode = "any_domain"
+			f.RequireInterProConservedRegion = false
+			f.RejectInterProMissing = false
+			f.RejectInterProUncertain = false
+			f.UseTargetQueryLengthRatio = true
+			f.RequireTargetQueryLengthRatio = true
+			f.MinTargetQueryLengthPercent = 70
+			f.MaxTargetQueryLengthPercent = 150
+			f.RequireTargetCanonicalLengthRatio = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "any-domain-plus-target-query-ratio", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.InterProDomainMode = "any_domain"
+			f.RequireInterProConservedRegion = false
+			f.RejectInterProMissing = false
+			f.RejectInterProUncertain = false
+			f.MinIdentityPercent = 30
+			f.MinAlignQueryCoveragePercent = 50
+			f.MaxEValue = 1e-30
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "any-domain-plus-paper-metrics", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireFamilySemanticAgreement = false
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "semantic-soft-only", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireFamilySemanticAgreement = false
+			f.StrongBlastFallbackMinIdentityPercent = 30
+			f.StrongBlastFallbackMaxEValue = 1e-50
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "semantic-soft-plus-relaxed-fallback-30-1e50", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireFamilySemanticAgreement = false
+			f.StrongBlastFallbackMinIdentityPercent = 28
+			f.StrongBlastFallbackMaxEValue = 1e-45
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "semantic-soft-plus-relaxed-fallback-28-1e45", family: baseFamily, filter: f}
+		}(),
+		func() struct {
+			name   string
+			family model.FamilyBlastSettings
+			filter model.BlastFilterSettings
+		} {
+			f := baseFilter
+			f.RequireFamilySemanticAgreement = false
+			f.StrongBlastFallbackMinIdentityPercent = 30
+			f.StrongBlastFallbackMaxEValue = 1e-50
+			f.UseTargetQueryLengthRatio = true
+			f.RequireTargetQueryLengthRatio = true
+			f.MinTargetQueryLengthPercent = 80
+			f.MaxTargetQueryLengthPercent = 120
+			return struct {
+				name   string
+				family model.FamilyBlastSettings
+				filter model.BlastFilterSettings
+			}{name: "semantic-soft-relaxed-fallback-plus-target-query", family: baseFamily, filter: f}
+		}(),
+	}
+
+	targets := map[string]int{"CCR": 21, "HCT": 20, "C3H": 1, "F5H": 3, "C4H": 3, "CAD": 4, "PAL": 3, "4CL": 9, "COMT": 5, "CCOAMT": 1}
+	for _, tc := range cases {
+		result, err := runReplayScenarioWithSettings(context.Background(), w, selected, arabidopsis, req, references, tc.filter, tc.family, manualItems, false)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		t.Logf("variant=%s", tc.name)
+		logReplayResult(t, result, targets)
+	}
+
+	debugRuns, err := replayMergedRuns(context.Background(), w, selected, arabidopsis, req, references, baseFamily, manualItems, false)
+	if err != nil {
+		t.Fatalf("debug merged runs: %v", err)
+	}
+	for _, family := range []string{"CCR", "HCT", "C3H", "F5H"} {
+		logReplayFamilyDiagnostics(t, family, debugRuns, baseFilter, baseFamily)
+	}
+}
+
+func TestReplayCelluloseTable16_LemnaLocalBlastP(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY") == "" {
+		t.Skip("set PHYTO_REPLAY=1 to run integration replay")
+	}
+	txtPath := `C:\Users\wangsychn\Desktop\新建文件夹\Cellulose.txt`
+	xlsxPath := `C:\Users\wangsychn\Desktop\新建文件夹\Cellulose.xlsx`
+	items, err := loadReplayFastaItems(txtPath)
+	if err != nil {
+		t.Fatalf("load cellulose replay FASTA: %v", err)
+	}
+	w := NewBlastWizard(os.Stdout)
+	w.source = lemna.NewClient(nil)
+	selected := model.SpeciesCandidate{
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		JBrowseName: "Sp_polyrhiza_9509",
+		ProteomeID:  18,
+		IsOfficial:  true,
+		CommonName:  "giant duckweed",
+	}
+	arabidopsis := model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+		SearchAlias: "Arabidopsis thaliana",
+	}
+	req := model.BlastRequest{
+		Species:          selected,
+		SequenceKind:     model.SequenceProtein,
+		TargetType:       "proteome",
+		Program:          "local:BLASTP",
+		EValue:           "1e-30",
+		ComparisonMatrix: "BLOSUM62",
+		WordLength:       "default",
+		AlignmentsToShow: 100,
+		AllowGaps:        true,
+		FilterQuery:      true,
+	}
+	references := externalReferenceConfig{
+		UseUniProt:       true,
+		UseInterPro:      true,
+		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+	}
+	result, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, model.DefaultBlastFilterSettings(), items, false)
+	if err != nil {
+		t.Fatalf("cellulose replay: %v", err)
+	}
+	t.Log("Cellulose manual labels from TXT")
+	logReplayResult(t, result, map[string]int{"CESA": 10})
+
+	autoItems, err := loadReplayItemsFromExcel(context.Background(), xlsxPath, arabidopsis, w.httpClient)
+	if err != nil {
+		t.Fatalf("load cellulose auto-label replay items: %v", err)
+	}
+	labeledAutoItems := cloneBlastQueryItems(autoItems)
+	phytozomeSource := phytozome.NewClient(w.httpClient)
+	for i := range labeledAutoItems {
+		labeledAutoItems[i].LabelName = w.autoIdentifyBlastLabel(context.Background(), phytozomeSource, arabidopsis, labeledAutoItems[i])
+	}
+	logReplayLabels(t, "Cellulose auto-label assignments", labeledAutoItems, model.DefaultFamilyBlastSettings())
+	autoResult, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, model.DefaultBlastFilterSettings(), autoItems, true)
+	if err != nil {
+		t.Fatalf("cellulose auto replay: %v", err)
+	}
+	t.Log("Cellulose auto labels from Excel protein IDs / Phytozome metadata")
+	logReplayResult(t, autoResult, map[string]int{"CESA": 10})
+}
+
+func TestReplayHemicellulosesTable16_LemnaLocalBlastP(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY") == "" {
+		t.Skip("set PHYTO_REPLAY=1 to run integration replay")
+	}
+	txtPath := `C:\Users\wangsychn\Desktop\新建文件夹\Hemicelluloses.txt`
+	xlsxPath := `C:\Users\wangsychn\Desktop\新建文件夹\Hemicelluloses.xlsx`
+	items, err := loadReplayFastaItems(txtPath)
+	if err != nil {
+		t.Fatalf("load hemicelluloses replay FASTA: %v", err)
+	}
+	w := NewBlastWizard(os.Stdout)
+	w.source = lemna.NewClient(nil)
+	selected := model.SpeciesCandidate{
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		JBrowseName: "Sp_polyrhiza_9509",
+		ProteomeID:  18,
+		IsOfficial:  true,
+		CommonName:  "giant duckweed",
+	}
+	arabidopsis := model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+		SearchAlias: "Arabidopsis thaliana",
+	}
+	req := model.BlastRequest{
+		Species:          selected,
+		SequenceKind:     model.SequenceProtein,
+		TargetType:       "proteome",
+		Program:          "local:BLASTP",
+		EValue:           "1e-30",
+		ComparisonMatrix: "BLOSUM62",
+		WordLength:       "default",
+		AlignmentsToShow: 100,
+		AllowGaps:        true,
+		FilterQuery:      true,
+	}
+	references := externalReferenceConfig{
+		UseUniProt:       true,
+		UseInterPro:      true,
+		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+	}
+	result, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, model.DefaultBlastFilterSettings(), items, false)
+	if err != nil {
+		t.Fatalf("hemicelluloses replay: %v", err)
+	}
+	t.Log("Hemicelluloses manual labels from TXT")
+	logReplayResult(t, result, map[string]int{"IRX": 21})
+
+	autoItems, err := loadReplayItemsFromExcel(context.Background(), xlsxPath, arabidopsis, w.httpClient)
+	if err != nil {
+		t.Fatalf("load hemicelluloses auto-label replay items: %v", err)
+	}
+	labeledAutoItems := cloneBlastQueryItems(autoItems)
+	phytozomeSource := phytozome.NewClient(w.httpClient)
+	for i := range labeledAutoItems {
+		labeledAutoItems[i].LabelName = w.autoIdentifyBlastLabel(context.Background(), phytozomeSource, arabidopsis, labeledAutoItems[i])
+	}
+	logReplayLabels(t, "Hemicelluloses auto-label assignments", labeledAutoItems, model.DefaultFamilyBlastSettings())
+	autoResult, err := runReplayScenario(context.Background(), w, selected, arabidopsis, req, references, model.DefaultBlastFilterSettings(), autoItems, true)
+	if err != nil {
+		t.Fatalf("hemicelluloses auto replay: %v", err)
+	}
+	t.Log("Hemicelluloses auto labels from Excel protein IDs / Phytozome metadata")
+	logReplayResult(t, autoResult, map[string]int{"IRX": 21})
+}
+
+func runReplayScenarioWithSettings(ctx context.Context, w *BlastWizard, selected model.SpeciesCandidate, labelSpecies model.SpeciesCandidate, req model.BlastRequest, references externalReferenceConfig, filterSettings model.BlastFilterSettings, familySettings model.FamilyBlastSettings, items []blastQueryItem, autoLabel bool) (replayScenarioResult, error) {
+	items = cloneBlastQueryItems(items)
+	if autoLabel {
+		labeled, err := w.autoIdentifyBlastLabelsWithProgress(ctx, labelSpecies, items)
+		if err != nil {
+			return replayScenarioResult{}, err
+		}
+		items = labeled
+	}
+	runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, req, references)
+	if err != nil {
+		return replayScenarioResult{}, err
+	}
+	result := replayScenarioResult{
+		RawByFamily:    map[string]int{},
+		MergedByFamily: map[string]int{},
+		KeptByFamily:   map[string]int{},
+	}
+	for _, run := range runs {
+		family := replayRunFamily(run, familySettings)
+		result.RawByFamily[family] += len(run.Results.Rows)
+	}
+	plan := &familyBlastPlan{
+		Settings: familySettings,
+		Groups:   detectFamilyBlastGroups(items, familySettings),
+	}
+	_, mergedRuns := applyFamilyBlastPlan(items, runs, plan)
+	for _, run := range mergedRuns {
+		family := replayRunFamily(run, familySettings)
+		result.MergedByFamily[family] += len(run.Results.Rows)
+		suggestion := prompt.DefaultBlastFilterSuggestion(prompt.BlastFilterRequest{
+			Rows:     run.Results.Rows,
+			Settings: filterSettings,
+		})
+		for _, keep := range suggestion.Selected {
+			if keep {
+				result.KeptByFamily[family]++
+			}
+		}
+	}
+	return result, nil
+}
+
+func replayMergedRuns(ctx context.Context, w *BlastWizard, selected model.SpeciesCandidate, labelSpecies model.SpeciesCandidate, req model.BlastRequest, references externalReferenceConfig, familySettings model.FamilyBlastSettings, items []blastQueryItem, autoLabel bool) ([]blastQueryRun, error) {
+	items = cloneBlastQueryItems(items)
+	if autoLabel {
+		labeled, err := w.autoIdentifyBlastLabelsWithProgress(ctx, labelSpecies, items)
+		if err != nil {
+			return nil, err
+		}
+		items = labeled
+	}
+	runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, req, references)
+	if err != nil {
+		return nil, err
+	}
+	plan := &familyBlastPlan{
+		Settings: familySettings,
+		Groups:   detectFamilyBlastGroups(items, familySettings),
+	}
+	_, mergedRuns := applyFamilyBlastPlan(items, runs, plan)
+	return mergedRuns, nil
+}
+
+func logReplayFamilyDiagnostics(t *testing.T, family string, runs []blastQueryRun, filterSettings model.BlastFilterSettings, familySettings model.FamilyBlastSettings) {
+	t.Helper()
+	for _, run := range runs {
+		if replayRunFamily(run, familySettings) != family {
+			continue
+		}
+		statusCounts := map[string]int{}
+		inRangeCanonical := 0
+		missingCanonical := 0
+		selected := 0
+		suggestion := prompt.DefaultBlastFilterSuggestion(prompt.BlastFilterRequest{
+			Rows:     run.Results.Rows,
+			Settings: filterSettings,
+		})
+		for i, row := range run.Results.Rows {
+			status := strings.ToLower(strings.TrimSpace(row.InterProConservedRegionStatus))
+			if status == "" {
+				status = "<blank>"
+			}
+			statusCounts[status]++
+			ratio := replayParseFloat(row.TargetUniProtCanonicalLengthPercent)
+			if ratio == 0 {
+				missingCanonical++
+			} else if ratio >= filterSettings.MinTargetCanonicalLengthPercent && ratio <= filterSettings.MaxTargetCanonicalLengthPercent {
+				inRangeCanonical++
+			}
+			if i < len(suggestion.Selected) && suggestion.Selected[i] {
+				selected++
+			}
+		}
+		t.Logf("diagnostic family=%s merged=%d selected=%d interpro=%s canonical_in_range=%d canonical_missing=%d",
+			family,
+			len(run.Results.Rows),
+			selected,
+			replayStatusSummary(statusCounts),
+			inRangeCanonical,
+			missingCanonical,
+		)
+		for i, row := range run.Results.Rows {
+			keep := i < len(suggestion.Selected) && suggestion.Selected[i]
+			targetQueryRatio := 0.0
+			if row.QueryLength > 0 && row.TargetLength > 0 {
+				targetQueryRatio = float64(row.TargetLength) / float64(row.QueryLength) * 100
+			}
+			if i < 12 {
+				t.Logf("family=%s row=%02d keep=%t label=%q target=%q e=%s id=%.1f cov=%.1f target_len=%d query_len=%d tq_ratio=%.1f canon=%q interpro=%q uniprot=%q defline=%q url=%q",
+					family,
+					i+1,
+					keep,
+					row.LabelName,
+					firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID),
+					row.EValue,
+					row.PercentIdentity,
+					row.AlignQueryLengthPercent,
+					row.TargetLength,
+					row.QueryLength,
+					targetQueryRatio,
+					row.TargetUniProtCanonicalLengthPercent,
+					row.InterProConservedRegionStatus,
+					row.UniProtAccession,
+					row.Defline,
+					row.GeneReportURL,
+				)
+			}
+		}
+		return
+	}
+	t.Logf("diagnostic family=%s merged=0 selected=0", family)
+}
+
+func replayStatusSummary(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+strconv.Itoa(counts[key]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func replayParseFloat(value string) float64 {
+	value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
+	if value == "" {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(value, 64)
+	return v
+}
+
+func replayRunFamily(run blastQueryRun, settings model.FamilyBlastSettings) string {
+	return replayFamilyFromStrings(settings,
+		run.Item.FamilyName,
+		run.Item.LabelName,
+		run.Item.MemberLabel,
+	)
+}
+
+func replayFamilyFromStrings(settings model.FamilyBlastSettings, values ...string) string {
+	replaySettings := settings
+	replaySettings.StripArabidopsisPrefix = true
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		for _, piece := range strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' }) {
+			piece = strings.TrimSpace(piece)
+			if piece == "" {
+				continue
+			}
+			if family := detectFamilyName(piece, replaySettings); family != "" {
+				return canonicalReplayFamily(family)
+			}
+			if family := canonicalReplayFamily(piece); family != "" {
+				return family
+			}
+		}
+	}
+	return ""
+}
+
+func logReplayResult(t *testing.T, result replayScenarioResult, targets map[string]int) {
+	t.Helper()
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		t.Logf("%s raw=%d merged=%d kept=%d target=%d diff=%d", key, result.RawByFamily[key], result.MergedByFamily[key], result.KeptByFamily[key], targets[key], result.KeptByFamily[key]-targets[key])
+	}
+}
+
+func logReplayLabels(t *testing.T, title string, items []blastQueryItem, settings model.FamilyBlastSettings) {
+	t.Helper()
+	t.Log(title)
+	for i, item := range items {
+		t.Logf("query %02d label=%q aliases=%q source_label=%q auto_define_family=%q family=%q gene=%q protein=%q",
+			i+1,
+			item.LabelName,
+			func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return item.QuerySource.Aliases
+			}(),
+			func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return item.QuerySource.LabelName
+			}(),
+			func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return replayFamilyFromStrings(settings, item.QuerySource.LabelName)
+			}(),
+			replayFamilyFromStrings(settings, item.LabelName, func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return item.QuerySource.LabelName
+			}()),
+			func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return item.QuerySource.GeneID
+			}(),
+			func() string {
+				if item.QuerySource == nil {
+					return ""
+				}
+				return item.QuerySource.ProteinID
+			}(),
+		)
+	}
+}
+
+func loadReplayItemsFromExcel(ctx context.Context, path string, species model.SpeciesCandidate, httpClient *http.Client) ([]blastQueryItem, error) {
+	file, err := excelize.OpenFile(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+
+	rows, err := file.GetRows(file.GetSheetName(0))
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) < 2 {
+		return nil, nil
+	}
+	headers := map[string]int{}
+	for i, value := range rows[0] {
+		headers[strings.ToLower(strings.TrimSpace(value))] = i
+	}
+	get := func(row []string, key string) string {
+		idx, ok := headers[strings.ToLower(key)]
+		if !ok || idx >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(row[idx])
+	}
+
+	client := phytozome.NewClient(httpClient)
+	items := make([]blastQueryItem, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		geneURL := get(row, "gene_report_url")
+		if geneURL == "" {
+			continue
+		}
+		reportType, identifier, ok := replayGeneReportKeyword(geneURL)
+		if !ok {
+			continue
+		}
+		query, err := client.FetchGeneQuerySequence(ctx, species, reportType, identifier)
+		if err != nil || query == nil || strings.TrimSpace(query.Sequence) == "" {
+			continue
+		}
+		query.OriginalInputURL = geneURL
+		query.NormalizedURL = geneURL
+		query.SourceDatabase = "phytozome"
+		if query.SourceProteomeID == 0 {
+			query.SourceProteomeID = species.ProteomeID
+		}
+		if query.SourceJBrowseName == "" {
+			query.SourceJBrowseName = species.JBrowseName
+		}
+		excelAliases := strings.TrimSpace(get(row, "alias"))
+		if strings.TrimSpace(query.Aliases) == "" {
+			query.Aliases = excelAliases
+		} else if excelAliases != "" {
+			query.Aliases = strings.TrimSpace(excelAliases + "; " + query.Aliases)
+		}
+		items = append(items, blastQueryItem{
+			RawInput:    geneURL,
+			Sequence:    query.Sequence,
+			QuerySource: query,
+			LabelName:   "",
+		})
+	}
+	return items, nil
+}
+
+func replayGeneReportKeyword(value string) (reportType string, identifier string, ok bool) {
+	normalized, ok := normalizeGeneReportURL(value)
+	if !ok {
+		return "", "", false
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return "", "", false
+	}
+	segments := nonEmptyPathSegments(parsed.Path)
+	if len(segments) != 4 || !strings.EqualFold(segments[0], "report") {
+		return "", "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(segments[1])) {
+	case "gene", "transcript", "protein":
+		return strings.ToLower(strings.TrimSpace(segments[1])), strings.TrimSpace(segments[3]), strings.TrimSpace(segments[3]) != ""
+	default:
+		return "", "", false
+	}
+}
+
+func canonicalReplayFamily(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "")
+	value = strings.ReplaceAll(value, "'", "")
+	value = strings.ReplaceAll(value, "_", "")
+	switch {
+	case strings.HasPrefix(value, "CAD"):
+		return "CAD"
+	case strings.HasPrefix(value, "CCOA"):
+		return "CCOAMT"
+	case strings.HasPrefix(value, "4CL"):
+		return "4CL"
+	case strings.HasPrefix(value, "CCR"):
+		return "CCR"
+	case strings.HasPrefix(value, "PAL"):
+		return "PAL"
+	case strings.HasPrefix(value, "C4H"):
+		return "C4H"
+	case strings.HasPrefix(value, "HCT"):
+		return "HCT"
+	case strings.HasPrefix(value, "COMT"), strings.HasPrefix(value, "OMT"):
+		return "COMT"
+	case strings.HasPrefix(value, "C3H"):
+		return "C3H"
+	case strings.HasPrefix(value, "F5H"), strings.HasPrefix(value, "FAH"):
+		return "F5H"
+	default:
+		return value
+	}
+}
+
+func loadReplayFastaItems(path string) ([]blastQueryItem, error) {
+	file, err := os.Open(filepath.Clean(path))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var (
+		items        []blastQueryItem
+		header       string
+		seqBuilder   strings.Builder
+		flushCurrent = func() {
+			h := strings.TrimSpace(header)
+			seq := strings.TrimSpace(seqBuilder.String())
+			if h == "" || seq == "" {
+				return
+			}
+			label := replayLabelFromHeader(h)
+			items = append(items, blastQueryItem{
+				RawInput:  ">" + h + "\n" + seq,
+				LabelName: label,
+				Sequence:  seq,
+				QuerySource: &model.QuerySequenceSource{
+					Sequence:          seq,
+					LabelName:         label,
+					GeneID:            replayGeneIDFromHeader(h),
+					ProteinID:         replayProteinIDFromHeader(h),
+					TranscriptID:      replayProteinIDFromHeader(h),
+					Aliases:           label,
+					Annotation:        h,
+					OrganismShort:     "A.thaliana",
+					SourceDatabase:    "phytozome",
+					SourceProteomeID:  167,
+					SourceJBrowseName: "Athaliana_TAIR10",
+					NormalizedURL:     replayGeneURLFromHeader(h),
+					OriginalInputURL:  replayGeneURLFromHeader(h),
+				},
+			})
+		}
+	)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, ">") {
+			flushCurrent()
+			header = strings.TrimPrefix(line, ">")
+			seqBuilder.Reset()
+			continue
+		}
+		seqBuilder.WriteString(line)
+	}
+	flushCurrent()
+	return items, scanner.Err()
+}
+
+func replayLabelFromHeader(header string) string {
+	if start := strings.LastIndex(header, "("); start >= 0 && strings.HasSuffix(header, ")") {
+		return strings.TrimSpace(header[start+1 : len(header)-1])
+	}
+	return replayProteinIDFromHeader(header)
+}
+
+func replayProteinIDFromHeader(header string) string {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return ""
+	}
+	parts := strings.Split(header, "|")
+	if len(parts) >= 2 {
+		fields := strings.Fields(parts[1])
+		if len(fields) > 0 {
+			return strings.TrimSpace(fields[0])
+		}
+	}
+	fields := strings.Fields(header)
+	if len(fields) > 0 {
+		return strings.TrimSpace(fields[0])
+	}
+	return header
+}
+
+func replayGeneIDFromHeader(header string) string {
+	proteinID := replayProteinIDFromHeader(header)
+	proteinID = strings.TrimSpace(proteinID)
+	if proteinID == "" {
+		return ""
+	}
+	if idx := strings.Index(proteinID, "."); idx > 0 {
+		return proteinID[:idx]
+	}
+	return proteinID
+}
+
+func replayGeneURLFromHeader(header string) string {
+	geneID := replayGeneIDFromHeader(header)
+	if geneID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/%s", geneID)
+}

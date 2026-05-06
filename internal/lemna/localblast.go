@@ -84,7 +84,7 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	}
 
 	// Run BLAST
-	result, err := runBlastAndParse(ctx, blastProg, dbPrefix, fastaIdx, req.Sequence)
+	result, err := runBlastAndParse(ctx, blastProg, dbPrefix, fastaIdx, req)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("run blast: %w", err)
 	}
@@ -351,7 +351,7 @@ func normalizeProgram(requestProg string) (string, error) {
 
 // runBlastAndParse runs the blast program against dbPrefix and parses tabular output.
 // The function uses outfmt 6 with extended columns to capture needed stats.
-func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIndex map[string]fastaEntry, querySequence string) (model.BlastResult, error) {
+func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIndex map[string]fastaEntry, req model.BlastRequest) (model.BlastResult, error) {
 	// Create a temp FASTA file for query
 	tmpDir, err := os.MkdirTemp("", "lemna-blast-query-*")
 	if err != nil {
@@ -360,7 +360,7 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	defer os.RemoveAll(tmpDir)
 
 	queryPath := filepath.Join(tmpDir, "query.fasta")
-	if err := os.WriteFile(queryPath, []byte(">query\n"+querySequence+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(queryPath, []byte(">query\n"+req.Sequence+"\n"), 0o644); err != nil {
 		return model.BlastResult{}, err
 	}
 
@@ -372,7 +372,13 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	outfmt := "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
 
 	// Build command
-	args := []string{"-query", queryPath, "-db", dbPrefix, "-outfmt", outfmt, "-out", outPath, "-max_target_seqs", "500", "-evalue", "1e-5"}
+	args := []string{"-query", queryPath, "-db", dbPrefix, "-outfmt", outfmt, "-out", outPath}
+	if n := strings.TrimSpace(req.EValue); n != "" && n != "-1" {
+		args = append(args, "-evalue", n)
+	}
+	if req.AlignmentsToShow > 0 {
+		args = append(args, "-max_target_seqs", strconv.Itoa(req.AlignmentsToShow))
+	}
 	cmd := exec.CommandContext(ctx, prog, args...)
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
@@ -621,67 +627,28 @@ func enrichBlastRowsWithAHRD(rows []model.BlastResultRow, ahrd map[string]ahrdRe
 	}
 	for i := range rows {
 		r := &rows[i]
-		// Candidate keys to try: SequenceID (if set), Protein id, and token variants.
-		candidates := []string{strings.TrimSpace(r.SequenceID), strings.TrimSpace(r.Protein)}
-		found := false
+		candidates := normalizedIdentifierCandidates(firstNonEmpty(strings.TrimSpace(r.SequenceID), strings.TrimSpace(r.Protein)))
+		if len(candidates) == 0 {
+			candidates = append(candidates, normalizedIdentifierCandidates(strings.TrimSpace(r.Protein))...)
+		}
 		for _, key := range candidates {
 			if key == "" {
 				continue
 			}
-			// direct match
-			if rec, ok := ahrd[key]; ok {
-				// populate useful fields
-				if r.UniProtAccession == "" {
-					r.UniProtAccession = uniprotAccessionFromAHRD(rec)
-				}
-				if r.TranscriptID == "" {
-					r.TranscriptID = key
-				}
-				if r.Defline == "" {
-					r.Defline = rec.HumanReadableDescription
-				}
-				found = true
-				break
+			rec, ok := lookupAHRDRecord(ahrd, key)
+			if !ok {
+				continue
 			}
-			// try base token (strip version like .1)
-			if strings.Contains(key, ".") {
-				base := strings.Split(key, ".")[0]
-				if rec, ok := ahrd[base]; ok {
-					if r.UniProtAccession == "" {
-						r.UniProtAccession = uniprotAccessionFromAHRD(rec)
-					}
-					if r.TranscriptID == "" {
-						r.TranscriptID = base
-					}
-					if r.Defline == "" {
-						r.Defline = rec.HumanReadableDescription
-					}
-					found = true
-					break
-				}
+			if r.UniProtAccession == "" {
+				r.UniProtAccession = uniprotAccessionFromAHRD(rec)
 			}
-			// try last pipe-separated token
-			if strings.Contains(key, "|") {
-				parts := strings.Split(key, "|")
-				token := parts[len(parts)-1]
-				if rec, ok := ahrd[token]; ok {
-					if r.UniProtAccession == "" {
-						r.UniProtAccession = uniprotAccessionFromAHRD(rec)
-					}
-					if r.TranscriptID == "" {
-						r.TranscriptID = token
-					}
-					if r.Defline == "" {
-						r.Defline = rec.HumanReadableDescription
-					}
-					found = true
-					break
-				}
+			if r.TranscriptID == "" {
+				r.TranscriptID = key
 			}
-		}
-		// If still not found, leave row as-is; future mapping via GFF could be attempted.
-		if found {
-			// nothing further for this row
+			if r.Defline == "" {
+				r.Defline = rec.HumanReadableDescription
+			}
+			break
 		}
 	}
 }
@@ -712,36 +679,22 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 		if r.Protein != "" {
 			cands = append(cands, r.Protein)
 		}
-		// Expand tokens: last pipe-part, base before dot, and first whitespace token.
-		expanded := make([]string, 0, 8)
+		expanded := make([]string, 0, 12)
 		for _, k := range cands {
 			k = strings.TrimSpace(k)
 			if k == "" {
 				continue
 			}
-			expanded = append(expanded, k)
-			if strings.Contains(k, "|") {
-				parts := strings.Split(k, "|")
-				token := parts[len(parts)-1]
-				expanded = append(expanded, token)
-			}
-			if strings.Contains(k, ".") {
-				base := strings.Split(k, ".")[0]
-				expanded = append(expanded, base)
-			}
-			fields := strings.Fields(k)
-			if len(fields) > 0 {
-				expanded = append(expanded, fields[0])
-			}
+			expanded = append(expanded, normalizedIdentifierCandidates(k)...)
 		}
+		expanded = uniqueNormalizedStrings(expanded)
 
 		// Try AHRD mapping first (gives human-readable description).
-		found := false
 		for _, tok := range expanded {
 			if tok == "" {
 				continue
 			}
-			if rec, ok := ahrd[tok]; ok {
+			if rec, ok := lookupAHRDRecord(ahrd, tok); ok {
 				if r.UniProtAccession == "" {
 					r.UniProtAccession = uniprotAccessionFromAHRD(rec)
 				}
@@ -764,42 +717,53 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 				if r.TargetID == 0 {
 					r.TargetID = rel.BlastNDBID
 				}
-				found = true
 				break
 			}
 		}
-		if found {
-			continue
-		}
 
 		// Try GFF-derived protein->transcript and transcript->gene mapping.
+		gffMatched := false
 		for _, tok := range expanded {
 			if tok == "" {
 				continue
 			}
-			if tid, ok := protToTrans[tok]; ok && tid != "" {
+			if tid, ok := lookupNormalizedMapValue(protToTrans, tok); ok && tid != "" {
 				// fill transcript and gene fields where possible
 				if r.TranscriptID == "" {
 					r.TranscriptID = tid
 				}
-				if gid, ok2 := transToGene[tid]; ok2 && gid != "" {
-					r.GeneReportURL = rel.ReleaseURL
+				if gid, ok2 := lookupNormalizedMapValue(transToGene, tid); ok2 && gid != "" {
+					if r.GeneReportURL == "" || r.GeneReportURL == rel.ReleaseURL {
+						r.GeneReportURL = lemnaGeneReportURL(rel.RootDir, gid)
+					}
 					// Set TargetID to release proteome id as identifier for export convenience.
 					if r.TargetID == 0 {
 						r.TargetID = rel.BlastNDBID
 					}
-					r.JBrowseName = rel.RootDir
-					_ = gid // gene id is available; could be used to build more precise GeneReportURL if desired
+					if r.JBrowseName == "" {
+						r.JBrowseName = rel.RootDir
+					}
 				}
-				found = true
+				gffMatched = true
 				break
 			}
 		}
-		if found {
-			continue
+		if !gffMatched && strings.TrimSpace(r.TranscriptID) != "" {
+			if gid, ok := lookupNormalizedMapValue(transToGene, r.TranscriptID); ok && gid != "" {
+				if r.GeneReportURL == "" || r.GeneReportURL == rel.ReleaseURL {
+					r.GeneReportURL = lemnaGeneReportURL(rel.RootDir, gid)
+				}
+				if r.JBrowseName == "" {
+					r.JBrowseName = rel.RootDir
+				}
+				if r.TargetID == 0 {
+					r.TargetID = rel.BlastNDBID
+				}
+			}
 		}
 
 		// Try FASTA index enrichment (defline, length)
+		fastaMatched := false
 		if fastaIdx != nil {
 			for _, tok := range expanded {
 				if tok == "" {
@@ -821,13 +785,11 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 					if r.TargetID == 0 {
 						r.TargetID = rel.BlastNDBID
 					}
-					found = true
+					fastaMatched = true
 					break
 				}
 			}
-			if found {
-				continue
-			}
+			_ = fastaMatched
 		}
 
 		// Fallback: ensure rows have traceability to release
@@ -842,6 +804,15 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 			r.TargetID = rel.BlastNDBID
 		}
 	}
+}
+
+func lemnaGeneReportURL(rootDir string, geneID string) string {
+	rootDir = strings.TrimSpace(rootDir)
+	geneID = strings.TrimSpace(geneID)
+	if rootDir == "" || geneID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://www.lemna.org/report/%s/%s", rootDir, geneID)
 }
 
 func uniprotAccessionFromAHRD(record ahrdRecord) string {

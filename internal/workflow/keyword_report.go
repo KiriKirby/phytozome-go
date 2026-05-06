@@ -388,7 +388,7 @@ func labelSourceForGroup(group model.KeywordSearchGroup, method string) (string,
 		}
 	}
 	for _, row := range group.Rows {
-		if label := firstAlias(row.Aliases); label != "" {
+		if label := bestAlias(row.Aliases); label != "" {
 			return "alias", label
 		}
 	}

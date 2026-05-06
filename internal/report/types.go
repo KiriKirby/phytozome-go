@@ -235,15 +235,18 @@ type UniProtReferenceReport struct {
 }
 
 type UniProtRowSummary struct {
-	Row         int
-	Label       string
-	Target      string
-	Accession   string
-	Reviewed    string
-	LengthRatio string
-	Fragment    string
-	Caution     string
-	Annotation  string
+	Row            int
+	Label          string
+	Family         string
+	Target         string
+	Accession      string
+	Reviewed       string
+	FamilySupport  string
+	FamilySemantic string
+	LengthRatio    string
+	Fragment       string
+	Caution        string
+	Annotation     string
 }
 
 type InterProReferenceReport struct {
@@ -312,11 +315,14 @@ type BlastFilterRowSummary struct {
 	Row             int
 	Query           string
 	Label           string
+	Family          string
 	Target          string
 	Identity        string
 	Coverage        string
 	EValue          string
 	LengthRatio     string
+	FamilySupport   string
+	FamilySemantic  string
 	UniProtEvidence string
 	InterProStatus  string
 	Recommended     string

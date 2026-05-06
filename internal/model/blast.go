@@ -19,6 +19,7 @@ type BlastRequest struct {
 	AlignmentsToShow int
 	AllowGaps        bool
 	FilterQuery      bool
+	RequestProfile   string
 }
 
 type BlastJob struct {
@@ -40,6 +41,17 @@ type BlastResultRow struct {
 	SourceDatabase                      string
 	BlastProgram                        string
 	LabelName                           string
+	FamilyName                          string
+	FamilyConsensusSupport              int
+	FamilyConsensusSize                 int
+	FamilyConsensusCoveragePercent      string
+	FamilyConsensusPrimaryLabel         string
+	FamilyMemberLabels                  string
+	FamilySemanticTokens                string
+	FamilySemanticAliasTokens           string
+	FamilySemanticAnnotationMatchCount  int
+	FamilySemanticAnnotationMatchTokens string
+	FamilySemanticAgreementPercent      string
 	HitNumber                           int
 	HSPNumber                           int
 	Protein                             string
@@ -150,16 +162,34 @@ type BlastFilterSettings struct {
 	RequireTargetCanonicalLengthRatio         bool
 	MinTargetCanonicalLengthPercent           float64
 	MaxTargetCanonicalLengthPercent           float64
+	UseTargetQueryLengthRatio                 bool
+	RequireTargetQueryLengthRatio             bool
+	MinTargetQueryLengthPercent               float64
+	MaxTargetQueryLengthPercent               float64
 	RequireUniProtAccession                   bool
 	PreferUniProtReviewed                     bool
 	RejectUniProtFragments                    bool
 	RejectUniProtSequenceCautions             bool
+	InterProDomainMode                        string
 	RequireInterProConservedRegion            bool
 	AllowInterProPartial                      bool
 	RejectInterProMissing                     bool
 	RejectInterProUncertain                   bool
 	MinInterProCoveragePercent                float64
 	RequireInterProCoverageWhenUsed           bool
+	AllowStrongBlastFallbackWithoutReferences bool
+	StrongBlastFallbackMinIdentityPercent     float64
+	StrongBlastFallbackMaxEValue              float64
+	StrongBlastFallbackMinTargetQueryPercent  float64
+	StrongBlastFallbackMaxTargetQueryPercent  float64
+	RequireFamilyConsensusForStrongFallback   bool
+	StrongFallbackMinFamilyConsensusSupport   int
+	StrongFallbackMinFamilyConsensusPercent   float64
+	UseFamilySemanticAgreement                bool
+	RequireFamilySemanticAgreement            bool
+	FamilySemanticMinTokenMatches             int
+	FamilySemanticMinAgreementPercent         float64
+	FamilySemanticAllowStrongReferenceBypass  bool
 	KeepBestIsoformPerTargetGene              bool
 	KeepTopHitsPerQuery                       bool
 	TopHitsPerQuery                           int
@@ -176,11 +206,13 @@ type BlastFilterSettings struct {
 	IdentityWeight                            int
 	CoverageWeight                            int
 	LengthRatioWeight                         int
+	TargetQueryLengthWeight                   int
 	InterProWeight                            int
 	InterProPartialWeight                     int
 	InterProCoverageWeight                    int
 	UniProtReviewedWeight                     int
 	UniProtAnnotationWeight                   int
+	FamilySemanticAgreementWeight             int
 	PenaltySequenceCaution                    int
 	PenaltyFragment                           int
 	InterProPresentReferenceScore             int
@@ -191,6 +223,7 @@ type BlastFilterSettings struct {
 	UniProtAccessionReferenceScore            int
 	UniProtReviewedReferenceScore             int
 	UniProtAnnotationReferenceScore           int
+	FamilySemanticReferenceScore              int
 	FragmentReferencePenaltyMultiplier        int
 	SequenceCautionReferencePenaltyMultiplier int
 	LengthNearDistancePercent                 float64
@@ -202,30 +235,40 @@ type BlastFilterSettings struct {
 }
 
 type FamilyBlastSettings struct {
-	Enabled                 bool
-	GroupByDetectedPrefix   bool
-	MergeRowsByTarget       bool
-	KeepBestHitPerTarget    bool
-	PrependOnlyFirstQuery   bool
-	MinimumGroupSize        int
-	StripArabidopsisPrefix  bool
-	StripTrailingQueryIndex bool
-	StripAfterNumberSuffix  bool
-	UseUniProtReference     bool
-	UseInterProReference    bool
+	Enabled                    bool
+	GroupByDetectedPrefix      bool
+	MergeRowsByTarget          bool
+	KeepBestHitPerTarget       bool
+	PrependOnlyFirstQuery      bool
+	MinimumGroupSize           int
+	StripArabidopsisPrefix     bool
+	StripLeadingSpeciesPrefix  bool
+	StripTrailingQueryIndex    bool
+	StripAfterNumberSuffix     bool
+	NormalizeInnerPunctuation  bool
+	StripTerminalSubtypeSuffix bool
+	KeepDistinctQuerySubgroups bool
+	UseUniProtReference        bool
+	UseInterProReference       bool
+	RankingTieBreakerOrder     string
 }
 
 func DefaultFamilyBlastSettings() FamilyBlastSettings {
 	return FamilyBlastSettings{
-		Enabled:                 true,
-		GroupByDetectedPrefix:   true,
-		MergeRowsByTarget:       true,
-		KeepBestHitPerTarget:    true,
-		PrependOnlyFirstQuery:   true,
-		MinimumGroupSize:        2,
-		StripArabidopsisPrefix:  false,
-		StripTrailingQueryIndex: true,
-		StripAfterNumberSuffix:  true,
+		Enabled:                    true,
+		GroupByDetectedPrefix:      true,
+		MergeRowsByTarget:          true,
+		KeepBestHitPerTarget:       true,
+		PrependOnlyFirstQuery:      true,
+		MinimumGroupSize:           2,
+		StripArabidopsisPrefix:     false,
+		StripLeadingSpeciesPrefix:  true,
+		StripTrailingQueryIndex:    true,
+		StripAfterNumberSuffix:     true,
+		NormalizeInnerPunctuation:  true,
+		StripTerminalSubtypeSuffix: true,
+		KeepDistinctQuerySubgroups: false,
+		RankingTieBreakerOrder:     "reference,evalue,identity,coverage,bitscore",
 	}
 }
 
@@ -238,16 +281,34 @@ func DefaultBlastFilterSettings() BlastFilterSettings {
 		RequireTargetCanonicalLengthRatio:         true,
 		MinTargetCanonicalLengthPercent:           70,
 		MaxTargetCanonicalLengthPercent:           130,
+		UseTargetQueryLengthRatio:                 false,
+		RequireTargetQueryLengthRatio:             false,
+		MinTargetQueryLengthPercent:               60,
+		MaxTargetQueryLengthPercent:               160,
 		RequireUniProtAccession:                   false,
 		PreferUniProtReviewed:                     true,
-		RejectUniProtFragments:                    true,
+		RejectUniProtFragments:                    false,
 		RejectUniProtSequenceCautions:             false,
+		InterProDomainMode:                        "conserved_region",
 		RequireInterProConservedRegion:            true,
 		AllowInterProPartial:                      true,
 		RejectInterProMissing:                     true,
 		RejectInterProUncertain:                   true,
 		MinInterProCoveragePercent:                0,
 		RequireInterProCoverageWhenUsed:           false,
+		AllowStrongBlastFallbackWithoutReferences: true,
+		StrongBlastFallbackMinIdentityPercent:     40,
+		StrongBlastFallbackMaxEValue:              1e-80,
+		StrongBlastFallbackMinTargetQueryPercent:  80,
+		StrongBlastFallbackMaxTargetQueryPercent:  120,
+		RequireFamilyConsensusForStrongFallback:   false,
+		StrongFallbackMinFamilyConsensusSupport:   2,
+		StrongFallbackMinFamilyConsensusPercent:   35,
+		UseFamilySemanticAgreement:                true,
+		RequireFamilySemanticAgreement:            false,
+		FamilySemanticMinTokenMatches:             1,
+		FamilySemanticMinAgreementPercent:         20,
+		FamilySemanticAllowStrongReferenceBypass:  true,
 		KeepBestIsoformPerTargetGene:              true,
 		KeepTopHitsPerQuery:                       false,
 		TopHitsPerQuery:                           10,
@@ -264,11 +325,13 @@ func DefaultBlastFilterSettings() BlastFilterSettings {
 		IdentityWeight:                            2,
 		CoverageWeight:                            2,
 		LengthRatioWeight:                         2,
+		TargetQueryLengthWeight:                   2,
 		InterProWeight:                            3,
 		InterProPartialWeight:                     1,
 		InterProCoverageWeight:                    1,
 		UniProtReviewedWeight:                     1,
 		UniProtAnnotationWeight:                   1,
+		FamilySemanticAgreementWeight:             2,
 		PenaltySequenceCaution:                    2,
 		PenaltyFragment:                           3,
 		InterProPresentReferenceScore:             80,
@@ -279,6 +342,7 @@ func DefaultBlastFilterSettings() BlastFilterSettings {
 		UniProtAccessionReferenceScore:            25,
 		UniProtReviewedReferenceScore:             25,
 		UniProtAnnotationReferenceScore:           10,
+		FamilySemanticReferenceScore:              20,
 		FragmentReferencePenaltyMultiplier:        10,
 		SequenceCautionReferencePenaltyMultiplier: 5,
 		LengthNearDistancePercent:                 10,

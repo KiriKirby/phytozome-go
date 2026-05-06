@@ -114,6 +114,41 @@ func TestBlastExcelExportMirrorsHeaderAndStatusColors(t *testing.T) {
 	assertExcelFontColor(t, path, "BLAST Results", dataCellForHeader(t, path, "InterPro conserved region status"), excelColorSelectionOff)
 }
 
+func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		SourceDatabase: "phytozome",
+		Protein:        "AT2G30490.1",
+	}}
+	path := filepath.Join(t.TempDir(), "with_metadata.xlsx")
+	err := WriteBlastResultsExcelWithMetadata(path, rows, &model.ExportMetadata{
+		GeneName:      "C4H",
+		GeneID:        "AT2G30490",
+		GeneReportURL: "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+	}, nil)
+	if err != nil {
+		t.Fatalf("write excel: %v", err)
+	}
+
+	file, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatalf("open excel %s: %v", path, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	if got, err := file.GetCellValue("BLAST Results", "A1"); err != nil || got != "row" {
+		t.Fatalf("BLAST Results!A1 = %q, err=%v, want row", got, err)
+	}
+	if got, err := file.GetCellValue("BLAST Results", "A2"); err != nil || got != "1" {
+		t.Fatalf("BLAST Results!A2 = %q, err=%v, want 1", got, err)
+	}
+	if got, err := file.GetCellValue("Query Metadata", "A1"); err != nil || got != "field" {
+		t.Fatalf("Query Metadata!A1 = %q, err=%v, want field", got, err)
+	}
+	if got, err := file.GetCellValue("Query Metadata", "B2"); err != nil || got != "C4H" {
+		t.Fatalf("Query Metadata!B2 = %q, err=%v, want C4H", got, err)
+	}
+}
+
 func assertExcelFontColor(t *testing.T, path string, sheet string, cell string, want string) {
 	t.Helper()
 	file, err := excelize.OpenFile(path)
