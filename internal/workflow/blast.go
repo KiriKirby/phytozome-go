@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -375,8 +374,8 @@ func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWiz
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          32,
-			MaxIdleConnsPerHost:   16,
+			MaxIdleConns:          0,
+			MaxIdleConnsPerHost:   1024,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
@@ -1620,18 +1619,23 @@ func (w *BlastWizard) executeConfiguredBlastBatchWithReferences(ctx context.Cont
 
 func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepared []blastQueryItem, configuredRequest model.BlastRequest, references externalReferenceConfig) ([]blastQueryRun, error) {
 	run := func(update func(int, string)) ([]blastQueryRun, error) {
-		progress := updateWithContext(ctx, update)
+		baseProgress := updateWithContext(ctx, update)
+		var progressMu sync.Mutex
+		progress := func(current int, message string) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			baseProgress(current, message)
+		}
 		runCtx := contextWithUpdate(ctx, progress)
-		queryRuns := make([]blastQueryRun, 0, len(prepared))
 		previousSuppress := w.suppressTaskModals
 		batchMode := len(prepared) > 1
 		w.suppressTaskModals = batchMode
 		defer func() {
 			w.suppressTaskModals = previousSuppress
 		}()
-		for i, item := range prepared {
+		runOne := func(i int, item blastQueryItem) (blastQueryRun, error) {
 			if err := runCtx.Err(); err != nil {
-				return queryRuns, err
+				return blastQueryRun{}, err
 			}
 			request := configuredRequest
 			request.Sequence = item.Sequence
@@ -1646,14 +1650,13 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 			}
 			progress(progressBase, fmt.Sprintf("%s BLAST query %d/%d (%s)...", actionLabel, i+1, len(prepared), label))
 
-		submitLoop:
 			for {
 				job, err := w.submitBlastWithRetry(runCtx, request)
 				if errors.Is(err, prompt.ErrBackToBlastProgram) || errors.Is(err, prompt.ErrExitRequested) {
-					return nil, err
+					return blastQueryRun{}, err
 				}
 				if err != nil {
-					return queryRuns, &blastBatchRunError{Stage: "submit BLAST job", Index: i + 1, Total: len(prepared), Label: label, Err: err}
+					return blastQueryRun{}, &blastBatchRunError{Stage: "submit BLAST job", Index: i + 1, Total: len(prepared), Label: label, Err: err}
 				}
 				if isLocalBlastRequest(request) {
 					progress(progressBase+1, fmt.Sprintf("Loading local BLAST results for query %d/%d (%s)...", i+1, len(prepared), label))
@@ -1662,20 +1665,20 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 				}
 				results, err := w.waitForBlastResultsWithRetry(runCtx, job.JobID)
 				if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
-					return queryRuns, err
+					return blastQueryRun{}, err
 				}
 				if err != nil {
-					return queryRuns, &blastBatchRunError{Stage: "wait for results", Index: i + 1, Total: len(prepared), Label: label, Err: err}
+					return blastQueryRun{}, &blastBatchRunError{Stage: "wait for results", Index: i + 1, Total: len(prepared), Label: label, Err: err}
 				}
 				results.Rows = annotateBlastRows(results.Rows, w.source.Name(), request.Program)
 				if len(results.Rows) == 0 {
 					if !batchMode {
 						if err := w.showBlastResults(results); err != nil {
-							return queryRuns, err
+							return blastQueryRun{}, err
 						}
 					}
-					queryRuns = append(queryRuns, blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results})
-					break submitLoop
+					progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+					return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
 				}
 				results.Rows = fillBlastQueryLength(results.Rows, request.Sequence)
 				results.Rows = applyBlastLabelToRows(results.Rows, item.LabelName)
@@ -1683,7 +1686,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 				if references.UseUniProt {
 					enriched, enrichErr := w.enrichBlastRowsWithUniProt(runCtx, results.Rows)
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
-						return queryRuns, enrichErr
+						return blastQueryRun{}, enrichErr
 					}
 					if enrichErr == nil {
 						results.Rows = enriched
@@ -1692,17 +1695,59 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 				if references.UseInterPro {
 					enriched, enrichErr := w.enrichBlastRowsWithInterPro(runCtx, item, results.Rows, references.InterProSettings)
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
-						return queryRuns, enrichErr
+						return blastQueryRun{}, enrichErr
 					}
 					if enrichErr == nil {
 						results.Rows = enriched
 					}
 				}
 				results.Rows = annotateBlastRowsForQueryContext(results.Rows, item)
-				queryRuns = append(queryRuns, blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results})
-				break submitLoop
+				progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+				return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
 			}
-			progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+		}
+		if !batchMode {
+			run, err := runOne(0, prepared[0])
+			if err != nil {
+				return nil, err
+			}
+			return []blastQueryRun{run}, nil
+		}
+
+		type runOutcome struct {
+			index int
+			run   blastQueryRun
+			err   error
+		}
+		outcomes := make(chan runOutcome, len(prepared))
+		var workers sync.WaitGroup
+		for i, item := range prepared {
+			i, item := i, item
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				run, err := runOne(i, item)
+				outcomes <- runOutcome{index: i, run: run, err: err}
+			}()
+		}
+		go func() {
+			workers.Wait()
+			close(outcomes)
+		}()
+
+		results := make([]runOutcome, len(prepared))
+		for outcome := range outcomes {
+			results[outcome.index] = outcome
+		}
+		queryRuns := make([]blastQueryRun, 0, len(prepared))
+		for i, outcome := range results {
+			if outcome.err != nil {
+				return queryRuns, outcome.err
+			}
+			if outcome.run.Index == 0 {
+				return queryRuns, &blastBatchRunError{Stage: "run BLAST query", Index: i + 1, Total: len(prepared), Label: oneLinePreview(reportQueryLabel(prepared[i])), Err: fmt.Errorf("query did not complete")}
+			}
+			queryRuns = append(queryRuns, outcome.run)
 		}
 		return queryRuns, nil
 	}
@@ -2163,25 +2208,29 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 		Total:       exportable,
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) (blastBatchExportResult, error) {
-		exportUpdate := safeProgress(update)
+		baseExportUpdate := safeProgress(update)
+		var exportUpdateMu sync.Mutex
+		exportUpdate := func(current int, message string) {
+			exportUpdateMu.Lock()
+			defer exportUpdateMu.Unlock()
+			baseExportUpdate(current, message)
+		}
 		exportCtx := contextWithUpdate(mergeContexts(ctx, taskCtx), exportUpdate)
-		exportedRuns := make([]blastQueryRun, 0, len(runs))
-		exportedFiles := make([]exportFileResult, 0, len(runs))
-		exportedRowsByRun := make([][]model.BlastResultRow, 0, len(runs))
-		exportedRowNumbersByRun := make([][]int, 0, len(runs))
-		exportedFilterFlagsByRun := make([][]bool, 0, len(runs))
-		exportedSelectedByRun := make([][]bool, 0, len(runs))
+		type exportJob struct {
+			exportIndex      int
+			runPosition      int
+			run              blastQueryRun
+			rows             []model.BlastResultRow
+			rowNumbers       []int
+			filterFlags      []bool
+			selectedRowsMask []bool
+			displayName      string
+			filePrefix       string
+			txtHeaderLabel   string
+		}
 		usedNames := make(map[string]int, len(runs))
-		previousSuppress := w.suppressTaskModals
-		w.suppressTaskModals = true
-		defer func() {
-			w.suppressTaskModals = previousSuppress
-		}()
-		completed := 0
+		jobs := make([]exportJob, 0, exportable)
 		for runPosition, run := range runs {
-			if err := exportCtx.Err(); err != nil {
-				return blastBatchExportResult{Runs: exportedRuns, Files: exportedFiles, RowsByRun: exportedRowsByRun, RowNumbersByRun: exportedRowNumbersByRun, FilterFlagsByRun: exportedFilterFlagsByRun, SelectedByRun: exportedSelectedByRun}, err
-			}
 			rows := run.Results.Rows
 			if runPosition >= 0 && runPosition < len(rowsByRun) {
 				rows = rowsByRun[runPosition]
@@ -2191,9 +2240,6 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 			}
 			exportItem := run.Item
 			displayName := buildBlastOutputDisplayName(exportItem)
-			filePrefix := uniqueExportPrefix(sanitizeExportName(displayName), usedNames)
-			txtHeaderLabel := blastTXTHeaderLabel(exportItem, displayName)
-			exportUpdate(completed, fmt.Sprintf("Exporting BLAST query %d/%d (%s)...", completed+1, exportable, oneLinePreview(displayName)))
 			var rowNumbers []int
 			if runPosition >= 0 && runPosition < len(rowNumbersByRun) {
 				rowNumbers = rowNumbersByRun[runPosition]
@@ -2206,23 +2252,84 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 			if runPosition >= 0 && runPosition < len(selectedByRun) {
 				selectedRowsMask = selectedByRun[runPosition]
 			}
-			files, err := w.exportFamilyBlastSelectionsToDir(exportCtx, rows, run.Results.Rows, rowNumbers, filterFlags, exportItemFamilySources(exportItem), displayName, txtHeaderLabel, filePrefix, settings.OutputDir, settings, exportItem.FamilySettings, false)
-			if err != nil {
-				return blastBatchExportResult{Runs: exportedRuns, Files: exportedFiles, RowsByRun: exportedRowsByRun, RowNumbersByRun: exportedRowNumbersByRun, FilterFlagsByRun: exportedFilterFlagsByRun, SelectedByRun: exportedSelectedByRun}, &blastBatchExportError{Run: run, Label: oneLinePreview(reportQueryLabel(exportItem)), Err: err}
+			jobs = append(jobs, exportJob{
+				exportIndex:      len(jobs),
+				runPosition:      runPosition,
+				run:              run,
+				rows:             append([]model.BlastResultRow(nil), rows...),
+				rowNumbers:       append([]int(nil), rowNumbers...),
+				filterFlags:      append([]bool(nil), filterFlags...),
+				selectedRowsMask: append([]bool(nil), selectedRowsMask...),
+				displayName:      displayName,
+				filePrefix:       uniqueExportPrefix(sanitizeExportName(displayName), usedNames),
+				txtHeaderLabel:   blastTXTHeaderLabel(exportItem, displayName),
+			})
+		}
+		previousSuppress := w.suppressTaskModals
+		w.suppressTaskModals = true
+		defer func() {
+			w.suppressTaskModals = previousSuppress
+		}()
+		type exportOutcome struct {
+			job   exportJob
+			run   blastQueryRun
+			files exportFileResult
+			err   error
+		}
+		outcomes := make(chan exportOutcome, len(jobs))
+		var workers sync.WaitGroup
+		for _, job := range jobs {
+			job := job
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				exportUpdate(job.exportIndex, fmt.Sprintf("Exporting BLAST query %d/%d (%s)...", job.exportIndex+1, exportable, oneLinePreview(job.displayName)))
+				files, err := w.exportFamilyBlastSelectionsToDir(exportCtx, job.rows, job.run.Results.Rows, job.rowNumbers, job.filterFlags, exportItemFamilySources(job.run.Item), job.displayName, job.txtHeaderLabel, job.filePrefix, settings.OutputDir, settings, job.run.Item.FamilySettings, false)
+				exported := job.run
+				exported.Item = job.run.Item
+				exported.SelectedRows = job.rows
+				exported.ExcelPath = files.ExcelPath
+				exported.TextPath = files.TextPath
+				outcomes <- exportOutcome{job: job, run: exported, files: files, err: err}
+			}()
+		}
+		go func() {
+			workers.Wait()
+			close(outcomes)
+		}()
+		results := make([]exportOutcome, len(jobs))
+		completed := 0
+		for outcome := range outcomes {
+			if err := exportCtx.Err(); err != nil {
+				return blastBatchExportResult{}, err
 			}
-			exported := run
-			exported.Item = exportItem
-			exported.SelectedRows = rows
-			exported.ExcelPath = files.ExcelPath
-			exported.TextPath = files.TextPath
-			exportedRuns = append(exportedRuns, exported)
-			exportedFiles = append(exportedFiles, files)
-			exportedRowsByRun = append(exportedRowsByRun, append([]model.BlastResultRow(nil), rows...))
-			exportedRowNumbersByRun = append(exportedRowNumbersByRun, append([]int(nil), rowNumbers...))
-			exportedFilterFlagsByRun = append(exportedFilterFlagsByRun, append([]bool(nil), filterFlags...))
-			exportedSelectedByRun = append(exportedSelectedByRun, append([]bool(nil), selectedRowsMask...))
+			results[outcome.job.exportIndex] = outcome
 			completed++
-			exportUpdate(completed, fmt.Sprintf("Exported BLAST query %d/%d (%s).", completed, exportable, oneLinePreview(displayName)))
+			exportUpdate(completed, fmt.Sprintf("Exported BLAST query %d/%d (%s).", completed, exportable, oneLinePreview(outcome.job.displayName)))
+		}
+		exportedRuns := make([]blastQueryRun, 0, len(jobs))
+		exportedFiles := make([]exportFileResult, 0, len(jobs))
+		exportedRowsByRun := make([][]model.BlastResultRow, 0, len(jobs))
+		exportedRowNumbersByRun := make([][]int, 0, len(jobs))
+		exportedFilterFlagsByRun := make([][]bool, 0, len(jobs))
+		exportedSelectedByRun := make([][]bool, 0, len(jobs))
+		for _, outcome := range results {
+			if outcome.err != nil {
+				return blastBatchExportResult{
+					Runs:             exportedRuns,
+					Files:            exportedFiles,
+					RowsByRun:        exportedRowsByRun,
+					RowNumbersByRun:  exportedRowNumbersByRun,
+					FilterFlagsByRun: exportedFilterFlagsByRun,
+					SelectedByRun:    exportedSelectedByRun,
+				}, &blastBatchExportError{Run: outcome.job.run, Label: oneLinePreview(reportQueryLabel(outcome.job.run.Item)), Err: outcome.err}
+			}
+			exportedRuns = append(exportedRuns, outcome.run)
+			exportedFiles = append(exportedFiles, outcome.files)
+			exportedRowsByRun = append(exportedRowsByRun, append([]model.BlastResultRow(nil), outcome.job.rows...))
+			exportedRowNumbersByRun = append(exportedRowNumbersByRun, append([]int(nil), outcome.job.rowNumbers...))
+			exportedFilterFlagsByRun = append(exportedFilterFlagsByRun, append([]bool(nil), outcome.job.filterFlags...))
+			exportedSelectedByRun = append(exportedSelectedByRun, append([]bool(nil), outcome.job.selectedRowsMask...))
 		}
 		return blastBatchExportResult{
 			Runs:             exportedRuns,
@@ -4741,20 +4848,11 @@ func oneLinePreview(value string) string {
 }
 
 func parallelismFor(total int, maxWorkers int) int {
-	if total <= 1 {
-		return total
+	_ = maxWorkers
+	if total < 0 {
+		return 0
 	}
-	workers := runtime.GOMAXPROCS(0)
-	if workers < 2 {
-		workers = 2
-	}
-	if maxWorkers > 0 && workers > maxWorkers {
-		workers = maxWorkers
-	}
-	if workers > total {
-		workers = total
-	}
-	return workers
+	return total
 }
 
 func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRows []model.BlastResultRow, allRows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, querySource *model.QuerySequenceSource, displayName string, txtHeaderLabel string, fileBaseName string, outputDir string, settings exportSettings, showComplete bool) (exportFileResult, error) {

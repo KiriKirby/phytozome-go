@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
@@ -128,15 +129,37 @@ func inspectKeywordGeneratedFiles(files exportFileResult, sequenceAudit report.S
 		{files.TextPath, "peptide text", keywordTextFileRole(sequenceAudit)},
 	}
 	out := make([]report.GeneratedFile, 0, len(specs))
+	filtered := make([]fileSpec, 0, len(specs))
 	for _, spec := range specs {
 		if strings.TrimSpace(spec.path) == "" {
 			continue
 		}
-		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-		if err != nil {
-			return nil, err
+		filtered = append(filtered, spec)
+	}
+	if len(filtered) == 0 {
+		return out, nil
+	}
+	type inspectResult struct {
+		file report.GeneratedFile
+		err  error
+	}
+	results := make([]inspectResult, len(filtered))
+	var workers sync.WaitGroup
+	for i, spec := range filtered {
+		i, spec := i, spec
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
+			results[i] = inspectResult{file: file, err: err}
+		}()
+	}
+	workers.Wait()
+	for _, result := range results {
+		if result.err != nil {
+			return nil, result.err
 		}
-		out = append(out, file)
+		out = append(out, result.file)
 	}
 	return out, nil
 }

@@ -54,8 +54,6 @@ type Client struct {
 	sf                     singleflight.Group
 }
 
-const maxParallelReleaseMetadataJobs = 6
-
 type proteinTranscriptMaps struct {
 	protToTrans map[string]string
 	transToGene map[string]string
@@ -398,28 +396,49 @@ func (c *Client) AvailableBlastPrograms(species model.SpeciesCandidate) []string
 }
 
 func (c *Client) enrichServerBlastCapability(ctx context.Context, rel releaseInfo, cap *BlastCapability) {
+	type capabilityResult struct {
+		program string
+		dbID    int
+		ok      bool
+	}
+	results := make(chan capabilityResult, 4)
+	var workers sync.WaitGroup
 	for _, program := range []string{"blastn", "tblastn", "blastx", "blastp"} {
-		pageURL, err := blastFormURL(program)
-		if err != nil {
+		program := program
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			pageURL, err := blastFormURL(program)
+			if err != nil {
+				results <- capabilityResult{program: program}
+				return
+			}
+			body, err := c.fetchText(ctx, pageURL)
+			if err != nil || body == "" {
+				results <- capabilityResult{program: program}
+				return
+			}
+			dbID, ok := findBlastDBID(body, rel)
+			results <- capabilityResult{program: program, dbID: dbID, ok: ok}
+		}()
+	}
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	for result := range results {
+		if !result.ok {
 			continue
 		}
-		body, err := c.fetchText(ctx, pageURL)
-		if err != nil || body == "" {
-			continue
-		}
-		dbID, ok := findBlastDBID(body, rel)
-		if !ok {
-			continue
-		}
-		switch program {
+		switch result.program {
 		case "blastn", "tblastn":
 			cap.HasServerNucleotideDB = true
 			if cap.BlastNDBID == 0 {
-				cap.BlastNDBID = dbID
+				cap.BlastNDBID = result.dbID
 			}
 		case "blastx", "blastp":
 			cap.HasServerProteinDB = true
-			cap.ProteinDBID = dbID
+			cap.ProteinDBID = result.dbID
 		}
 	}
 }
@@ -655,7 +674,7 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 
 		rootJobs := make(chan downloadDir)
 		rootResults := make(chan speciesMetaResult, len(rootDirs))
-		workerCount := min(len(rootDirs), maxParallelReleaseMetadataJobs)
+		workerCount := len(rootDirs)
 		if workerCount < 1 {
 			workerCount = 1
 		}

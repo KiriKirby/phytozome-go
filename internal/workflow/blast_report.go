@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
@@ -197,24 +198,51 @@ func inspectBlastGeneratedFilesList(files []exportFileResult) ([]report.Generate
 		typ  string
 		role string
 	}
-	out := make([]report.GeneratedFile, 0, len(files)*4)
+	type indexedFileSpec struct {
+		path string
+		typ  string
+		role string
+	}
+	specs := make([]indexedFileSpec, 0, len(files)*4)
 	for _, fileSet := range files {
-		specs := []fileSpec{
+		fileSpecs := []fileSpec{
 			{fileSet.ExcelPath, "selected BLAST Excel", "selected BLAST rows exported as the main review workbook"},
 			{fileSet.RawExcelPath, "raw BLAST Excel", "all current BLAST rows exported for audit comparison"},
 			{fileSet.RawTextPath, "raw BLAST peptide text", "all current BLAST peptide sequence records exported for audit comparison"},
 			{fileSet.TextPath, "BLAST peptide text", "BLAST peptide sequence records already produced by text export"},
 		}
-		for _, spec := range specs {
+		for _, spec := range fileSpecs {
 			if strings.TrimSpace(spec.path) == "" {
 				continue
 			}
-			file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, file)
+			specs = append(specs, indexedFileSpec{path: spec.path, typ: spec.typ, role: spec.role})
 		}
+	}
+	out := make([]report.GeneratedFile, 0, len(specs))
+	if len(specs) == 0 {
+		return out, nil
+	}
+	type inspectResult struct {
+		file report.GeneratedFile
+		err  error
+	}
+	results := make([]inspectResult, len(specs))
+	var workers sync.WaitGroup
+	for i, spec := range specs {
+		i, spec := i, spec
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
+			results[i] = inspectResult{file: file, err: err}
+		}()
+	}
+	workers.Wait()
+	for _, result := range results {
+		if result.err != nil {
+			return nil, result.err
+		}
+		out = append(out, result.file)
 	}
 	return out, nil
 }
