@@ -14,6 +14,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
 
 const latestURL = "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/"
@@ -93,7 +95,7 @@ func EnsureToolsOnPath(required ...string) error {
 
 func InstallManaged(ctx context.Context, httpClient *http.Client) (string, error) {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = perf.HTTPClient()
 	}
 	archiveName, err := archiveNameForPlatform()
 	if err != nil {

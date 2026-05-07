@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
@@ -19,6 +20,286 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/xuri/excelize/v2"
 )
+
+func TestReplaySpirodelaBlastExportRawAndPDF(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY_EXPORT") == "" {
+		t.Skip("set PHYTO_REPLAY_EXPORT=1 to run BLAST export replay")
+	}
+	inputRoot := os.Getenv("PHYTO_REPLAY_INPUT_DIR")
+	if strings.TrimSpace(inputRoot) == "" {
+		inputRoot = `C:\Users\wangsychn\Desktop\phytozome-go_windows_amd64\output`
+	}
+	outputRoot := os.Getenv("PHYTO_REPLAY_EXPORT_DIR")
+	if strings.TrimSpace(outputRoot) == "" {
+		outputRoot = filepath.Join(os.TempDir(), "phytozome-go-replay-export")
+	}
+	if err := os.MkdirAll(outputRoot, 0o755); err != nil {
+		t.Fatalf("create replay output dir: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(inputRoot, "*.txt"))
+	if err != nil {
+		t.Fatalf("list replay txt files: %v", err)
+	}
+	sort.Strings(files)
+	if limit := replayEnvInt("PHYTO_REPLAY_FILE_LIMIT"); limit > 0 && limit < len(files) {
+		files = files[:limit]
+	}
+	if len(files) == 0 {
+		t.Fatalf("no txt files found in %s", inputRoot)
+	}
+
+	cases := []struct {
+		name     string
+		source   string
+		selected model.SpeciesCandidate
+		request  model.BlastRequest
+	}{
+		{
+			name:   "lemna-spirodela-9509",
+			source: "lemna",
+			selected: model.SpeciesCandidate{
+				GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+				SearchAlias: "Spirodela polyrhiza",
+				JBrowseName: "Sp_polyrhiza_9509",
+				ProteomeID:  18,
+				IsOfficial:  true,
+				CommonName:  "giant duckweed",
+			},
+			request: replayBlastPRequest(model.SpeciesCandidate{
+				GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+				SearchAlias: "Spirodela polyrhiza",
+				JBrowseName: "Sp_polyrhiza_9509",
+				ProteomeID:  18,
+				IsOfficial:  true,
+				CommonName:  "giant duckweed",
+			}, "local:BLASTP"),
+		},
+		{
+			name:   "phytozome-spirodela-v2",
+			source: "phytozome",
+			selected: model.SpeciesCandidate{
+				ProteomeID:  290,
+				JBrowseName: "S_polyrhiza_v2",
+				GenomeLabel: "Spirodela polyrhiza v2",
+				SearchAlias: "Spirodela polyrhiza v2",
+				CommonName:  "greater duckweed",
+			},
+			request: replayBlastPRequest(model.SpeciesCandidate{
+				ProteomeID:  290,
+				JBrowseName: "S_polyrhiza_v2",
+				GenomeLabel: "Spirodela polyrhiza v2",
+				SearchAlias: "Spirodela polyrhiza v2",
+				CommonName:  "greater duckweed",
+			}, "BLASTP"),
+		},
+	}
+	if only := strings.ToLower(strings.TrimSpace(os.Getenv("PHYTO_REPLAY_SOURCE"))); only != "" {
+		filtered := cases[:0]
+		for _, tc := range cases {
+			if strings.Contains(strings.ToLower(tc.name), only) || strings.EqualFold(tc.source, only) {
+				filtered = append(filtered, tc)
+			}
+		}
+		cases = filtered
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, path := range files {
+				t.Run(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), func(t *testing.T) {
+					replayOneBlastExport(t, tc.source, tc.selected, tc.request, path, filepath.Join(outputRoot, tc.name))
+				})
+			}
+		})
+	}
+}
+
+func replayOneBlastExport(t *testing.T, sourceName string, selected model.SpeciesCandidate, request model.BlastRequest, inputPath string, outputRoot string) {
+	t.Helper()
+	replayEnsureBlastPlusPath(t)
+	items, err := loadReplayFastaItems(inputPath)
+	if err != nil {
+		t.Fatalf("load replay FASTA %s: %v", inputPath, err)
+	}
+	if len(items) == 0 {
+		t.Fatalf("no FASTA items in %s", inputPath)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), replayEnvDuration("PHYTO_REPLAY_TIMEOUT_MINUTES", 90*time.Minute))
+	defer cancel()
+	w := NewBlastWizard(os.Stdout)
+	switch sourceName {
+	case "lemna":
+		w.source = lemna.NewClient(w.httpClient)
+	case "phytozome":
+		w.source = phytozome.NewClient(w.httpClient)
+	default:
+		t.Fatalf("unsupported replay source %q", sourceName)
+	}
+	w.suppressTaskModals = true
+	references := externalReferenceConfig{
+		UseUniProt:       true,
+		UseInterPro:      true,
+		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+	}
+	start := time.Now()
+	runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, request, references)
+	if err != nil {
+		t.Fatalf("run BLAST batch: %v", err)
+	}
+	blastDuration := time.Since(start)
+	filterStart := time.Now()
+	filterSettings := model.DefaultBlastFilterSettings()
+	rowsByRun, rowNumbersByRun, filterFlagsByRun, selectedByRun := replayDefaultFilteredRows(runs, filterSettings)
+	filterDuration := time.Since(filterStart)
+
+	outputDir := filepath.Join(outputRoot, sanitizeExportName(strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))))
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("create export output dir: %v", err)
+	}
+	settings := exportSettings{
+		BaseName:      sanitizeExportName(strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))) + "_all",
+		OutputDir:     outputDir,
+		WriteReport:   true,
+		WriteText:     true,
+		WriteExcel:    true,
+		WriteRawExcel: true,
+	}
+	exportStart := time.Now()
+	batchResult, err := w.exportAllBlastRunsWithProgress(ctx, selected, items, runs, rowsByRun, rowNumbersByRun, filterFlagsByRun, selectedByRun, request, settings)
+	if err != nil {
+		t.Fatalf("export all BLAST runs: %v", err)
+	}
+	exportDuration := time.Since(exportStart)
+	reportStart := time.Now()
+	reportPath, err := w.renderBlastBatchReport(ctx, selected, items, items, cloneBlastQueryRuns(runs), batchResult.Files, rowsByRun, rowNumbersByRun, filterFlagsByRun, selectedByRun, outputDir, settings, request, filterSettings, true, false)
+	if err != nil {
+		t.Fatalf("render BLAST batch report: %v", err)
+	}
+	reportDuration := time.Since(reportStart)
+	if strings.TrimSpace(reportPath) == "" {
+		t.Fatal("report path is empty")
+	}
+	if _, err := os.Stat(reportPath); err != nil {
+		t.Fatalf("report was not written: %v", err)
+	}
+	rawFiles := 0
+	for _, file := range batchResult.Files {
+		if strings.TrimSpace(file.RawExcelPath) != "" {
+			rawFiles++
+		}
+	}
+	if rawFiles == 0 {
+		t.Fatal("no raw Excel files were written")
+	}
+	t.Logf("replay source=%s file=%s queries=%d runs=%d selected=%d raw_files=%d blast=%s filter=%s export=%s report=%s output=%s",
+		sourceName,
+		filepath.Base(inputPath),
+		len(items),
+		len(runs),
+		replayCountSelectedRows(rowsByRun),
+		rawFiles,
+		blastDuration.Round(time.Millisecond),
+		filterDuration.Round(time.Millisecond),
+		exportDuration.Round(time.Millisecond),
+		reportDuration.Round(time.Millisecond),
+		outputDir,
+	)
+}
+
+func replayBlastPRequest(selected model.SpeciesCandidate, program string) model.BlastRequest {
+	return model.BlastRequest{
+		Species:          selected,
+		SequenceKind:     model.SequenceProtein,
+		TargetType:       "proteome",
+		Program:          program,
+		EValue:           "1e-30",
+		ComparisonMatrix: "BLOSUM62",
+		WordLength:       "default",
+		AlignmentsToShow: 100,
+		AllowGaps:        true,
+		FilterQuery:      true,
+	}
+}
+
+func replayDefaultFilteredRows(runs []blastQueryRun, settings model.BlastFilterSettings) ([][]model.BlastResultRow, [][]int, [][]bool, [][]bool) {
+	rowsByRun := make([][]model.BlastResultRow, len(runs))
+	rowNumbersByRun := make([][]int, len(runs))
+	filterFlagsByRun := make([][]bool, len(runs))
+	selectedByRun := make([][]bool, len(runs))
+	for runIndex, run := range runs {
+		suggestion := prompt.DefaultBlastFilterSuggestion(prompt.BlastFilterRequest{
+			Rows:     run.Results.Rows,
+			Settings: settings,
+		})
+		selectedByRun[runIndex] = append([]bool(nil), suggestion.Selected...)
+		filterFlagsByRun[runIndex] = append([]bool(nil), suggestion.Flags...)
+		for i, selected := range suggestion.Selected {
+			if selected && i < len(run.Results.Rows) {
+				rowsByRun[runIndex] = append(rowsByRun[runIndex], run.Results.Rows[i])
+				rowNumbersByRun[runIndex] = append(rowNumbersByRun[runIndex], i+1)
+			}
+		}
+	}
+	return rowsByRun, rowNumbersByRun, filterFlagsByRun, selectedByRun
+}
+
+func replayCountSelectedRows(rowsByRun [][]model.BlastResultRow) int {
+	total := 0
+	for _, rows := range rowsByRun {
+		total += len(rows)
+	}
+	return total
+}
+
+func replayEnvInt(name string) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return parsed
+}
+
+func replayEnvDuration(name string, fallback time.Duration) time.Duration {
+	value := replayEnvInt(name)
+	if value <= 0 {
+		return fallback
+	}
+	return time.Duration(value) * time.Minute
+}
+
+func replayEnsureBlastPlusPath(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(".", "bin", "blastplus")); err == nil {
+		replayPrependFirstBlastBin(filepath.Join(".", "bin", "blastplus"))
+	}
+	replayPrependFirstBlastBin(`C:\Users\wangsychn\Desktop\phytozome-go_windows_amd64\blastplus`)
+}
+
+func replayPrependFirstBlastBin(root string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return
+	}
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry == nil || !entry.IsDir() {
+			return nil
+		}
+		blastp := filepath.Join(path, "blastp.exe")
+		makeblastdb := filepath.Join(path, "makeblastdb.exe")
+		if _, err := os.Stat(blastp); err == nil {
+			if _, err := os.Stat(makeblastdb); err == nil {
+				current := os.Getenv("PATH")
+				_ = os.Setenv("PATH", path+string(os.PathListSeparator)+current)
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+}
 
 func TestReplayMonolignolTable17_LemnaLocalBlastP(t *testing.T) {
 	if os.Getenv("PHYTO_REPLAY") == "" {

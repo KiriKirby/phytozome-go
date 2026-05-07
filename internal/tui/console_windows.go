@@ -3,8 +3,8 @@
 package tui
 
 import (
-	"sync/atomic"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -13,14 +13,14 @@ import (
 )
 
 var (
-	kernel32                    = syscall.NewLazyDLL("kernel32.dll")
-	procSetConsoleCtrlHandler   = kernel32.NewProc("SetConsoleCtrlHandler")
-	procGetStdHandle            = kernel32.NewProc("GetStdHandle")
+	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
+	procSetConsoleCtrlHandler      = kernel32.NewProc("SetConsoleCtrlHandler")
+	procGetStdHandle               = kernel32.NewProc("GetStdHandle")
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
-	consoleCloseHandlerMu       sync.Mutex
-	consoleCloseHandlerRefCount int
-	consoleCloseHandlerApp      *tview.Application
-	consoleCloseHandlerCallback = syscall.NewCallback(func(ctrlType uintptr) uintptr {
+	consoleCloseHandlerMu          sync.Mutex
+	consoleCloseHandlerRefCount    int
+	consoleCloseHandlerApp         *tview.Application
+	consoleCloseHandlerCallback    = syscall.NewCallback(func(ctrlType uintptr) uintptr {
 		switch ctrlType {
 		case ctrlCEvent, ctrlBreakEvent, ctrlCloseEvent, ctrlLogoffEvent, ctrlShutdownEvent:
 			consoleCloseHandlerMu.Lock()

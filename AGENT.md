@@ -357,6 +357,10 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - every such modal should include a `Help (F1)` button using the shared three-language help template; remember the last help language for the current session
   - text and controls must wrap or use vertical module layout rather than overflowing horizontally; modal height should fit actual content without unnecessary dead space
 - Performance and concurrency:
+  - all new network clients must use `perf.HTTPClient()` or receive the shared workflow client; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
+  - all new ordinary batch-safe parallel loops must use `perf.ParallelFor(ctx, perf.WorkCPU|WorkDisk|WorkNetwork, total, fn)` so dynamic worker counts, context cancellation, and first-error cancellation stay consistent
+  - recovery-aware workflow pipelines such as BLAST batch execution or export-all may keep specialized worker loops, but they must use `perf` worker counts, propagate `context.Context`, cancel sibling workers on first fatal error, preserve completed results, and return a recovery error whose index resumes from the first incomplete item
+  - every long-running loading/generation/analysis path must accept or derive a cancellable `context.Context`; cancellation must pause/stop the current action and return to the expected TUI recovery/back target without leaking background workers
   - prefer controlled parallelism for batch-safe stages such as keyword searches, batch query resolution, and sequence fetch preloading
   - keep all interactive prompts serialized even when background work is parallelized
   - apply per-item timeouts to remote work units so a single slow request cannot stall the whole batch indefinitely
@@ -364,6 +368,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - deduplicate identical in-flight work with `singleflight` or equivalent guards so concurrent workers do not download, parse, or build the same artifact twice
   - use persistent local caches for stable remote payloads when that improves later sessions without changing user-visible behavior
   - prefer atomic file writes for shared cache artifacts so background workers cannot observe partial files
+  - avoid deep-copying large BLAST/keyword row slices unless crossing a mutable ownership boundary; report and export assembly should pre-size result buffers and reuse already-stable slices where behavior stays unchanged
+  - production-code guardrail tests under `internal/perf` enforce the no-ad-hoc-client and no-unreviewed-parallel-loop rules; update the allowlist only for deliberate, documented exceptions
 - Metadata and result-link semantics:
   - preserve `OriginalInputURL` and `NormalizedURL` when resolving report URLs; do not overwrite them with fetched source structs
   - keep export metadata for query-source URLs separate from row-level target links

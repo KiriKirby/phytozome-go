@@ -16,10 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -73,7 +73,7 @@ type diskEntry struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = perf.HTTPClient()
 	}
 	return &Client{
 		httpClient: httpClient,

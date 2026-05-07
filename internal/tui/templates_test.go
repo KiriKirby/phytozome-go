@@ -481,7 +481,7 @@ func TestBlastRunSidebarDrawsMemberLabelsAsSeparateLines(t *testing.T) {
 	}
 }
 
-func TestPartialColumnHidingKeepsCompleteColumns(t *testing.T) {
+func TestRowSelectionTableKeepsTrailingAreaDrawable(t *testing.T) {
 	table := &rowSelectionTable{Table: tview.NewTable().
 		SetBorders(false).
 		SetSeparator(tview.Borders.Vertical).
@@ -514,11 +514,11 @@ func TestPartialColumnHidingKeepsCompleteColumns(t *testing.T) {
 		t.Fatalf("complete first data column should remain visible: %q", line)
 	}
 	if containsText(line, "very_long_column_header") {
-		t.Fatalf("partial trailing data column should be hidden when a complete data column is visible: %q", line)
+		t.Fatalf("full oversized trailing data column should not be forced into the viewport: %q", line)
 	}
 }
 
-func TestPartialColumnHidingDoesNotBlankCompleteColumnAfterWidePartial(t *testing.T) {
+func TestRowSelectionTableDoesNotBlankWideViewport(t *testing.T) {
 	table := &rowSelectionTable{Table: tview.NewTable().
 		SetBorders(false).
 		SetSeparator(tview.Borders.Vertical).
@@ -543,15 +543,13 @@ func TestPartialColumnHidingDoesNotBlankCompleteColumnAfterWidePartial(t *testin
 	if err := screen.Init(); err != nil {
 		t.Fatalf("screen init failed: %v", err)
 	}
-	screen.SetSize(26, 6)
-	table.SetRect(0, 0, 26, 6)
+	screen.SetSize(80, 6)
+	table.SetRect(0, 0, 80, 6)
 	table.Draw(screen)
 
-	if !containsText(screenLine(screen, 0, 26), "fit") {
-		t.Fatalf("next complete data column should be visible: %q", screenLine(screen, 0, 26))
-	}
-	if containsText(screenLine(screen, 0, 26), "very_very") {
-		t.Fatalf("partial wide column should be hidden: %q", screenLine(screen, 0, 26))
+	line := screenLine(screen, 0, 80)
+	if !containsText(line, "fit") {
+		t.Fatalf("trailing complete data column should remain visible on wide screens: %q", line)
 	}
 }
 
@@ -601,19 +599,8 @@ func TestFamilyBlastCustomizeModalStartsInteractiveImmediately(t *testing.T) {
 		t.Fatalf("initial grouped selection = %d, want 0", got)
 	}
 
-	if afterDraw := app.GetAfterDrawFunc(); afterDraw != nil {
-		screen := tcell.NewSimulationScreen("")
-		if err := screen.Init(); err != nil {
-			t.Fatalf("screen init failed: %v", err)
-		}
-		screen.SetSize(160, 40)
-		afterDraw(screen)
-	}
-	if modal.applyInitialFocus != nil {
-		modal.applyInitialFocus()
-	}
 	if app.GetFocus() != modal.groupedList {
-		t.Fatalf("focus after first draw = %T, want grouped list", app.GetFocus())
+		t.Fatalf("focus should stay on grouped list without deferred first-draw focus reset, got %T", app.GetFocus())
 	}
 }
 
@@ -649,6 +636,35 @@ func TestFamilyBlastCustomizeModalKeyboardNavigationAndTabSwitch(t *testing.T) {
 	capture(tcell.NewEventKey(tcell.KeyEnd, 0, 0))
 	if got := modal.rightList.GetCurrentItem(); got != 2 {
 		t.Fatalf("right selection after End = %d, want 2", got)
+	}
+}
+
+func TestFamilyBlastCustomizeModalDisplaysMemberProteinIDs(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{{
+			Name: "PAL",
+			Members: []FamilyBlastMember{
+				{LabelName: "PAL1", ProteinID: "PAC:1", SourceKey: "pal1"},
+				{LabelName: "PAL2", ProteinID: "PAC:2", SourceKey: "pal2"},
+			},
+		}},
+		UngroupedMembers: []FamilyBlastMember{{LabelName: "PAL3", ProteinID: "PAC:3", SourceKey: "pal3"}},
+		AllowBack:        true,
+	}, app, &result)
+
+	if modal.groupedList.GetItemCount() < 2 {
+		t.Fatalf("grouped item count = %d, want member row", modal.groupedList.GetItemCount())
+	}
+	mainText, secondary := modal.groupedList.GetItemText(1)
+	if !strings.Contains(mainText, "PAL1") || !strings.Contains(mainText, "[yellow][PAC:1][-]") || secondary != "" {
+		t.Fatalf("grouped member row = %q / %q, want inline PAL1 [yellow][PAC:1][-]", mainText, secondary)
+	}
+	mainText, secondary = modal.rightList.GetItemText(0)
+	if !strings.Contains(mainText, "PAL3") || !strings.Contains(mainText, "[yellow][PAC:3][-]") || secondary != "" {
+		t.Fatalf("right member row = %q / %q, want inline PAL3 [yellow][PAC:3][-]", mainText, secondary)
 	}
 }
 

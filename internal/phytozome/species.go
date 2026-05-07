@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -49,7 +50,7 @@ type Client struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = perf.HTTPClient()
 	}
 	return &Client{
 		baseHTTP:             httpClient,
@@ -360,24 +361,74 @@ func (c *Client) fetchTargetRecords(ctx context.Context) (map[string]targetRecor
 		return nil, err
 	}
 
-	var failures []string
-	for _, scriptURL := range scriptURLs {
-		bundle, err := c.fetchBundle(ctx, scriptURL)
-		if err != nil {
-			failures = append(failures, err.Error())
-			continue
-		}
+	return c.fetchTargetRecordsFromBundles(ctx, scriptURLs)
+}
 
-		targets, err := extractTargetRecords(bundle)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", scriptURL, err))
-			continue
-		}
-		if len(targets) > 0 {
-			return targets, nil
-		}
+func (c *Client) fetchTargetRecordsFromBundles(ctx context.Context, scriptURLs []string) (map[string]targetRecord, error) {
+	if len(scriptURLs) == 0 {
+		return nil, fmt.Errorf("did not find target records in any homepage bundle")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type bundleResult struct {
+		targets map[string]targetRecord
+		err     error
+	}
+	jobs := make(chan string)
+	results := make(chan bundleResult, len(scriptURLs))
+	workerCount := perf.NetworkWorkers(len(scriptURLs))
+
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for scriptURL := range jobs {
+				bundle, err := c.fetchBundle(ctx, scriptURL)
+				if err != nil {
+					results <- bundleResult{err: err}
+					continue
+				}
+				targets, err := extractTargetRecords(bundle)
+				if err != nil {
+					results <- bundleResult{err: fmt.Errorf("%s: %w", scriptURL, err)}
+					continue
+				}
+				if len(targets) == 0 {
+					results <- bundleResult{err: fmt.Errorf("%s: no target records", scriptURL)}
+					continue
+				}
+				results <- bundleResult{targets: targets}
+				cancel()
+			}
+		}()
 	}
 
+	go func() {
+		defer close(jobs)
+		for _, scriptURL := range scriptURLs {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- scriptURL:
+			}
+		}
+	}()
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+
+	failures := make([]string, 0)
+	for result := range results {
+		if len(result.targets) > 0 {
+			return result.targets, nil
+		}
+		if result.err != nil && !strings.Contains(result.err.Error(), context.Canceled.Error()) {
+			failures = append(failures, result.err.Error())
+		}
+	}
 	if len(failures) == 0 {
 		return nil, fmt.Errorf("did not find target records in any homepage bundle")
 	}

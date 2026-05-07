@@ -22,6 +22,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -46,6 +47,7 @@ type Client struct {
 	ahrdCache              map[string]map[string]ahrdRecord
 	proteinTranscriptCache map[string]proteinTranscriptMaps
 	fastaIndexCache        map[string]map[string]fastaEntry
+	proteinReleaseCache    map[string]map[string]string
 	proteinSequenceCache   map[string]string
 	keywordRowsCache       map[string][]model.KeywordResultRow
 	blastCapabilitiesCache map[string]BlastCapability
@@ -372,8 +374,11 @@ func (c *Client) cachedFastaIndex(fastaPath string) (map[string]fastaEntry, erro
 // AvailableBlastPrograms returns allowed BLAST programs for the species based on
 // detected capabilities. The returned slice contains program names like:
 //   - "blastn", "blastx", "tblastn", "blastp"
-func (c *Client) AvailableBlastPrograms(species model.SpeciesCandidate) []string {
-	cap, err := c.DetectBlastCapabilities(context.Background(), species)
+func (c *Client) AvailableBlastPrograms(ctx context.Context, species model.SpeciesCandidate) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cap, err := c.DetectBlastCapabilities(ctx, species)
 	if err != nil {
 		// On error, return no programs so callers can handle the missing capability.
 		return nil
@@ -629,7 +634,7 @@ var officialClones = []officialClone{
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = perf.HTTPClient()
 	}
 	return &Client{
 		baseHTTP:               httpClient,
@@ -637,6 +642,7 @@ func NewClient(httpClient *http.Client) *Client {
 		ahrdCache:              make(map[string]map[string]ahrdRecord),
 		proteinTranscriptCache: make(map[string]proteinTranscriptMaps),
 		fastaIndexCache:        make(map[string]map[string]fastaEntry),
+		proteinReleaseCache:    make(map[string]map[string]string),
 		proteinSequenceCache:   make(map[string]string),
 		keywordRowsCache:       make(map[string][]model.KeywordResultRow),
 		blastCapabilitiesCache: make(map[string]BlastCapability),
@@ -674,10 +680,7 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 
 		rootJobs := make(chan downloadDir)
 		rootResults := make(chan speciesMetaResult, len(rootDirs))
-		workerCount := len(rootDirs)
-		if workerCount < 1 {
-			workerCount = 1
-		}
+		workerCount := perf.NetworkWorkers(len(rootDirs))
 
 		var workers sync.WaitGroup
 		for range workerCount {
@@ -695,7 +698,14 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 
 		go func() {
 			for _, root := range rootDirs {
-				rootJobs <- root
+				select {
+				case <-ctx.Done():
+					close(rootJobs)
+					workers.Wait()
+					close(rootResults)
+					return
+				case rootJobs <- root:
+				}
 			}
 			close(rootJobs)
 			workers.Wait()
@@ -1256,7 +1266,7 @@ func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCan
 	return value.([]model.KeywordResultRow), nil
 }
 
-func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID string) (string, error) {
+func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
 	sequenceID = strings.TrimSpace(sequenceID)
 	if sequenceID == "" {
 		return "", fmt.Errorf("empty lemna.org sequence id")
@@ -1276,6 +1286,14 @@ func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID str
 		}
 		c.mu.RUnlock()
 
+		if release, err := c.releaseForTargetID(ctx, targetID); err == nil && release.ProteinURL != "" {
+			if sequence, ok, err := c.findProteinSequenceInRelease(ctx, release, sequenceID); err == nil && ok {
+				c.mu.Lock()
+				c.proteinSequenceCache[sequenceID] = sequence
+				c.mu.Unlock()
+				return sequence, nil
+			}
+		}
 		candidates, err := c.FetchSpeciesCandidates(ctx)
 		if err != nil {
 			return "", err
@@ -1679,38 +1697,112 @@ func (c *Client) buildProteinTranscriptMap(ctx context.Context, release releaseI
 }
 
 func (c *Client) findProteinSequenceInRelease(ctx context.Context, release releaseInfo, sequenceID string) (string, bool, error) {
-	reader, closeFn, err := c.openMaybeGzip(ctx, release.ProteinURL)
+	aliases := sequenceAliases(sequenceID)
+	if len(aliases) == 0 {
+		return "", false, nil
+	}
+	sequences, err := c.cachedProteinReleaseSequences(ctx, release)
 	if err != nil {
 		return "", false, err
 	}
+	for _, alias := range aliases {
+		if sequence := strings.TrimSpace(sequences[alias]); sequence != "" {
+			return sequence, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (c *Client) cachedProteinReleaseSequences(ctx context.Context, release releaseInfo) (map[string]string, error) {
+	key := strings.TrimSpace(release.ProteinURL)
+	if key == "" {
+		return nil, fmt.Errorf("missing protein FASTA URL for %s", release.ReleaseDir)
+	}
+	c.mu.RLock()
+	if cached, ok := c.proteinReleaseCache[key]; ok {
+		c.mu.RUnlock()
+		return cached, nil
+	}
+	c.mu.RUnlock()
+
+	value, err, _ := c.sf.Do("protein-release-seq:"+key, func() (any, error) {
+		c.mu.RLock()
+		if cached, ok := c.proteinReleaseCache[key]; ok {
+			c.mu.RUnlock()
+			return cached, nil
+		}
+		c.mu.RUnlock()
+
+		sequences, err := c.loadProteinReleaseSequences(ctx, release)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		if c.proteinReleaseCache == nil {
+			c.proteinReleaseCache = make(map[string]map[string]string)
+		}
+		c.proteinReleaseCache[key] = sequences
+		c.mu.Unlock()
+		return sequences, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(map[string]string), nil
+}
+
+func (c *Client) loadProteinReleaseSequences(ctx context.Context, release releaseInfo) (map[string]string, error) {
+	reader, closeFn, err := c.openMaybeGzip(ctx, release.ProteinURL)
+	if err != nil {
+		return nil, err
+	}
 	defer closeFn()
 
-	aliases := sequenceAliases(sequenceID)
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
-	var matched bool
+	sequences := make(map[string]string)
+	var header string
 	var seq strings.Builder
+	flush := func() {
+		header = strings.TrimSpace(header)
+		sequence := strings.TrimSpace(seq.String())
+		if header == "" || sequence == "" {
+			return
+		}
+		token := header
+		if fields := strings.Fields(header); len(fields) > 0 {
+			token = fields[0]
+		}
+		for _, alias := range normalizedIdentifierCandidates(token) {
+			if alias != "" {
+				sequences[alias] = sequence
+			}
+		}
+		for _, value := range strings.FieldsFunc(header, func(r rune) bool {
+			return r == '|' || r == ';' || r == ',' || r == ' ' || r == '\t'
+		}) {
+			for _, alias := range normalizedIdentifierCandidates(value) {
+				if alias != "" {
+					sequences[alias] = sequence
+				}
+			}
+		}
+	}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, ">") {
-			if matched {
-				return seq.String(), true, nil
-			}
-			matched = fastaHeaderMatches(line, aliases)
+			flush()
+			header = strings.TrimPrefix(line, ">")
 			seq.Reset()
 			continue
 		}
-		if matched {
-			seq.WriteString(line)
-		}
+		seq.WriteString(line)
 	}
 	if err := scanner.Err(); err != nil {
-		return "", false, fmt.Errorf("scan protein FASTA %s: %w", release.ProteinURL, err)
+		return nil, fmt.Errorf("scan protein FASTA %s: %w", release.ProteinURL, err)
 	}
-	if matched && seq.Len() > 0 {
-		return seq.String(), true, nil
-	}
-	return "", false, nil
+	flush()
+	return sequences, nil
 }
 
 func (c *Client) fetchText(ctx context.Context, requestURL string) (string, error) {

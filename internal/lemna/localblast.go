@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,20 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/blastplus"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
+
+type localBlastThreadsContextKey struct{}
+
+func WithLocalBlastThreads(ctx context.Context, threads int) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if threads < 1 {
+		threads = 1
+	}
+	return context.WithValue(ctx, localBlastThreadsContextKey{}, threads)
+}
 
 // NOTE:
 // This file provides a self-contained local BLAST helper implementation.
@@ -373,6 +387,9 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 
 	// Build command
 	args := []string{"-query", queryPath, "-db", dbPrefix, "-outfmt", outfmt, "-out", outPath}
+	if threads := localBlastThreads(ctx); threads > 1 {
+		args = append(args, "-num_threads", strconv.Itoa(threads))
+	}
 	if n := strings.TrimSpace(req.EValue); n != "" && n != "-1" {
 		args = append(args, "-evalue", n)
 	}
@@ -399,6 +416,19 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 		Rows:    rows,
 	}
 	return result, nil
+}
+
+func localBlastThreads(ctx context.Context) int {
+	if ctx != nil {
+		if threads, ok := ctx.Value(localBlastThreadsContextKey{}).(int); ok && threads > 0 {
+			return threads
+		}
+	}
+	threads := perf.CPUWorkers(runtime.NumCPU())
+	if threads < 1 {
+		return 1
+	}
+	return threads
 }
 
 func formatCapturedOutput(output string) string {

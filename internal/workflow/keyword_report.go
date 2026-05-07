@@ -9,11 +9,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -24,7 +24,7 @@ func (w *BlastWizard) renderKeywordReportForExport(ctx context.Context, rows []m
 	_ = sequenceRecords
 
 	metadataStart := time.Now()
-	generatedFiles, err := inspectKeywordGeneratedFiles(files, sequenceAudit)
+	generatedFiles, err := inspectKeywordGeneratedFiles(ctx, files, sequenceAudit)
 	if err != nil {
 		return "", err
 	}
@@ -116,7 +116,7 @@ func (w *BlastWizard) buildKeywordReportData(rows []model.KeywordResultRow, allR
 	}
 }
 
-func inspectKeywordGeneratedFiles(files exportFileResult, sequenceAudit report.SequenceAudit) ([]report.GeneratedFile, error) {
+func inspectKeywordGeneratedFiles(ctx context.Context, files exportFileResult, sequenceAudit report.SequenceAudit) ([]report.GeneratedFile, error) {
 	type fileSpec struct {
 		path string
 		typ  string
@@ -144,17 +144,14 @@ func inspectKeywordGeneratedFiles(files exportFileResult, sequenceAudit report.S
 		err  error
 	}
 	results := make([]inspectResult, len(filtered))
-	var workers sync.WaitGroup
-	for i, spec := range filtered {
-		i, spec := i, spec
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-			results[i] = inspectResult{file: file, err: err}
-		}()
+	if err := perf.ParallelFor(ctx, perf.WorkDisk, len(filtered), func(_ context.Context, i int) error {
+		spec := filtered[i]
+		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
+		results[i] = inspectResult{file: file, err: err}
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	workers.Wait()
 	for _, result := range results {
 		if result.err != nil {
 			return nil, result.err

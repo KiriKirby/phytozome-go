@@ -3,9 +3,12 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,7 +121,7 @@ func TestInspectBlastGeneratedFilesIncludesRawText(t *testing.T) {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
 
-	files, err := inspectBlastGeneratedFilesList([]exportFileResult{{RawTextPath: rawTextPath}})
+	files, err := inspectBlastGeneratedFilesList(context.Background(), []exportFileResult{{RawTextPath: rawTextPath}})
 	if err != nil {
 		t.Fatalf("inspect generated files: %v", err)
 	}
@@ -137,7 +140,7 @@ func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
 
-	files, err := inspectKeywordGeneratedFiles(exportFileResult{RawTextPath: rawTextPath}, report.SequenceAudit{})
+	files, err := inspectKeywordGeneratedFiles(context.Background(), exportFileResult{RawTextPath: rawTextPath}, report.SequenceAudit{})
 	if err != nil {
 		t.Fatalf("inspect generated files: %v", err)
 	}
@@ -491,6 +494,32 @@ func TestCustomPromptFamilyBlastGroupsMapsLabelsBackToPreparedIndexes(t *testing
 	}
 }
 
+func TestCustomPromptFamilyBlastGroupsMapsRenamedMembersByStableSourceKey(t *testing.T) {
+	prepared := []blastQueryItem{
+		{LabelName: "PAL1", QuerySource: &model.QuerySequenceSource{ProteinID: "PAC:1", LabelName: "PAL1", Aliases: "PAL1; ATPAL1"}},
+		{LabelName: "PAL2", QuerySource: &model.QuerySequenceSource{ProteinID: "PAC:2", LabelName: "PAL2", Aliases: "PAL2; ATPAL2"}},
+	}
+	members := []familyBlastMember{familyBlastMemberForItem(prepared[0]), familyBlastMemberForItem(prepared[1])}
+	custom := []prompt.FamilyBlastGroup{{
+		Name: "PAL-renamed",
+		Members: []prompt.FamilyBlastMember{
+			{LabelName: "MY-PAL1", ProteinID: members[0].ProteinID, OriginalLabelName: members[0].OriginalLabelName, SourceKey: members[0].SourceKey, Aliases: members[0].Aliases},
+			{LabelName: "MY-PAL2", ProteinID: members[1].ProteinID, OriginalLabelName: members[1].OriginalLabelName, SourceKey: members[1].SourceKey, Aliases: members[1].Aliases},
+		},
+	}}
+
+	groups := customPromptFamilyBlastGroups(prepared, custom)
+	if len(groups) != 1 {
+		t.Fatalf("group count = %d, want 1", len(groups))
+	}
+	if got := groups[0].Labels; len(got) != 2 || got[0] != "MY-PAL1" || got[1] != "MY-PAL2" {
+		t.Fatalf("labels after rename = %#v", got)
+	}
+	if got := prepared[0].QuerySource.LabelName; got != "MY-PAL1" {
+		t.Fatalf("prepared[0] QuerySource.LabelName = %q, want MY-PAL1", got)
+	}
+}
+
 func TestDetectFamilyBlastGroupsAnnotatesAutomaticSource(t *testing.T) {
 	items := []blastQueryItem{{LabelName: "PAL1"}, {LabelName: "PAL2"}}
 	groups := detectFamilyBlastGroups(items, model.DefaultFamilyBlastSettings())
@@ -789,6 +818,135 @@ func TestAutoIdentifyBlastLabelUsesResolvedPhytozomeAliases(t *testing.T) {
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
 	if got != "PAL4" {
 		t.Fatalf("unexpected label: %q", got)
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultRetainsKeywordAliasesForFastaHeader(t *testing.T) {
+	w := &BlastWizard{}
+	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
+		"AT1G01010.1": {{Aliases: "NAC001; ANAC001", LabelName: "NAC001", AutoDefine: "NAC domain protein"}},
+		"AT1G01010":   {{Aliases: "NAC001; ANAC001", LabelName: "NAC001", AutoDefine: "NAC domain protein"}},
+	}}
+	item := blastQueryItem{
+		RawInput: ">A.thaliana TAIR10|AT1G01010.1 (OldName)\nMPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID:    "AT1G01010.1",
+			TranscriptID: "AT1G01010.1",
+			GeneID:       "AT1G01010",
+			LabelName:    "OldName",
+		},
+	}
+
+	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"}, item)
+	if result.Label == "" || result.Label == "OldName" || result.Label == "AT1G01010.1" {
+		t.Fatalf("label = %q, want a keyword-derived alias label", result.Label)
+	}
+	found := false
+	for _, alias := range result.Aliases {
+		if alias == "ANAC001" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("aliases = %#v, want ANAC001 retained", result.Aliases)
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultUsesDraggedFastaFileHeaderSpecies(t *testing.T) {
+	path := `C:\Users\wangsychn\Desktop\phytozome-go_windows_amd64\output\Monolignol Polymerization.txt`
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("sample FASTA file is not available: %v", err)
+	}
+	items, err := parseBlastQueryItems(string(data))
+	if err != nil {
+		t.Fatalf("parse sample FASTA: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("sample FASTA parsed no items")
+	}
+	w := &BlastWizard{}
+	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
+		"AT2G29130.1": {{Aliases: "LAC2; TT10", LabelName: "LAC2", AutoDefine: "laccase 2"}},
+	}}
+
+	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"}, items[0])
+	if len(result.Aliases) < 2 {
+		t.Fatalf("aliases = %#v, want keyword aliases from FASTA protein id", result.Aliases)
+	}
+	found := false
+	for _, alias := range result.Aliases {
+		if alias == "TT10" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("aliases = %#v, want TT10 from keyword lookup", result.Aliases)
+	}
+}
+
+func TestSupplementBlastAliasesPreservesExistingFastaLabels(t *testing.T) {
+	path := `C:\Users\wangsychn\Desktop\phytozome-go_windows_amd64\output\Monolignol Polymerization.txt`
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("sample FASTA file is not available: %v", err)
+	}
+	items, err := parseBlastQueryItems(string(data))
+	if err != nil {
+		t.Fatalf("parse sample FASTA: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("sample FASTA parsed no items")
+	}
+	originalLabel := items[0].LabelName
+	if originalLabel == "" {
+		t.Fatal("sample FASTA should already contain a parenthetical label")
+	}
+	w := &BlastWizard{}
+	src := keywordMapSource{
+		candidates: []model.SpeciesCandidate{
+			{GenomeLabel: "Arabidopsis thaliana TAIR10", JBrowseName: "Athaliana_TAIR10", SearchAlias: "Arabidopsis thaliana"},
+			{GenomeLabel: "Spirodela polyrhiza", JBrowseName: "Sp7498v3", SearchAlias: "Spirodela polyrhiza"},
+		},
+		rowsByKeyword: map[string][]model.KeywordResultRow{
+			"AT2G29130.1": {{Aliases: "LAC2; TT10", LabelName: "LAC2", AutoDefine: "laccase 2"}},
+			"AT2G29130":   {{Aliases: "LAC2; TT10", LabelName: "LAC2", AutoDefine: "laccase 2"}},
+		},
+	}
+
+	out, err := w.supplementBlastAliases(context.Background(), context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"}, items[:1], nil)
+	if err != nil {
+		t.Fatalf("supplement aliases: %v", err)
+	}
+	if got := out[0].LabelName; got != originalLabel {
+		t.Fatalf("label changed to %q, want preserved %q", got, originalLabel)
+	}
+	if got := out[0].QuerySource.ProteinID; got != "AT2G29130.1" {
+		t.Fatalf("protein id = %q, want clean FASTA id AT2G29130.1", got)
+	}
+	aliases := splitAliasText(out[0].QuerySource.Aliases)
+	found := false
+	for _, alias := range aliases {
+		if alias == "TT10" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("aliases = %#v, want source-species alias TT10", aliases)
+	}
+	member := familyBlastMemberForItem(out[0])
+	found = false
+	for _, alias := range member.Aliases {
+		if alias == "TT10" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("family member aliases = %#v, want TT10 available in custom-group alias modal", member.Aliases)
 	}
 }
 
@@ -1427,10 +1585,15 @@ func TestBuildExportMetadataPrefersOriginalInputURL(t *testing.T) {
 }
 
 type fakeSource struct {
-	query       *model.QuerySequenceSource
-	keywordRows []model.KeywordResultRow
-	err         error
+	query          *model.QuerySequenceSource
+	keywordRows    []model.KeywordResultRow
+	sequences      map[string]string
+	sequenceErrors map[string]error
+	fetchCount     map[string]int
+	err            error
 }
+
+var fakeSourceFetchMu sync.Mutex
 
 func (f fakeSource) Name() string { return "fake" }
 func (f fakeSource) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
@@ -1446,7 +1609,18 @@ func (f fakeSource) SearchKeywordRows(ctx context.Context, species model.Species
 	return append([]model.KeywordResultRow(nil), f.keywordRows...), nil
 }
 func (f fakeSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
-	return "", nil
+	if f.fetchCount != nil {
+		fakeSourceFetchMu.Lock()
+		f.fetchCount[sequenceID]++
+		fakeSourceFetchMu.Unlock()
+	}
+	if err, ok := f.sequenceErrors[sequenceID]; ok {
+		return "", err
+	}
+	if sequence, ok := f.sequences[sequenceID]; ok {
+		return sequence, nil
+	}
+	return "", fmt.Errorf("no protein sequence for transcript id %s", sequenceID)
 }
 func (f fakeSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	if f.err != nil {
@@ -1465,12 +1639,18 @@ func (f fakeSource) FetchProteinQuerySequence(ctx context.Context, species model
 
 type keywordMapSource struct {
 	name          string
+	candidates    []model.SpeciesCandidate
 	rowsByKeyword map[string][]model.KeywordResultRow
 }
 
 func (f keywordMapSource) Name() string { return firstNonEmpty(f.name, "fake") }
 func (f keywordMapSource) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
-	return nil, nil
+	if len(f.candidates) > 0 {
+		return append([]model.SpeciesCandidate(nil), f.candidates...), nil
+	}
+	return []model.SpeciesCandidate{
+		{GenomeLabel: "Arabidopsis thaliana TAIR10", JBrowseName: "Athaliana_TAIR10", SearchAlias: "Arabidopsis thaliana"},
+	}, nil
 }
 func (f keywordMapSource) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
 	return model.BlastJob{}, nil
@@ -1479,13 +1659,88 @@ func (f keywordMapSource) WaitForBlastResults(ctx context.Context, jobID string,
 	return model.BlastResult{}, nil
 }
 func (f keywordMapSource) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return append([]model.KeywordResultRow(nil), f.rowsByKeyword[keyword]...), nil
+	rows := append([]model.KeywordResultRow(nil), f.rowsByKeyword[keyword]...)
+	for i := range rows {
+		if rows[i].Genome == "" {
+			rows[i].Genome = species.GenomeLabel
+		}
+	}
+	return rows, nil
 }
 func (f keywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
 	return "", nil
 }
 func (f keywordMapSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	return nil, nil
+}
+
+func TestFetchProteinSequenceRecordsSkipsMissingSequencesAndCachesMisses(t *testing.T) {
+	fetchCount := map[string]int{}
+	w := &BlastWizard{
+		source:               fakeSource{sequences: map[string]string{"ok": "MPEPTIDE"}, fetchCount: fetchCount},
+		proteinSequenceCache: make(map[string]string),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	rows := []model.BlastResultRow{
+		{Protein: "ok", SequenceID: "ok", Species: "sp"},
+		{Protein: "missing", SequenceID: "missing", Species: "sp"},
+		{Protein: "missing", SequenceID: "missing", Species: "sp"},
+	}
+	records, err := w.fetchProteinSequenceRecordsWithProgress(context.Background(), rows, nil)
+	if err != nil {
+		t.Fatalf("fetchProteinSequenceRecordsWithProgress returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if fetchCount["missing"] != 1 {
+		t.Fatalf("missing sequence fetch count = %d, want 1", fetchCount["missing"])
+	}
+}
+
+func TestFetchProteinSequenceRecordsReturnsNonMissingErrors(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			sequences:      map[string]string{"ok": "MPEPTIDE"},
+			sequenceErrors: map[string]error{"net": fmt.Errorf("fetch protein sequence: unexpected status 500")},
+		},
+		proteinSequenceCache: make(map[string]string),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	rows := []model.BlastResultRow{
+		{Protein: "ok", SequenceID: "ok", Species: "sp"},
+		{Protein: "net", SequenceID: "net", Species: "sp"},
+	}
+	_, err := w.fetchProteinSequenceRecordsWithProgress(context.Background(), rows, nil)
+	if err == nil {
+		t.Fatal("expected non-missing sequence fetch error")
+	}
+	if !strings.Contains(err.Error(), "unexpected status 500") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLocalBlastBatchWorkerBudgetDoesNotOversubscribeCPU(t *testing.T) {
+	previous := runtime.GOMAXPROCS(8)
+	defer runtime.GOMAXPROCS(previous)
+
+	request := model.BlastRequest{Program: "local:BLASTP"}
+	workers := batchBlastWorkerCount(65, request)
+	if workers <= 0 {
+		t.Fatalf("workers = %d, want positive", workers)
+	}
+	threads := localBlastThreadsPerWorker(workers)
+	if threads <= 0 {
+		t.Fatalf("threads = %d, want positive", threads)
+	}
+	if workers*threads > 8 {
+		t.Fatalf("local BLAST oversubscribed CPU budget: workers=%d threads=%d cpu=8", workers, threads)
+	}
+
+	networkWorkers := batchBlastWorkerCount(65, model.BlastRequest{Program: "BLASTP"})
+	if networkWorkers <= workers {
+		t.Fatalf("remote BLAST workers = %d, want more than local budget %d", networkWorkers, workers)
+	}
 }
 
 func TestResolveGeneReportSequencePreservesInputURLs(t *testing.T) {

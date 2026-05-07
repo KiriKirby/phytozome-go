@@ -1141,16 +1141,17 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 	}
 	for {
 		result, err := tui.RunFamilyBlastModal(tui.FamilyBlastPage{
-			Path:             p.blastTUIPath("BLAST input", "Family BLAST"),
-			Title:            p.t("Family BLAST"),
-			Message:          p.t("Some query names look like members of the same gene family. Keep each BLAST search separate, then review and export related members together."),
-			Reference:        familyBlastReferenceMessage(defaults.UseUniProtReference, defaults.UseInterProReference),
-			Groups:           tuiFamilyBlastGroups(preview.Groups),
-			PreviewUngrouped: append([]string(nil), preview.Ungrouped...),
-			Settings:         tuiSettings,
-			AllowBack:        true,
-			AllowHome:        true,
-			ConfirmText:      tui.ButtonApply,
+			Path:                    p.blastTUIPath("BLAST input", "Family BLAST"),
+			Title:                   p.t("Family BLAST"),
+			Message:                 p.t("Some query names look like members of the same gene family. Keep each BLAST search separate, then review and export related members together."),
+			Reference:               familyBlastReferenceMessage(defaults.UseUniProtReference, defaults.UseInterProReference),
+			Groups:                  tuiFamilyBlastGroups(preview.Groups),
+			PreviewUngrouped:        append([]string(nil), preview.Ungrouped...),
+			PreviewUngroupedMembers: tuiFamilyBlastMembers(preview.UngroupedMembers),
+			Settings:                tuiSettings,
+			AllowBack:               true,
+			AllowHome:               true,
+			ConfirmText:             tui.ButtonApply,
 		})
 		if err != nil {
 			return FamilyBlastSettingsResult{}, err
@@ -1230,12 +1231,22 @@ func familyBlastReferenceMessage(useUniProt bool, useInterPro bool) string {
 type FamilyBlastGroup struct {
 	Name    string
 	Labels  []string
+	Members []FamilyBlastMember
 	Queries int
 }
 
+type FamilyBlastMember struct {
+	LabelName         string
+	ProteinID         string
+	Aliases           []string
+	OriginalLabelName string
+	SourceKey         string
+}
+
 type FamilyBlastPreview struct {
-	Groups    []FamilyBlastGroup
-	Ungrouped []string
+	Groups           []FamilyBlastGroup
+	Ungrouped        []string
+	UngroupedMembers []FamilyBlastMember
 }
 
 type FamilyBlastSettingsResult struct {
@@ -1250,7 +1261,22 @@ func tuiFamilyBlastGroups(groups []FamilyBlastGroup) []tui.FamilyBlastGroup {
 		out = append(out, tui.FamilyBlastGroup{
 			Name:    group.Name,
 			Labels:  append([]string(nil), group.Labels...),
+			Members: tuiFamilyBlastMembers(group.Members),
 			Queries: group.Queries,
+		})
+	}
+	return out
+}
+
+func tuiFamilyBlastMembers(members []FamilyBlastMember) []tui.FamilyBlastMember {
+	out := make([]tui.FamilyBlastMember, 0, len(members))
+	for _, member := range members {
+		out = append(out, tui.FamilyBlastMember{
+			LabelName:         strings.TrimSpace(member.LabelName),
+			ProteinID:         strings.TrimSpace(member.ProteinID),
+			Aliases:           append([]string(nil), member.Aliases...),
+			OriginalLabelName: strings.TrimSpace(member.OriginalLabelName),
+			SourceKey:         strings.TrimSpace(member.SourceKey),
 		})
 	}
 	return out
@@ -1259,10 +1285,40 @@ func tuiFamilyBlastGroups(groups []FamilyBlastGroup) []tui.FamilyBlastGroup {
 func promptFamilyBlastGroupsFromTUI(groups []tui.FamilyBlastCustomGroup) []FamilyBlastGroup {
 	out := make([]FamilyBlastGroup, 0, len(groups))
 	for _, group := range groups {
+		members := promptFamilyBlastMembersFromTUI(group.Members)
+		labels := append([]string(nil), group.Labels...)
+		if len(members) > 0 {
+			labels = labels[:0]
+			for _, member := range members {
+				if label := strings.TrimSpace(member.LabelName); label != "" {
+					labels = append(labels, label)
+				}
+			}
+		}
 		out = append(out, FamilyBlastGroup{
 			Name:    strings.TrimSpace(group.Name),
-			Labels:  append([]string(nil), group.Labels...),
-			Queries: len(group.Labels),
+			Labels:  labels,
+			Members: members,
+			Queries: func() int {
+				if len(labels) > len(members) {
+					return len(labels)
+				}
+				return len(members)
+			}(),
+		})
+	}
+	return out
+}
+
+func promptFamilyBlastMembersFromTUI(members []tui.FamilyBlastMember) []FamilyBlastMember {
+	out := make([]FamilyBlastMember, 0, len(members))
+	for _, member := range members {
+		out = append(out, FamilyBlastMember{
+			LabelName:         strings.TrimSpace(member.LabelName),
+			ProteinID:         strings.TrimSpace(member.ProteinID),
+			Aliases:           append([]string(nil), member.Aliases...),
+			OriginalLabelName: strings.TrimSpace(member.OriginalLabelName),
+			SourceKey:         strings.TrimSpace(member.SourceKey),
 		})
 	}
 	return out

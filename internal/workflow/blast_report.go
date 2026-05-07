@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -89,7 +89,7 @@ func (w *BlastWizard) renderBlastBatchReport(ctx context.Context, selected model
 
 func (w *BlastWizard) renderBlastReportWithFiles(ctx context.Context, exportCtx blastReportExportContext, files []exportFileResult) (string, error) {
 	metadataStart := time.Now()
-	generatedFiles, err := inspectBlastGeneratedFilesList(files)
+	generatedFiles, err := inspectBlastGeneratedFilesList(ctx, files)
 	if err != nil {
 		return "", err
 	}
@@ -113,6 +113,13 @@ func (w *BlastWizard) renderBlastReportWithFiles(ctx context.Context, exportCtx 
 	exportCtx.Files.Steps = reportSteps
 	exportCtx.Files.SequenceAudit = aggregateBlastSequenceAudit(files, exportCtx.Settings.WriteText)
 	data := w.buildBlastReportData(exportCtx, generatedFiles)
+
+	if w.suppressTaskModals {
+		if err := report.RenderBlastPDF(reportPath, data); err != nil {
+			return "", err
+		}
+		return reportPath, nil
+	}
 
 	err = tui.RunTaskPageContext(tui.TaskPage{
 		Path:        w.tuiPath("Export", "BLAST data analysis report"),
@@ -145,9 +152,9 @@ func (w *BlastWizard) buildBlastReportData(exportCtx blastReportExportContext, f
 	if len(runs) == 0 && len(exportCtx.Run.Results.Rows) > 0 {
 		runs = []blastQueryRun{exportCtx.Run}
 	}
-	selectedRows := append([]model.BlastResultRow(nil), rows...)
+	selectedRows := rows
 	if len(selectedRows) == 0 {
-		selectedRows = append([]model.BlastResultRow(nil), allRows...)
+		selectedRows = allRows
 	}
 	return report.ReportData{
 		Title:       "BLAST Data Analysis Report",
@@ -192,7 +199,7 @@ func (w *BlastWizard) buildBlastReportData(exportCtx blastReportExportContext, f
 	}
 }
 
-func inspectBlastGeneratedFilesList(files []exportFileResult) ([]report.GeneratedFile, error) {
+func inspectBlastGeneratedFilesList(ctx context.Context, files []exportFileResult) ([]report.GeneratedFile, error) {
 	type fileSpec struct {
 		path string
 		typ  string
@@ -227,17 +234,14 @@ func inspectBlastGeneratedFilesList(files []exportFileResult) ([]report.Generate
 		err  error
 	}
 	results := make([]inspectResult, len(specs))
-	var workers sync.WaitGroup
-	for i, spec := range specs {
-		i, spec := i, spec
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-			results[i] = inspectResult{file: file, err: err}
-		}()
+	if err := perf.ParallelFor(ctx, perf.WorkDisk, len(specs), func(_ context.Context, i int) error {
+		spec := specs[i]
+		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
+		results[i] = inspectResult{file: file, err: err}
+		return err
+	}); err != nil {
+		return nil, err
 	}
-	workers.Wait()
 	for _, result := range results {
 		if result.err != nil {
 			return nil, result.err
@@ -248,10 +252,22 @@ func inspectBlastGeneratedFilesList(files []exportFileResult) ([]report.Generate
 }
 
 func flattenBlastBatchRows(rowsByRun [][]model.BlastResultRow, rowNumbersByRun [][]int, filterFlagsByRun [][]bool, selectedByRun [][]bool) ([]model.BlastResultRow, []model.BlastResultRow, []bool, []bool) {
-	var allRows []model.BlastResultRow
-	var selectedRows []model.BlastResultRow
-	var selectedMask []bool
-	var filterFlags []bool
+	totalRows := 0
+	selectedCount := 0
+	for runIndex, rows := range rowsByRun {
+		totalRows += len(rows)
+		if runIndex < len(selectedByRun) {
+			for rowIndex := range rows {
+				if rowIndex < len(selectedByRun[runIndex]) && selectedByRun[runIndex][rowIndex] {
+					selectedCount++
+				}
+			}
+		}
+	}
+	allRows := make([]model.BlastResultRow, 0, totalRows)
+	selectedRows := make([]model.BlastResultRow, 0, selectedCount)
+	selectedMask := make([]bool, 0, totalRows)
+	filterFlags := make([]bool, 0, totalRows)
 	for runIndex, rows := range rowsByRun {
 		for rowIndex, row := range rows {
 			allRows = append(allRows, row)
@@ -282,7 +298,11 @@ func appendUniqueStrings(values []string, value string) []string {
 }
 
 func flattenIntMatrix(values [][]int) []int {
-	out := make([]int, 0)
+	total := 0
+	for _, row := range values {
+		total += len(row)
+	}
+	out := make([]int, 0, total)
 	for _, row := range values {
 		out = append(out, row...)
 	}
@@ -292,13 +312,17 @@ func flattenIntMatrix(values [][]int) []int {
 func blastRowsByRunForReport(runs []blastQueryRun) [][]model.BlastResultRow {
 	out := make([][]model.BlastResultRow, 0, len(runs))
 	for _, run := range runs {
-		out = append(out, append([]model.BlastResultRow(nil), run.Results.Rows...))
+		out = append(out, run.Results.Rows)
 	}
 	return out
 }
 
 func flattenBlastSelectedRowsByRun(rowsByRun [][]model.BlastResultRow) []model.BlastResultRow {
-	var out []model.BlastResultRow
+	total := 0
+	for _, rows := range rowsByRun {
+		total += len(rows)
+	}
+	out := make([]model.BlastResultRow, 0, total)
 	for _, rows := range rowsByRun {
 		out = append(out, rows...)
 	}

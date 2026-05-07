@@ -19,6 +19,8 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
+
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
 
 var ErrTaskCancelled = errors.New("task cancelled")
@@ -351,7 +353,8 @@ type pasteStatus struct {
 
 type rowSelectionTable struct {
 	*tview.Table
-	dividerRow int
+	dividerRow   int
+	columnWidths []int
 }
 
 type checkboxModule struct {
@@ -868,41 +871,53 @@ type BlastFilterResult struct {
 }
 
 type FamilyBlastPage struct {
-	Breadcrumb       string
-	Path             []string
-	Title            string
-	Message          string
-	Reference        string
-	Groups           []FamilyBlastGroup
-	PreviewNote      string
-	PreviewUngrouped []string
-	Settings         FamilyBlastSettings
-	AllowBack        bool
-	AllowHome        bool
-	ConfirmText      string
+	Breadcrumb              string
+	Path                    []string
+	Title                   string
+	Message                 string
+	Reference               string
+	Groups                  []FamilyBlastGroup
+	PreviewNote             string
+	PreviewUngrouped        []string
+	PreviewUngroupedMembers []FamilyBlastMember
+	Settings                FamilyBlastSettings
+	AllowBack               bool
+	AllowHome               bool
+	ConfirmText             string
 }
 
 type FamilyBlastGroup struct {
 	Name    string
 	Labels  []string
+	Members []FamilyBlastMember
 	Queries int
 }
 
 type FamilyBlastCustomGroup struct {
-	Name   string
-	Labels []string
+	Name    string
+	Labels  []string
+	Members []FamilyBlastMember
+}
+
+type FamilyBlastMember struct {
+	LabelName         string
+	ProteinID         string
+	Aliases           []string
+	OriginalLabelName string
+	SourceKey         string
 }
 
 type FamilyBlastCustomizePage struct {
-	Breadcrumb  string
-	Path        []string
-	Title       string
-	Message     string
-	Groups      []FamilyBlastCustomGroup
-	Ungrouped   []string
-	AllowBack   bool
-	AllowHome   bool
-	ConfirmText string
+	Breadcrumb       string
+	Path             []string
+	Title            string
+	Message          string
+	Groups           []FamilyBlastCustomGroup
+	Ungrouped        []string
+	UngroupedMembers []FamilyBlastMember
+	AllowBack        bool
+	AllowHome        bool
+	ConfirmText      string
 }
 
 type FamilyBlastResult struct {
@@ -1457,6 +1472,8 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 	currentPage := 0
 	selectedIndex := 0
 	resultRowOffset := 0
+	var filterSeq atomic.Uint64
+	filterReady := true
 
 	input := tview.NewInputField().
 		SetLabel(strings.TrimSpace(page.Label) + " ").
@@ -1480,12 +1497,7 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 
 	pageBar := &pageSelectorPrimitive{Box: tview.NewBox()}
 
-	applyFilter := func() {
-		if page.Filter != nil {
-			filtered = page.Filter(query, page.Choices)
-		} else {
-			filtered = defaultChoiceFilter(query, page.Choices)
-		}
+	clampSearchPage := func() {
 		if len(filtered) == 0 {
 			currentPage = 0
 			return
@@ -1510,7 +1522,16 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 			selectedIndex = visible - 1
 		}
 	}
+	applyFilter := func() {
+		if page.Filter != nil {
+			filtered = page.Filter(query, page.Choices)
+		} else {
+			filtered = defaultChoiceFilter(query, page.Choices)
+		}
+		clampSearchPage()
+	}
 	var refresh func()
+	var renderSearchResults func()
 	selectCurrent := func(index int) {
 		absolute := currentPage*pageSize + index
 		if absolute < 0 || absolute >= len(filtered) {
@@ -1639,10 +1660,13 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 			}
 		})
 	}
-	refresh = func() {
-		applyFilter()
+	renderSearchResults = func() {
 		results.Clear()
-		if len(filtered) == 0 {
+		if !filterReady {
+			resultRowOffset = 0
+			results.SetCell(0, 0, tview.NewTableCell("- Searching").SetTextColor(colorAction).SetSelectable(false))
+			results.SetCell(1, 0, tview.NewTableCell("  Filtering choices in the background...").SetTextColor(tview.Styles.SecondaryTextColor).SetSelectable(false))
+		} else if len(filtered) == 0 {
 			resultRowOffset = 0
 			results.SetCell(0, 0, tview.NewTableCell("- No matches").SetTextColor(tview.Styles.PrimaryTextColor).SetSelectable(false))
 			results.SetCell(1, 0, tview.NewTableCell("  Edit the search box to search again.").SetTextColor(tview.Styles.SecondaryTextColor).SetSelectable(false))
@@ -1686,13 +1710,45 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		pageBar.currentPage = currentPage
 		pageBar.matches = len(filtered)
 	}
+	refresh = func() {
+		applyFilter()
+		renderSearchResults()
+	}
 
 	input.SetChangedFunc(func(text string) {
 		query = text
 		currentPage = 0
 		selectedIndex = 0
 		resultRowOffset = 0
+		id := filterSeq.Add(1)
+		if len(page.Choices) < 1000 {
+			filterReady = true
+			refresh()
+			return
+		}
+		filterReady = false
 		refresh()
+		go func(querySnapshot string, seq uint64) {
+			time.Sleep(perf.SearchDebounce())
+			if filterSeq.Load() != seq {
+				return
+			}
+			var next []Choice
+			if page.Filter != nil {
+				next = page.Filter(querySnapshot, page.Choices)
+			} else {
+				next = defaultChoiceFilter(querySnapshot, page.Choices)
+			}
+			app.QueueUpdateDraw(func() {
+				if filterSeq.Load() != seq {
+					return
+				}
+				filterReady = true
+				filtered = next
+				clampSearchPage()
+				renderSearchResults()
+			})
+		}(text, id)
 	})
 	input.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
@@ -1969,8 +2025,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		})
 	}
 	sortRows()
+	table.columnWidths = rowSelectionColumnWidths(page.Columns, page.Rows, layout, page.GroupSort)
 
-	visibleRows := func() []rowSelectionDisplayRow {
+	buildVisibleRows := func() []rowSelectionDisplayRow {
 		out := make([]rowSelectionDisplayRow, 0, len(order)+len(groups))
 		if page.GroupSort && len(groups) > 0 {
 			rowToGroup := make(map[int]string, len(page.Rows))
@@ -2013,6 +2070,13 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			out = append(out, rowSelectionDisplayRow{OriginalRow: originalRow})
 		}
 		return out
+	}
+	displayRowsCache := buildVisibleRows()
+	rebuildDisplayRows := func() {
+		displayRowsCache = buildVisibleRows()
+	}
+	visibleRows := func() []rowSelectionDisplayRow {
+		return displayRowsCache
 	}
 
 	currentOriginalRow := func() int {
@@ -2196,6 +2260,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		sortState = TableSort{Column: column, Direction: direction}
 		headerColumn = column
 		sortRows()
+		rebuildDisplayRows()
 		refresh()
 		if controlHeaders {
 			table.Select(0, headerDisplayColumn())
@@ -2256,6 +2321,48 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		updateModeText()
 		refresh()
 	}
+	var setSelectionHeader func()
+	var updateMarkerRow func(int, int)
+	setSelectionHeader = func() {
+		marker := "[ ]"
+		markerColor := colorSelectionOff
+		if allSelected() {
+			marker = "[x]"
+			markerColor = colorSelectionOn
+		}
+		table.SetCell(rowSelectionHeaderRow, 0, paddedTableCell(tview.Escape(marker)).
+			SetTextColor(markerColor).
+			SetAlign(tview.AlignCenter).
+			SetSelectable(false).
+			SetClickedFunc(func() bool {
+				setAll(selected, !allSelected())
+				refresh()
+				return true
+			}))
+		table.SetTitle(" " + tableTitleWithCount(page.Title, countSelectedBools(selected), len(page.Rows)) + " ")
+	}
+	updateMarkerRow = func(displayRow int, originalRow int) {
+		if originalRow < 0 || originalRow >= len(selected) {
+			return
+		}
+		rowMarker := "[ ]"
+		rowMarkerColor := colorSelectionOff
+		if selected[originalRow] {
+			rowMarker = "[x]"
+			rowMarkerColor = colorSelectionOn
+		}
+		rowIndex := originalRow
+		table.SetCell(displayRow, 0, paddedTableCell(tview.Escape(rowMarker)).
+			SetTextColor(rowMarkerColor).
+			SetAlign(tview.AlignCenter).
+			SetClickedFunc(func() bool {
+				selected[rowIndex] = !selected[rowIndex]
+				updateMarkerRow(displayRow, rowIndex)
+				setSelectionHeader()
+				selectOriginalRow(rowIndex, 2)
+				return true
+			}))
+	}
 	refresh = func() {
 		table.SetTitle(" " + tableTitleWithCount(page.Title, countSelectedBools(selected), len(page.Rows)) + " ")
 		row, column := table.GetSelection()
@@ -2276,21 +2383,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		sortedHeaderStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tview.Styles.PrimaryTextColor).Bold(true)
 		activeHeaderStyle := tcell.StyleDefault.Background(colorAction).Foreground(colorActionText).Bold(true)
 		groupStyle := tcell.StyleDefault.Background(colorPanel).Foreground(colorMuted).Bold(true)
-		marker := "[ ]"
-		markerColor := colorSelectionOff
-		if allSelected() {
-			marker = "[x]"
-			markerColor = colorSelectionOn
-		}
-		table.SetCell(rowSelectionHeaderRow, 0, paddedTableCell(tview.Escape(marker)).
-			SetTextColor(markerColor).
-			SetAlign(tview.AlignCenter).
-			SetSelectable(false).
-			SetClickedFunc(func() bool {
-				setAll(selected, !allSelected())
-				refresh()
-				return true
-			}))
+		setSelectionHeader()
 		rowHeader := "row"
 		if sortState.Column == -1 {
 			rowHeader += rowSelectionSortArrow(sortState.Direction)
@@ -2308,7 +2401,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		table.SetCell(rowSelectionHeaderRow, 1, rowHeaderCell)
 		if layout.headerTwoLine {
-			table.SetCell(1, 0, paddedTableCell("").SetSelectable(false).SetTextColor(markerColor).SetAlign(tview.AlignCenter))
+			table.SetCell(1, 0, paddedTableCell("").SetSelectable(false).SetTextColor(colorSelectionOff).SetAlign(tview.AlignCenter))
 			table.SetCell(1, 1, paddedTableCell("").SetSelectable(false).SetStyle(headerStyle))
 		}
 		for i, col := range page.Columns {
@@ -2371,23 +2464,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			}
 			originalRow := item.OriginalRow
 			rowData := page.Rows[originalRow]
-			rowMarker := "[ ]"
-			rowMarkerColor := colorSelectionOff
-			if selected[originalRow] {
-				rowMarker = "[x]"
-				rowMarkerColor = colorSelectionOn
-			}
-			rowIndex := originalRow
-			markerCell := paddedTableCell(tview.Escape(rowMarker)).
-				SetTextColor(rowMarkerColor).
-				SetAlign(tview.AlignCenter).
-				SetClickedFunc(func() bool {
-					selected[rowIndex] = !selected[rowIndex]
-					refresh()
-					selectOriginalRow(rowIndex, 2)
-					return true
-				})
-			table.SetCell(rowNumber, 0, markerCell)
+			updateMarkerRow(rowNumber, originalRow)
 			numberCell := paddedTableCell(fmt.Sprintf("%d", originalRow+1)).
 				SetTextColor(tview.Styles.PrimaryTextColor).
 				SetSelectable(true)
@@ -2448,7 +2525,8 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			return
 		}
 		selected[originalRow] = !selected[originalRow]
-		refresh()
+		updateMarkerRow(row, originalRow)
+		setSelectionHeader()
 		table.Select(row, column)
 	}
 	table.SetSelectedFunc(func(row int, column int) {
@@ -2666,6 +2744,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	tableStates := make([]BlastRunTableState, len(page.Items))
 	if page.State.Valid {
 		copy(tableStates, page.State.Tables)
+	}
+	columnWidthsByRun := make([][]int, len(page.Items))
+	for i, item := range page.Items {
+		itemLayout := newRowSelectionLayout(item.Columns)
+		columnWidthsByRun[i] = rowSelectionColumnWidths(item.Columns, item.Rows, itemLayout, false)
 	}
 
 	list := newBlastRunSidebar()
@@ -2974,10 +3057,49 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			return "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers"
 		}
 	}
+	var setSelectionHeader func()
+	var updateMarkerRow func(int, int)
+	setSelectionHeader = func() {
+		item := currentItem()
+		marker := "[ ]"
+		markerColor := colorSelectionOff
+		if allSelected() {
+			marker = "[x]"
+			markerColor = colorSelectionOn
+		}
+		table.SetCell(rowSelectionHeaderRow, 0, paddedTableCell(tview.Escape(marker)).SetTextColor(markerColor).SetAlign(tview.AlignCenter).SetSelectable(false).SetClickedFunc(func() bool {
+			setAll(currentSelected(), !allSelected())
+			refresh()
+			return true
+		}))
+		table.SetTitle(" " + tableTitleWithCount(page.Title, countSelectedBools(currentSelected()), len(item.Rows)) + " ")
+	}
+	updateMarkerRow = func(displayRow int, originalRow int) {
+		if originalRow < 0 || originalRow >= len(currentSelected()) {
+			return
+		}
+		rowMarker := "[ ]"
+		rowMarkerColor := colorSelectionOff
+		if currentSelected()[originalRow] {
+			rowMarker = "[x]"
+			rowMarkerColor = colorSelectionOn
+		}
+		rowIndex := originalRow
+		table.SetCell(displayRow, 0, paddedTableCell(tview.Escape(rowMarker)).SetTextColor(rowMarkerColor).SetAlign(tview.AlignCenter).SetClickedFunc(func() bool {
+			currentSelected()[rowIndex] = !currentSelected()[rowIndex]
+			updateMarkerRow(displayRow, rowIndex)
+			setSelectionHeader()
+			refreshList()
+			return true
+		}))
+	}
 	refresh = func() {
 		item := currentItem()
 		layout = newRowSelectionLayout(item.Columns)
 		table.dividerRow = layout.dividerRow
+		if currentRun >= 0 && currentRun < len(columnWidthsByRun) {
+			table.columnWidths = columnWidthsByRun[currentRun]
+		}
 		table.SetFixed(layout.firstDataRow, rowSelectionFirstDataColumn)
 		refreshList()
 		if len(item.Rows) == 0 {
@@ -2990,17 +3112,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			headerStyle := tcell.StyleDefault.Foreground(tview.Styles.PrimaryTextColor).Bold(true)
 			sortedHeaderStyle := tcell.StyleDefault.Background(tcell.ColorDarkSlateGray).Foreground(tview.Styles.PrimaryTextColor).Bold(true)
 			activeHeaderStyle := tcell.StyleDefault.Background(colorAction).Foreground(colorActionText).Bold(true)
-			marker := "[ ]"
-			markerColor := colorSelectionOff
-			if allSelected() {
-				marker = "[x]"
-				markerColor = colorSelectionOn
-			}
-			table.SetCell(rowSelectionHeaderRow, 0, paddedTableCell(tview.Escape(marker)).SetTextColor(markerColor).SetAlign(tview.AlignCenter).SetSelectable(false).SetClickedFunc(func() bool {
-				setAll(currentSelected(), !allSelected())
-				refresh()
-				return true
-			}))
+			setSelectionHeader()
 			rowHeader := "row"
 			if sortState.Column == -1 {
 				rowHeader += rowSelectionSortArrow(sortState.Direction)
@@ -3024,7 +3136,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			}
 			table.SetCell(rowSelectionHeaderRow, 1, rowHeaderCell)
 			if layout.headerTwoLine {
-				table.SetCell(1, 0, paddedTableCell("").SetTextColor(markerColor).SetAlign(tview.AlignCenter).SetSelectable(false))
+				table.SetCell(1, 0, paddedTableCell("").SetTextColor(colorSelectionOff).SetAlign(tview.AlignCenter).SetSelectable(false))
 				table.SetCell(1, 1, paddedTableCell("").SetStyle(headerStyle).SetSelectable(false))
 			}
 			for i, col := range item.Columns {
@@ -3075,18 +3187,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			for displayRow, originalRow := range order {
 				rowNumber := displayRow + layout.firstDataRow
 				rowData := item.Rows[originalRow]
-				rowMarker := "[ ]"
-				rowMarkerColor := colorSelectionOff
-				if currentSelected()[originalRow] {
-					rowMarker = "[x]"
-					rowMarkerColor = colorSelectionOn
-				}
-				rowIndex := originalRow
-				table.SetCell(rowNumber, 0, paddedTableCell(tview.Escape(rowMarker)).SetTextColor(rowMarkerColor).SetAlign(tview.AlignCenter).SetClickedFunc(func() bool {
-					currentSelected()[rowIndex] = !currentSelected()[rowIndex]
-					refresh()
-					return true
-				}))
+				updateMarkerRow(rowNumber, originalRow)
 				numberCell := paddedTableCell(fmt.Sprintf("%d", originalRow+1)).SetTextColor(tview.Styles.PrimaryTextColor).SetSelectable(true)
 				if originalRow >= 0 && originalRow < len(currentFilterFlags()) && currentFilterFlags()[originalRow] {
 					numberCell.SetTextColor(colorSelectionOff)
@@ -3189,8 +3290,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		}
 		originalRow := currentOriginalRow()
 		if originalRow >= 0 && originalRow < len(currentSelected()) {
+			row, _ := table.GetSelection()
 			currentSelected()[originalRow] = !currentSelected()[originalRow]
-			refresh()
+			updateMarkerRow(row, originalRow)
+			setSelectionHeader()
+			refreshList()
 		}
 	}
 	copyCurrent := func() {
@@ -4245,14 +4349,14 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		}
 		lines = append(lines, fmt.Sprintf("%d family group(s), %d grouped query record(s).", len(page.Groups), totalQueries), "")
 		for _, group := range page.Groups {
-			labels := compactFamilyBlastGroupLabels(group.Labels)
+			members := compactFamilyBlastMembers(group.Members, group.Labels)
 			lines = append(lines, fmt.Sprintf("%s (%d)", group.Name, group.Queries))
-			if len(labels) == 0 {
+			if len(members) == 0 {
 				lines = append(lines, "  (no members listed)")
 				continue
 			}
-			for _, label := range labels {
-				lines = append(lines, "  - "+label)
+			for _, member := range members {
+				lines = append(lines, "  - "+familyBlastPreviewMemberText(member))
 			}
 			lines = append(lines, "")
 		}
@@ -4346,15 +4450,16 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	customizeGroups := func() {
 		settingsResult := captureSettingsWithCustomize(true)
 		customPage := FamilyBlastCustomizePage{
-			Breadcrumb:  page.Breadcrumb,
-			Path:        append(append([]string(nil), page.Path...), "Customize groups"),
-			Title:       "Customize Family BLAST groups",
-			Message:     "Review the proposed family groups. Move a member out from the left pane, or add an ungrouped query from the right pane. New groups can be created when the automatic grouping is not right.",
-			Groups:      groupsToCustomGroups(page.Groups),
-			Ungrouped:   append([]string(nil), page.PreviewUngrouped...),
-			AllowBack:   true,
-			AllowHome:   page.AllowHome,
-			ConfirmText: page.ConfirmText,
+			Breadcrumb:       page.Breadcrumb,
+			Path:             append(append([]string(nil), page.Path...), "Customize groups"),
+			Title:            "Customize Family BLAST groups",
+			Message:          "Review the proposed family groups. Move a member out from the left pane, or add an ungrouped query from the right pane. New groups can be created when the automatic grouping is not right.",
+			Groups:           groupsToCustomGroups(page.Groups),
+			Ungrouped:        append([]string(nil), page.PreviewUngrouped...),
+			UngroupedMembers: compactFamilyBlastMembers(page.PreviewUngroupedMembers, page.PreviewUngrouped),
+			AllowBack:        true,
+			AllowHome:        page.AllowHome,
+			ConfirmText:      page.ConfirmText,
 		}
 		customResult, err := RunFamilyBlastCustomizeModal(customPage)
 		if err != nil || customResult.Nav == NavBack {
@@ -4507,15 +4612,90 @@ func compactFamilyBlastGroupLabels(labels []string) []string {
 	return out
 }
 
+func compactFamilyBlastMembers(members []FamilyBlastMember, fallbackLabels []string) []FamilyBlastMember {
+	out := make([]FamilyBlastMember, 0, maxInt(len(members), len(fallbackLabels)))
+	seen := make(map[string]struct{}, maxInt(len(members), len(fallbackLabels)))
+	add := func(member FamilyBlastMember) {
+		member.LabelName = strings.TrimSpace(member.LabelName)
+		member.ProteinID = strings.TrimSpace(member.ProteinID)
+		member.OriginalLabelName = strings.TrimSpace(member.OriginalLabelName)
+		member.SourceKey = strings.TrimSpace(member.SourceKey)
+		if member.LabelName == "" {
+			return
+		}
+		if member.OriginalLabelName == "" {
+			member.OriginalLabelName = member.LabelName
+		}
+		if member.SourceKey == "" {
+			member.SourceKey = firstNonEmptyText(member.ProteinID, member.OriginalLabelName, member.LabelName)
+		}
+		member.Aliases = compactFamilyBlastGroupLabels(append(member.Aliases, member.LabelName))
+		key := strings.ToLower(firstNonEmptyText(member.SourceKey, member.ProteinID, member.OriginalLabelName, member.LabelName))
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, member)
+	}
+	for _, member := range members {
+		add(member)
+	}
+	if len(out) == 0 {
+		for _, label := range compactFamilyBlastGroupLabels(fallbackLabels) {
+			add(FamilyBlastMember{
+				LabelName:         label,
+				OriginalLabelName: label,
+				SourceKey:         label,
+				Aliases:           []string{label},
+			})
+		}
+	}
+	return out
+}
+
 func groupsToCustomGroups(groups []FamilyBlastGroup) []FamilyBlastCustomGroup {
 	out := make([]FamilyBlastCustomGroup, 0, len(groups))
 	for _, group := range groups {
+		members := compactFamilyBlastMembers(group.Members, group.Labels)
+		labels := make([]string, 0, len(members))
+		for _, member := range members {
+			labels = append(labels, member.LabelName)
+		}
 		out = append(out, FamilyBlastCustomGroup{
-			Name:   strings.TrimSpace(group.Name),
-			Labels: compactFamilyBlastGroupLabels(group.Labels),
+			Name:    strings.TrimSpace(group.Name),
+			Labels:  labels,
+			Members: members,
 		})
 	}
 	return out
+}
+
+func familyBlastMemberDisplay(member FamilyBlastMember) (string, string) {
+	label := strings.TrimSpace(member.LabelName)
+	if label == "" {
+		label = "(unnamed)"
+	}
+	proteinID := strings.TrimSpace(member.ProteinID)
+	if proteinID == "" {
+		return label, ""
+	}
+	return label, "[" + proteinID + "]"
+}
+
+func familyBlastMemberInlineDisplay(member FamilyBlastMember) string {
+	label := strings.TrimSpace(member.LabelName)
+	if label == "" {
+		label = "(unnamed)"
+	}
+	proteinID := strings.TrimSpace(member.ProteinID)
+	if proteinID == "" {
+		return tview.Escape(label)
+	}
+	return tview.Escape(label) + " [yellow][" + tview.Escape(proteinID) + "][-]"
+}
+
+func familyBlastPreviewMemberText(member FamilyBlastMember) string {
+	return familyBlastMemberInlineDisplay(member)
 }
 
 func visibleTreeNodes(root *tview.TreeNode) []*tview.TreeNode {
@@ -4558,13 +4738,24 @@ func familyGroupUngroupedLabels(groups []FamilyBlastGroup) []string {
 	return out
 }
 
+func familyBlastMemberKey(member FamilyBlastMember) string {
+	return strings.ToLower(firstNonEmptyText(member.SourceKey, member.ProteinID, member.OriginalLabelName, member.LabelName))
+}
+
+func sortFamilyBlastMembersStable(members []FamilyBlastMember) {
+	sort.SliceStable(members, func(i, j int) bool {
+		left := strings.ToLower(firstNonEmptyText(members[i].LabelName, members[i].ProteinID))
+		right := strings.ToLower(firstNonEmptyText(members[j].LabelName, members[j].ProteinID))
+		return left < right
+	})
+}
+
 type familyBlastCustomizeModal struct {
 	app                      *tview.Application
 	root                     tview.Primitive
 	groupedList              *tview.List
 	rightList                *tview.List
 	chooseGroupOverlayHeight int
-	applyInitialFocus        func()
 }
 
 func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Application, result *FamilyBlastResult) *familyBlastCustomizeModal {
@@ -4572,53 +4763,52 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	var mainRoot tview.Primitive
 
 	type editableGroup struct {
-		Name   string
-		Labels []string
+		Name    string
+		Members []FamilyBlastMember
 	}
 	type groupedListRef struct {
-		Group   int
-		Label   string
-		IsGroup bool
+		Group    int
+		Member   int
+		IsGroup  bool
+		MemberID string
 	}
 
 	groups := make([]editableGroup, 0, len(page.Groups))
 	for _, group := range page.Groups {
+		members := compactFamilyBlastMembers(group.Members, group.Labels)
+		sortFamilyBlastMembersStable(members)
 		groups = append(groups, editableGroup{
-			Name:   strings.TrimSpace(group.Name),
-			Labels: compactFamilyBlastGroupLabels(group.Labels),
+			Name:    strings.TrimSpace(group.Name),
+			Members: members,
 		})
 	}
-	ungrouped := compactFamilyBlastGroupLabels(page.Ungrouped)
+	ungrouped := compactFamilyBlastMembers(page.UngroupedMembers, page.Ungrouped)
+	sortFamilyBlastMembersStable(ungrouped)
 	activePane := 0
 	selectedGroup := 0
-	selectedGroupedLabel := ""
+	selectedGroupedMemberID := ""
 	selectedUngrouped := 0
 	statusLine := ""
 	subModalOpen := false
 	var subModalCapture inputCaptureFunc
 	groupedRows := make([]groupedListRef, 0, 16)
 
-	sortStringsStable := func(values []string) {
-		sort.SliceStable(values, func(i, j int) bool {
-			return strings.ToLower(values[i]) < strings.ToLower(values[j])
-		})
-	}
-	sortStringsStable(ungrouped)
-
 	groupedList := tview.NewList()
 	groupedList.SetBorder(true).SetTitle(" Grouped items ").SetTitleAlign(tview.AlignCenter)
 	groupedList.ShowSecondaryText(false)
+	groupedList.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	groupedList.SetSelectedFocusOnly(true)
-	groupedList.SetSelectedTextColor(tcell.ColorBlack)
-	groupedList.SetSelectedBackgroundColor(tcell.ColorWhite)
+	groupedList.SetSelectedTextColor(tcell.ColorWhite)
+	groupedList.SetSelectedBackgroundColor(tcell.ColorBlue)
 	setFocusBorder(groupedList.Box, true)
 
 	rightList := tview.NewList()
 	rightList.SetBorder(true).SetTitle(" Ungrouped items ").SetTitleAlign(tview.AlignCenter)
 	rightList.ShowSecondaryText(false)
+	rightList.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	rightList.SetSelectedFocusOnly(true)
-	rightList.SetSelectedTextColor(tcell.ColorBlack)
-	rightList.SetSelectedBackgroundColor(tcell.ColorWhite)
+	rightList.SetSelectedTextColor(tcell.ColorWhite)
+	rightList.SetSelectedBackgroundColor(tcell.ColorBlue)
 	setFocusBorder(rightList.Box, false)
 
 	statusView := hintView("")
@@ -4685,16 +4875,16 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			if len(groups) == 0 {
 				selectedGroup = 0
 			}
-			selectedGroupedLabel = ""
+			selectedGroupedMemberID = ""
 			return
 		}
 		ref := groupedRows[index]
 		selectedGroup = ref.Group
 		if ref.IsGroup {
-			selectedGroupedLabel = ""
+			selectedGroupedMemberID = ""
 			return
 		}
-		selectedGroupedLabel = ref.Label
+		selectedGroupedMemberID = ref.MemberID
 	}
 
 	var refreshGroupedList func()
@@ -4712,9 +4902,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		return selectedGroup
 	}
-	selectedUngroupedLabel := func() string {
+	selectedUngroupedMember := func() (FamilyBlastMember, bool) {
 		if len(ungrouped) == 0 {
-			return ""
+			return FamilyBlastMember{}, false
 		}
 		if selectedUngrouped < 0 {
 			selectedUngrouped = 0
@@ -4722,55 +4912,56 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		if selectedUngrouped >= len(ungrouped) {
 			selectedUngrouped = len(ungrouped) - 1
 		}
-		return ungrouped[selectedUngrouped]
+		return ungrouped[selectedUngrouped], true
 	}
-	removeUngroupedAt := func(index int) string {
+	removeUngroupedAt := func(index int) (FamilyBlastMember, bool) {
 		if index < 0 || index >= len(ungrouped) {
-			return ""
+			return FamilyBlastMember{}, false
 		}
 		value := ungrouped[index]
 		ungrouped = append(ungrouped[:index], ungrouped[index+1:]...)
 		if selectedUngrouped >= len(ungrouped) && len(ungrouped) > 0 {
 			selectedUngrouped = len(ungrouped) - 1
 		}
-		return value
+		return value, true
 	}
-	removeGroupLabel := func(groupIndex int, label string) bool {
+	removeGroupMember := func(groupIndex int, memberID string) (FamilyBlastMember, bool) {
 		if groupIndex < 0 || groupIndex >= len(groups) {
-			return false
+			return FamilyBlastMember{}, false
 		}
-		for i, existing := range groups[groupIndex].Labels {
-			if strings.EqualFold(existing, label) {
-				groups[groupIndex].Labels = append(groups[groupIndex].Labels[:i], groups[groupIndex].Labels[i+1:]...)
-				return true
+		for i, existing := range groups[groupIndex].Members {
+			if familyBlastMemberKey(existing) == strings.ToLower(strings.TrimSpace(memberID)) {
+				groups[groupIndex].Members = append(groups[groupIndex].Members[:i], groups[groupIndex].Members[i+1:]...)
+				return existing, true
 			}
 		}
-		return false
+		return FamilyBlastMember{}, false
 	}
 	moveSelectedUngroupedToGroup := func(groupIndex int) {
-		label := selectedUngroupedLabel()
-		if label == "" || groupIndex < 0 || groupIndex >= len(groups) {
+		member, ok := selectedUngroupedMember()
+		if !ok || groupIndex < 0 || groupIndex >= len(groups) {
 			return
 		}
 		removeUngroupedAt(selectedUngrouped)
-		groups[groupIndex].Labels = append(groups[groupIndex].Labels, label)
-		sortStringsStable(groups[groupIndex].Labels)
-		statusLine = fmt.Sprintf("Added %s to %s.", label, groups[groupIndex].Name)
+		groups[groupIndex].Members = append(groups[groupIndex].Members, member)
+		sortFamilyBlastMembersStable(groups[groupIndex].Members)
+		statusLine = fmt.Sprintf("Added %s to %s.", member.LabelName, groups[groupIndex].Name)
 		selectedGroup = groupIndex
-		selectedGroupedLabel = label
+		selectedGroupedMemberID = familyBlastMemberKey(member)
 		refreshGroupedList()
 		refreshRightList()
 		refreshStatus()
 	}
-	moveLabelOutOfGroup := func(groupIndex int, label string) {
-		if !removeGroupLabel(groupIndex, label) {
+	moveMemberOutOfGroup := func(groupIndex int, memberID string) {
+		member, ok := removeGroupMember(groupIndex, memberID)
+		if !ok {
 			return
 		}
-		ungrouped = append(ungrouped, label)
-		sortStringsStable(ungrouped)
-		statusLine = fmt.Sprintf("Removed %s from %s.", label, groups[groupIndex].Name)
+		ungrouped = append(ungrouped, member)
+		sortFamilyBlastMembersStable(ungrouped)
+		statusLine = fmt.Sprintf("Removed %s from %s.", member.LabelName, groups[groupIndex].Name)
 		selectedGroup = groupIndex
-		selectedGroupedLabel = ""
+		selectedGroupedMemberID = ""
 		refreshGroupedList()
 		refreshRightList()
 		refreshStatus()
@@ -4779,20 +4970,20 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		if groupIndex < 0 || groupIndex >= len(groups) {
 			return
 		}
-		ungrouped = append(ungrouped, groups[groupIndex].Labels...)
-		sortStringsStable(ungrouped)
+		ungrouped = append(ungrouped, groups[groupIndex].Members...)
+		sortFamilyBlastMembersStable(ungrouped)
 		statusLine = fmt.Sprintf("Deleted group %s.", groups[groupIndex].Name)
 		groups = append(groups[:groupIndex], groups[groupIndex+1:]...)
 		if selectedGroup >= len(groups) && len(groups) > 0 {
 			selectedGroup = len(groups) - 1
 		}
-		selectedGroupedLabel = ""
+		selectedGroupedMemberID = ""
 		refreshGroupedList()
 		refreshRightList()
 		refreshStatus()
 	}
-	showNameInputModal := func(title string, confirmLabel string, onConfirm func(string) string) {
-		input := tview.NewInputField().SetLabel("name ").SetFieldWidth(24)
+	showNameInputModal := func(title string, confirmLabel string, initial string, onConfirm func(string) string) {
+		input := tview.NewInputField().SetLabel("name ").SetText(strings.TrimSpace(initial)).SetFieldWidth(24)
 		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
 		input.SetLabelColor(tview.Styles.SecondaryTextColor)
 		input.SetFieldBackgroundColor(colorPanel)
@@ -4845,7 +5036,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		app.SetFocus(input)
 	}
 	createGroup := func() {
-		showNameInputModal("New group", "Create", func(name string) string {
+		showNameInputModal("New group", "Create", "", func(name string) string {
 			if name == "" {
 				return "Enter a group name."
 			}
@@ -4857,14 +5048,75 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			groups = append(groups, editableGroup{Name: name})
 			selectedGroup = len(groups) - 1
 			statusLine = fmt.Sprintf("Created group %s.", name)
-			selectedGroupedLabel = ""
+			selectedGroupedMemberID = ""
 			refreshGroupedList()
 			refreshStatus()
 			return ""
 		})
 	}
-	showChooseGroupModal := func(label string) {
-		if strings.TrimSpace(label) == "" || len(groups) == 0 {
+	renameSelected := func() {
+		if activePane == 0 {
+			index := groupedList.GetCurrentItem()
+			if index < 0 || index >= len(groupedRows) {
+				return
+			}
+			ref := groupedRows[index]
+			if ref.IsGroup {
+				if ref.Group < 0 || ref.Group >= len(groups) {
+					return
+				}
+				showNameInputModal("Rename group", "Rename", groups[ref.Group].Name, func(name string) string {
+					if name == "" {
+						return "Enter a group name."
+					}
+					for gi, group := range groups {
+						if gi != ref.Group && strings.EqualFold(group.Name, name) {
+							return "That group name already exists."
+						}
+					}
+					groups[ref.Group].Name = name
+					statusLine = fmt.Sprintf("Renamed group to %s.", name)
+					refreshGroupedList()
+					refreshStatus()
+					return ""
+				})
+				return
+			}
+			if ref.Group < 0 || ref.Group >= len(groups) || ref.Member < 0 || ref.Member >= len(groups[ref.Group].Members) {
+				return
+			}
+			showNameInputModal("Rename item labelname", "Rename", groups[ref.Group].Members[ref.Member].LabelName, func(name string) string {
+				if name == "" {
+					return "Enter a labelname."
+				}
+				groups[ref.Group].Members[ref.Member].LabelName = name
+				groups[ref.Group].Members[ref.Member].Aliases = compactFamilyBlastGroupLabels(append(groups[ref.Group].Members[ref.Member].Aliases, name))
+				selectedGroupedMemberID = familyBlastMemberKey(groups[ref.Group].Members[ref.Member])
+				statusLine = fmt.Sprintf("Renamed item to %s.", name)
+				refreshGroupedList()
+				refreshStatus()
+				return ""
+			})
+			return
+		}
+		member, ok := selectedUngroupedMember()
+		if !ok {
+			return
+		}
+		showNameInputModal("Rename item labelname", "Rename", member.LabelName, func(name string) string {
+			if name == "" {
+				return "Enter a labelname."
+			}
+			ungrouped[selectedUngrouped].LabelName = name
+			ungrouped[selectedUngrouped].Aliases = compactFamilyBlastGroupLabels(append(ungrouped[selectedUngrouped].Aliases, name))
+			statusLine = fmt.Sprintf("Renamed item to %s.", name)
+			refreshRightList()
+			refreshStatus()
+			return ""
+		})
+	}
+	showChooseGroupModal := func(member FamilyBlastMember) {
+		if strings.TrimSpace(member.LabelName) == "" || len(groups) == 0 {
 			statusLine = "Create a group first."
 			refreshStatus()
 			return
@@ -4875,7 +5127,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		list.SetSelectedBackgroundColor(tcell.ColorWhite)
 		list.SetBorder(true).SetTitle(" Choose target group ").SetTitleAlign(tview.AlignCenter)
 		for _, group := range groups {
-			list.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Labels)), "", 0, nil)
+			list.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Members)), "", 0, nil)
 		}
 		if idx := selectedGroupIndex(); idx >= 0 {
 			list.SetCurrentItem(idx)
@@ -4891,8 +5143,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			if index < 0 || index >= len(groups) {
 				return
 			}
+			key := familyBlastMemberKey(member)
 			for ui, candidate := range ungrouped {
-				if strings.EqualFold(candidate, label) {
+				if familyBlastMemberKey(candidate) == key {
 					selectedUngrouped = ui
 					break
 				}
@@ -4940,6 +5193,140 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		app.SetRoot(overlay, true)
 		app.SetFocus(list)
 	}
+	selectedItemMember := func() (FamilyBlastMember, func(FamilyBlastMember), bool) {
+		if activePane == 0 {
+			index := groupedList.GetCurrentItem()
+			if index < 0 || index >= len(groupedRows) {
+				return FamilyBlastMember{}, nil, false
+			}
+			ref := groupedRows[index]
+			if ref.IsGroup || ref.Group < 0 || ref.Group >= len(groups) || ref.Member < 0 || ref.Member >= len(groups[ref.Group].Members) {
+				return FamilyBlastMember{}, nil, false
+			}
+			return groups[ref.Group].Members[ref.Member], func(next FamilyBlastMember) {
+				groups[ref.Group].Members[ref.Member] = next
+				selectedGroupedMemberID = familyBlastMemberKey(next)
+				refreshGroupedList()
+				refreshStatus()
+			}, true
+		}
+		if selectedUngrouped < 0 || selectedUngrouped >= len(ungrouped) {
+			return FamilyBlastMember{}, nil, false
+		}
+		return ungrouped[selectedUngrouped], func(next FamilyBlastMember) {
+			ungrouped[selectedUngrouped] = next
+			refreshRightList()
+			refreshStatus()
+		}, true
+	}
+	showAliasModal := func() {
+		member, updateMember, ok := selectedItemMember()
+		if !ok {
+			statusLine = "Select an item to view aliases."
+			refreshStatus()
+			return
+		}
+		aliases := compactFamilyBlastGroupLabels(member.Aliases)
+		if len(aliases) == 0 {
+			aliases = []string{member.LabelName}
+		}
+		list := tview.NewList()
+		list.ShowSecondaryText(false)
+		list.SetSelectedTextColor(tcell.ColorBlack)
+		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetBorder(true).SetTitle(" Alias labelnames ").SetTitleAlign(tview.AlignCenter)
+		for _, alias := range aliases {
+			list.AddItem(alias, "", 0, nil)
+		}
+		closeModal := func() {
+			subModalOpen = false
+			subModalCapture = nil
+			app.SetRoot(mainRoot, true)
+			setPaneFocus(activePane)
+		}
+		selectedAlias := func() string {
+			if len(aliases) == 0 {
+				return ""
+			}
+			index := list.GetCurrentItem()
+			if index < 0 {
+				index = 0
+			}
+			if index >= len(aliases) {
+				index = len(aliases) - 1
+			}
+			return aliases[index]
+		}
+		copyAlias := func() {
+			alias := selectedAlias()
+			if alias == "" {
+				return
+			}
+			if err := writeClipboardText(alias); err != nil {
+				statusLine = "Copy failed: " + err.Error()
+			} else {
+				statusLine = "Copied alias labelname."
+			}
+			refreshStatus()
+		}
+		setAliasAsLabel := func() {
+			alias := selectedAlias()
+			if alias == "" || updateMember == nil {
+				return
+			}
+			member.LabelName = alias
+			member.Aliases = compactFamilyBlastGroupLabels(append(member.Aliases, alias))
+			updateMember(member)
+			statusLine = fmt.Sprintf("Set labelname to %s.", alias)
+			refreshStatus()
+			closeModal()
+		}
+		box := newButtonFlex()
+		box.SetBorder(true)
+		box.SetTitle(" Aliases ")
+		box.SetTitleAlign(tview.AlignCenter)
+		box.AddItem(textBlock("Choose an alias labelname. Copy copies the selected alias; Set as labelname fixes it as this item's labelname."), 3, 0, false)
+		box.AddItem(list, 0, 1, true)
+		addButtonRow(box, buttonRow(
+			buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
+			buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyAlias, Visible: true},
+			buttonSpec{Label: "Set as labelname", Shortcut: "F2", Action: setAliasAsLabel, Visible: true, Primary: true},
+		))
+		subModalOpen = true
+		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			if isCopyShortcut(event) {
+				copyAlias()
+				return nil
+			}
+			if event.Key() == tcell.KeyF2 {
+				setAliasAsLabel()
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape:
+				closeModal()
+				return nil
+			case tcell.KeyEnter:
+				setAliasAsLabel()
+				return nil
+			}
+			if handler := list.InputHandler(); handler != nil {
+				handler(event, func(p tview.Primitive) {
+					if p != nil {
+						app.SetFocus(p)
+					}
+				})
+			}
+			return nil
+		}
+		overlayHeight := minInt(36, maxInt(12, len(aliases)+8))
+		overlay := overlayRootOn(mainRoot, box, 68, overlayHeight)
+		app.SetRoot(overlay, true)
+		app.SetFocus(list)
+	}
 	confirm := func() {
 		if len(groups) == 0 {
 			statusLine = "Create at least one group."
@@ -4947,7 +5334,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			return
 		}
 		for _, group := range groups {
-			if len(group.Labels) < 2 {
+			if len(group.Members) < 2 {
 				statusLine = fmt.Sprintf("Group %s must contain at least 2 items.", group.Name)
 				refreshStatus()
 				return
@@ -4955,9 +5342,14 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		result.CustomGroups = make([]FamilyBlastCustomGroup, 0, len(groups))
 		for _, group := range groups {
+			labels := make([]string, 0, len(group.Members))
+			for _, member := range group.Members {
+				labels = append(labels, member.LabelName)
+			}
 			result.CustomGroups = append(result.CustomGroups, FamilyBlastCustomGroup{
-				Name:   group.Name,
-				Labels: append([]string(nil), group.Labels...),
+				Name:    group.Name,
+				Labels:  labels,
+				Members: append([]FamilyBlastMember(nil), group.Members...),
 			})
 		}
 		app.Stop()
@@ -4969,14 +5361,15 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		currentIndex := -1
 		for gi, group := range groups {
 			groupedRows = append(groupedRows, groupedListRef{Group: gi, IsGroup: true})
-			groupedList.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Labels)), "", 0, nil)
-			if gi == selectedGroup && selectedGroupedLabel == "" {
+			groupedList.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Members)), "", 0, nil)
+			if gi == selectedGroup && selectedGroupedMemberID == "" {
 				currentIndex = len(groupedRows) - 1
 			}
-			for _, label := range group.Labels {
-				groupedRows = append(groupedRows, groupedListRef{Group: gi, Label: label})
-				groupedList.AddItem("  - "+label, "", 0, nil)
-				if gi == selectedGroup && strings.EqualFold(selectedGroupedLabel, label) {
+			for mi, member := range group.Members {
+				memberID := familyBlastMemberKey(member)
+				groupedRows = append(groupedRows, groupedListRef{Group: gi, Member: mi, MemberID: memberID})
+				groupedList.AddItem("  - "+familyBlastMemberInlineDisplay(member), "", 0, nil)
+				if gi == selectedGroup && selectedGroupedMemberID == memberID {
 					currentIndex = len(groupedRows) - 1
 				}
 			}
@@ -4997,13 +5390,13 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			groupedList.SetCurrentItem(currentIndex)
 			applyGroupedSelection(currentIndex)
 		} else {
-			selectedGroupedLabel = ""
+			selectedGroupedMemberID = ""
 		}
 	}
 	refreshRightList = func() {
 		rightList.Clear()
-		for _, label := range ungrouped {
-			rightList.AddItem(label, "", 0, nil)
+		for _, member := range ungrouped {
+			rightList.AddItem(familyBlastMemberInlineDisplay(member), "", 0, nil)
 		}
 		if len(ungrouped) > 0 {
 			if selectedUngrouped >= len(ungrouped) {
@@ -5065,6 +5458,22 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	actionButtons := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; app.Stop() }, Visible: page.AllowBack},
 		buttonSpec{Label: "New group", Shortcut: "Ctrl+N", Action: createGroup, Visible: true},
+		buttonSpec{Label: "Rename", Shortcut: "F2", Action: renameSelected, Visible: true},
+		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: func() {
+			if activePane == 0 {
+				index := groupedList.GetCurrentItem()
+				if index < 0 || index >= len(groupedRows) {
+					return
+				}
+				ref := groupedRows[index]
+				if ref.IsGroup {
+					statusLine = "Select an item to view aliases."
+					refreshStatus()
+					return
+				}
+			}
+			showAliasModal()
+		}, Visible: true},
 		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: func() {
 			if activePane != 0 {
 				return
@@ -5074,8 +5483,8 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				return
 			}
 			ref := groupedRows[index]
-			if !ref.IsGroup && ref.Label != "" {
-				moveLabelOutOfGroup(ref.Group, ref.Label)
+			if !ref.IsGroup && ref.MemberID != "" {
+				moveMemberOutOfGroup(ref.Group, ref.MemberID)
 				return
 			}
 			if ref.IsGroup && ref.Group >= 0 {
@@ -5084,13 +5493,15 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}, Visible: true},
 		buttonSpec{Label: "Add to group", Shortcut: "Enter", Action: func() {
 			if activePane == 1 {
-				showChooseGroupModal(selectedUngroupedLabel())
+				if member, ok := selectedUngroupedMember(); ok {
+					showChooseGroupModal(member)
+				}
 			}
 		}, Visible: true},
 		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Tab switches between grouped and ungrouped panes. Use Up/Down to choose items. Enter on a grouped member removes it from its group. Enter on an ungrouped item opens the target-group picker. Delete removes the selected member or deletes the selected group. Ctrl+N opens the new-group dialog. Ctrl+Enter applies."})
+	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Shift+C copies an alias in the alias dialog. Delete removes/deletes. Ctrl+N creates a group. Ctrl+Enter applies."})
 
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
 	refreshGroupedList()
@@ -5098,28 +5509,6 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	refreshStatus()
 	app.SetRoot(mainRoot, true)
 	setPaneFocus(0)
-	modal.applyInitialFocus = func() {
-		setPaneFocus(activePane)
-	}
-	var initialFocusOnce sync.Once
-	initialFocusReady := make(chan struct{})
-	afterDraw := app.GetAfterDrawFunc()
-	app.SetAfterDrawFunc(func(screen tcell.Screen) {
-		if afterDraw != nil {
-			afterDraw(screen)
-		}
-		initialFocusOnce.Do(func() {
-			close(initialFocusReady)
-		})
-	})
-	go func() {
-		<-initialFocusReady
-		app.QueueUpdateDraw(func() {
-			if modal.applyInitialFocus != nil {
-				modal.applyInitialFocus()
-			}
-		})
-	}()
 	modal.root = mainRoot
 	modal.groupedList = groupedList
 	modal.rightList = rightList
@@ -5173,11 +5562,14 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				return nil
 			}
 			ref := groupedRows[index]
-			if !ref.IsGroup && ref.Label != "" {
-				moveLabelOutOfGroup(ref.Group, ref.Label)
+			if !ref.IsGroup && ref.MemberID != "" {
+				moveMemberOutOfGroup(ref.Group, ref.MemberID)
 			} else if ref.IsGroup && ref.Group >= 0 {
 				deleteGroup(ref.Group)
 			}
+			return nil
+		case tcell.KeyF2:
+			renameSelected()
 			return nil
 		case tcell.KeyEnter:
 			if event.Modifiers()&tcell.ModCtrl != 0 {
@@ -5190,19 +5582,25 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 					return event
 				}
 				ref := groupedRows[index]
-				if !ref.IsGroup && ref.Label != "" {
-					moveLabelOutOfGroup(ref.Group, ref.Label)
+				if !ref.IsGroup && ref.MemberID != "" {
+					moveMemberOutOfGroup(ref.Group, ref.MemberID)
 					return nil
 				}
 				return nil
 			}
 			if activePane == 1 {
-				showChooseGroupModal(selectedUngroupedLabel())
+				if member, ok := selectedUngroupedMember(); ok {
+					showChooseGroupModal(member)
+				}
 				return nil
 			}
 		}
 		if event.Key() == tcell.KeyCtrlN {
 			createGroup()
+			return nil
+		}
+		if shortcutMatchesEvent("Ctrl+L", event) {
+			showAliasModal()
 			return nil
 		}
 		return event
@@ -6382,12 +6780,19 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 	})
 
 	var mu sync.Mutex
+	lastDraw := time.Time{}
 	setStatus := func(text string) {
 		if cancelled.Load() {
 			return
 		}
+		now := time.Now()
 		mu.Lock()
 		status = strings.TrimSpace(text)
+		if now.Sub(lastDraw) < perf.UIThrottle() {
+			mu.Unlock()
+			return
+		}
+		lastDraw = now
 		mu.Unlock()
 		app.QueueUpdateDraw(func() {
 			if cancelled.Load() {
@@ -6411,7 +6816,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(120 * time.Millisecond)
+		ticker := time.NewTicker(perf.UIAnimationTick())
 		defer ticker.Stop()
 		frame := 0
 		for {
@@ -6562,15 +6967,22 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 	})
 
 	var mu sync.Mutex
+	lastDraw := time.Time{}
 	updateStatus := func(next int, message string) {
 		if cancelled.Load() {
 			return
 		}
+		now := time.Now()
 		mu.Lock()
 		current = next
 		if strings.TrimSpace(message) != "" {
 			status = strings.TrimSpace(message)
 		}
+		if now.Sub(lastDraw) < perf.UIThrottle() && next < total {
+			mu.Unlock()
+			return
+		}
+		lastDraw = now
 		mu.Unlock()
 		app.QueueUpdateDraw(func() {
 			if cancelled.Load() {
@@ -6594,7 +7006,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(120 * time.Millisecond)
+		ticker := time.NewTicker(perf.UIAnimationTick())
 		defer ticker.Stop()
 		frame := 0
 		for {
@@ -6761,10 +7173,8 @@ func compareRowOrder(rows []TableRow, leftIndex int, rightIndex int, sortState T
 
 func (t *rowSelectionTable) Draw(screen tcell.Screen) {
 	t.normalizeHorizontalOffset(screen)
-	t.skipLeadingOversizedColumn(screen)
 	t.Table.Draw(screen)
 	t.drawHeaderDivider(screen)
-	t.hidePartialDataColumns(screen)
 }
 
 func (t *rowSelectionTable) normalizeHorizontalOffset(screen tcell.Screen) {
@@ -6788,39 +7198,6 @@ func (t *rowSelectionTable) normalizeHorizontalOffset(screen tcell.Screen) {
 	}
 }
 
-func (t *rowSelectionTable) skipLeadingOversizedColumn(screen tcell.Screen) {
-	_, _, innerWidth, _ := t.GetInnerRect()
-	if innerWidth <= 0 {
-		return
-	}
-	columns := t.GetColumnCount()
-	if columns <= rowSelectionFirstDataColumn {
-		return
-	}
-	fixedWidth := 0
-	for column := 0; column < rowSelectionFirstDataColumn && column < columns; column++ {
-		fixedWidth += tableColumnWidth(t.Table, column) + 1
-	}
-	available := innerWidth - fixedWidth
-	if available <= 0 {
-		return
-	}
-	rowOffset, columnOffset := t.GetOffset()
-	if columnOffset != 0 {
-		return
-	}
-	startColumn := rowSelectionFirstDataColumn + columnOffset
-	if startColumn >= columns || tableColumnWidth(t.Table, startColumn) <= available {
-		return
-	}
-	for column := startColumn + 1; column < columns; column++ {
-		if tableColumnWidth(t.Table, column) <= available {
-			t.SetOffset(rowOffset, column-rowSelectionFirstDataColumn)
-			return
-		}
-	}
-}
-
 func (t *rowSelectionTable) drawHeaderDivider(screen tcell.Screen) {
 	innerX, innerY, innerWidth, _ := t.GetInnerRect()
 	if innerWidth <= 0 {
@@ -6841,133 +7218,14 @@ func (t *rowSelectionTable) drawHeaderDivider(screen tcell.Screen) {
 	}
 }
 
-func (t *rowSelectionTable) hidePartialDataColumns(screen tcell.Screen) {
-	innerX, innerY, innerWidth, innerHeight := t.GetInnerRect()
-	if innerWidth <= 0 || innerHeight <= 0 {
-		return
+func (t *rowSelectionTable) tableColumnWidth(column int) int {
+	if t != nil && column >= 0 && column < len(t.columnWidths) && t.columnWidths[column] > 0 {
+		return t.columnWidths[column]
 	}
-	right := innerX + innerWidth
-	columns := t.GetColumnCount()
-	if columns <= rowSelectionFirstDataColumn {
-		return
+	if t == nil {
+		return 0
 	}
-	visible := map[int][2]int{}
-	for x := innerX; x < right; x++ {
-		_, column := t.CellAt(x, innerY)
-		if column < 0 {
-			continue
-		}
-		span, ok := visible[column]
-		if !ok {
-			visible[column] = [2]int{x, x + 1}
-			continue
-		}
-		span[1] = x + 1
-		visible[column] = span
-	}
-	type visibleColumn struct {
-		column  int
-		span    [2]int
-		partial bool
-	}
-	visibleColumns := make([]visibleColumn, 0, len(visible))
-	completeDataColumns := 0
-	for column, span := range visible {
-		if column < rowSelectionFirstDataColumn {
-			continue
-		}
-		fullWidth := tableColumnWidth(t.Table, column)
-		if fullWidth <= 0 {
-			continue
-		}
-		partial := span[1]-span[0] < fullWidth
-		if !partial {
-			completeDataColumns++
-		}
-		visibleColumns = append(visibleColumns, visibleColumn{
-			column:  column,
-			span:    span,
-			partial: partial,
-		})
-	}
-	if len(visibleColumns) == 0 {
-		return
-	}
-	sort.Slice(visibleColumns, func(i, j int) bool {
-		return visibleColumns[i].span[0] < visibleColumns[j].span[0]
-	})
-	blankStyle := tcell.StyleDefault.Background(tview.Styles.PrimitiveBackgroundColor).Foreground(tview.Styles.PrimitiveBackgroundColor)
-	fillRange := func(left int, rightEdge int) {
-		left = maxInt(left, innerX)
-		rightEdge = minInt(rightEdge, right)
-		if left >= rightEdge {
-			return
-		}
-		for row := innerY; row < innerY+innerHeight; row++ {
-			for column := left; column < rightEdge; column++ {
-				screen.SetContent(column, row, ' ', nil, blankStyle)
-			}
-		}
-	}
-	shiftLeft := func(left int, rightEdge int, amount int) {
-		left = maxInt(left, innerX)
-		rightEdge = minInt(rightEdge, right)
-		if amount <= 0 || left >= rightEdge {
-			return
-		}
-		for row := innerY; row < innerY+innerHeight; row++ {
-			for x := left; x < rightEdge; x++ {
-				src := x + amount
-				if src < right {
-					main, comb, style, width := screen.GetContent(src, row)
-					screen.SetContent(x, row, main, comb, style)
-					if width > 1 {
-						x += width - 1
-					}
-					continue
-				}
-				screen.SetContent(x, row, ' ', nil, blankStyle)
-			}
-		}
-	}
-	if completeDataColumns > 0 {
-		removeRanges := make([][2]int, 0)
-		for _, entry := range visibleColumns {
-			if entry.partial {
-				removeRanges = append(removeRanges, [2]int{maxInt(entry.span[0]-1, innerX), entry.span[1]})
-			}
-		}
-		sort.Slice(removeRanges, func(i, j int) bool {
-			return removeRanges[i][0] < removeRanges[j][0]
-		})
-		shift := 0
-		for _, span := range removeRanges {
-			removeLeft := maxInt(span[0]-shift, innerX)
-			removeRight := maxInt(span[1]-shift, removeLeft)
-			removeWidth := removeRight - removeLeft
-			shiftLeft(removeLeft, right, removeWidth)
-			shift += removeWidth
-		}
-		if shift > 0 {
-			fillRange(maxInt(right-shift, innerX), right)
-		}
-		return
-	}
-	hideFrom := right
-	firstPartialRight := right
-	for _, entry := range visibleColumns {
-		if !entry.partial {
-			continue
-		}
-		if entry.span[0] < hideFrom {
-			hideFrom = entry.span[0]
-			firstPartialRight = entry.span[1]
-		}
-	}
-	hideFrom = firstPartialRight
-	if hideFrom < right {
-		fillRange(maxInt(hideFrom-1, innerX), right)
-	}
+	return tableColumnWidth(t.Table, column)
 }
 
 func tableColumnWidth(table *tview.Table, column int) int {
@@ -6982,6 +7240,58 @@ func tableColumnWidth(table *tview.Table, column int) int {
 		}
 	}
 	return width
+}
+
+func rowSelectionColumnWidths(columns []TableColumn, rows []TableRow, layout rowSelectionLayout, includeGroups bool) []int {
+	widths := make([]int, len(columns)+rowSelectionFirstDataColumn)
+	widths[0] = taggedPaddedWidth("[x]")
+	widths[1] = taggedPaddedWidth("row" + rowSelectionSortArrow(SortDescending))
+	if maxRowWidth := taggedPaddedWidth(strconv.Itoa(len(rows))); maxRowWidth > widths[1] {
+		widths[1] = maxRowWidth
+	}
+	if layout.headerTwoLine {
+		widths[0] = maxInt(widths[0], taggedPaddedWidth(""))
+		widths[1] = maxInt(widths[1], taggedPaddedWidth(""))
+	}
+	for i, column := range columns {
+		width := 0
+		header, subheader := tableHeaderLines(firstNonEmptyText(column.Header, column.ID))
+		for _, value := range []string{header + rowSelectionSortArrow(SortDescending), subheader} {
+			if w := taggedPaddedWidth(value); w > width {
+				width = w
+			}
+		}
+		if column.Width > 0 && column.Width+4 > width {
+			width = column.Width + 4
+		}
+		widths[i+rowSelectionFirstDataColumn] = width
+	}
+	for _, row := range rows {
+		for i, value := range row.Cells {
+			column := i + rowSelectionFirstDataColumn
+			if column >= len(widths) {
+				break
+			}
+			if width := taggedPaddedWidth(value); width > widths[column] {
+				widths[column] = width
+			}
+		}
+		if includeGroups && strings.TrimSpace(row.Group) != "" && rowSelectionFirstDataColumn < len(widths) {
+			if width := taggedPaddedWidth(row.Group); width > widths[rowSelectionFirstDataColumn] {
+				widths[rowSelectionFirstDataColumn] = width
+			}
+		}
+	}
+	for i := range widths {
+		if widths[i] <= 0 {
+			widths[i] = taggedPaddedWidth("")
+		}
+	}
+	return widths
+}
+
+func taggedPaddedWidth(text string) int {
+	return tview.TaggedStringWidth("  " + text + "  ")
 }
 
 func textViewLineCount(text string) int {

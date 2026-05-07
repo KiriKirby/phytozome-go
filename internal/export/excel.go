@@ -80,6 +80,18 @@ func blastHeadersForRows(rows []model.BlastResultRow) []string {
 	return headers
 }
 
+func blastHeaderPlanForRows(rows []model.BlastResultRow) ([]string, []string) {
+	includeUniProt := blastRowsHaveUniProtReference(rows)
+	includeInterPro := blastRowsHaveInterProReference(rows)
+	headerIDs := prompt.BlastExportColumnIDs(sourceDatabaseForBlastRows(rows), includeUniProt, includeInterPro)
+	headers := make([]string, 0, len(headerIDs))
+	options := prompt.ColumnDisplayOptions{DatabaseDisplay: databaseDisplayNameForRows(rows)}
+	for _, id := range headerIDs {
+		headers = append(headers, prompt.ColumnExportHeader(id, options))
+	}
+	return headerIDs, headers
+}
+
 func blastTargetUniProtCanonicalLengthHeader(rows []model.BlastResultRow) string {
 	return databaseDisplayNameForRows(rows) + " target_length / UniProt canonical length (%)"
 }
@@ -288,7 +300,7 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 	headerRow := 1
 	dataStartRow := 2
 
-	headers := blastHeadersForRows(rows)
+	headerIDs, headers := blastHeaderPlanForRows(rows)
 	headerStyles := map[string]int{}
 	for col, header := range headers {
 		cell, err := excelize.CoordinatesToCellName(col+1, headerRow)
@@ -301,15 +313,13 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 		applyBlastHeaderStyle(file, sheet, cell, header, headerStyles)
 	}
 
-	includeUniProt := blastRowsHaveUniProtReference(rows)
-	includeInterPro := blastRowsHaveInterProReference(rows)
 	styleCache := map[string]int{}
 	for idx, row := range rows {
 		rowNumber := idx + 1
 		if options != nil && idx < len(options.RowNumbers) && options.RowNumbers[idx] > 0 {
 			rowNumber = options.RowNumbers[idx]
 		}
-		values := blastRowValues(row, rowNumber-1, includeUniProt, includeInterPro)
+		values := blastRowValuesForHeaderIDs(row, rowNumber-1, headerIDs)
 		cell, err := excelize.CoordinatesToCellName(1, idx+dataStartRow)
 		if err != nil {
 			return fmt.Errorf("build data row start cell: %w", err)
@@ -317,7 +327,7 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 		if err := file.SetSheetRow(sheet, cell, &values); err != nil {
 			return fmt.Errorf("write data row %d: %w", idx+dataStartRow, err)
 		}
-		applyBlastRowCellStyles(file, sheet, idx+dataStartRow, idx, headers, row, options, styleCache)
+		applyBlastRowCellStyles(file, sheet, idx+dataStartRow, idx, headerIDs, row, options, styleCache)
 	}
 
 	if err := file.SetPanes(sheet, &excelize.Panes{
@@ -336,6 +346,15 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 	}
 
 	return nil
+}
+
+func blastRowValuesForHeaderIDs(row model.BlastResultRow, index int, headerIDs []string) []any {
+	rowNumber := index + 1
+	values := make([]any, 0, len(headerIDs))
+	for _, id := range headerIDs {
+		values = append(values, blastExportValue(id, row, rowNumber))
+	}
+	return values
 }
 
 func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata) error {
@@ -382,12 +401,13 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 	return nil
 }
 
-func applyBlastRowCellStyles(file *excelize.File, sheet string, rowNum int, dataIndex int, headers []string, row model.BlastResultRow, options *BlastExcelExportOptions, styleCache map[string]int) {
+func applyBlastRowCellStyles(file *excelize.File, sheet string, rowNum int, dataIndex int, headerIDs []string, row model.BlastResultRow, options *BlastExcelExportOptions, styleCache map[string]int) {
 	if file == nil {
 		return
 	}
-	for col, header := range headers {
-		color := blastExcelCellColor(header, row, originalRowIndexForExcel(options, dataIndex), options)
+	originalRowIndex := originalRowIndexForExcel(options, dataIndex)
+	for col, id := range headerIDs {
+		color := blastExcelCellColorByID(id, row, originalRowIndex, options)
 		if color == "" || color == excelColorDefault {
 			continue
 		}
@@ -409,7 +429,10 @@ func applyBlastHeaderStyle(file *excelize.File, sheet string, cell string, heade
 }
 
 func blastExcelCellColor(header string, row model.BlastResultRow, originalRowIndex int, options *BlastExcelExportOptions) string {
-	id := blastExcelColumnID(header)
+	return blastExcelCellColorByID(blastExcelColumnID(header), row, originalRowIndex, options)
+}
+
+func blastExcelCellColorByID(id string, row model.BlastResultRow, originalRowIndex int, options *BlastExcelExportOptions) string {
 	if id == "row" && originalRowIndex >= 0 && options != nil && originalRowIndex < len(options.FilterFlags) && options.FilterFlags[originalRowIndex] {
 		return excelColorSelectionOff
 	}

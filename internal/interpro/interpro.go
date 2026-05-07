@@ -15,9 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -44,16 +44,16 @@ type Entry struct {
 }
 
 type Match struct {
-	Accession            string
-	Name                 string
-	SourceDatabase       string
-	Type                 string
-	IntegratedAccession  string
-	SignatureAccessions  []string
-	PfamAccessions       []string
-	Regions              []Region
-	CoveragePercent      float64
-	CoverageLength       int
+	Accession           string
+	Name                string
+	SourceDatabase      string
+	Type                string
+	IntegratedAccession string
+	SignatureAccessions []string
+	PfamAccessions      []string
+	Regions             []Region
+	CoveragePercent     float64
+	CoverageLength      int
 }
 
 type Region struct {
@@ -68,7 +68,7 @@ type diskEntry struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 45 * time.Second}
+		httpClient = perf.HTTPClient()
 	}
 	return &Client{
 		httpClient: httpClient,
@@ -270,12 +270,12 @@ type apiResult struct {
 }
 
 type apiEntryMetadata struct {
-	Accession       string                         `json:"accession"`
-	Name            string                         `json:"name"`
-	SourceDatabase  string                         `json:"source_database"`
-	Type            string                         `json:"type"`
-	Integrated      string                         `json:"integrated"`
-	MemberDatabases map[string]map[string]string  `json:"member_databases"`
+	Accession       string                       `json:"accession"`
+	Name            string                       `json:"name"`
+	SourceDatabase  string                       `json:"source_database"`
+	Type            string                       `json:"type"`
+	Integrated      string                       `json:"integrated"`
+	MemberDatabases map[string]map[string]string `json:"member_databases"`
 }
 
 type apiProtein struct {
