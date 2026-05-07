@@ -197,11 +197,12 @@ func inspectBlastGeneratedFilesList(files []exportFileResult) ([]report.Generate
 		typ  string
 		role string
 	}
-	out := make([]report.GeneratedFile, 0, len(files)*3)
+	out := make([]report.GeneratedFile, 0, len(files)*4)
 	for _, fileSet := range files {
 		specs := []fileSpec{
 			{fileSet.ExcelPath, "selected BLAST Excel", "selected BLAST rows exported as the main review workbook"},
 			{fileSet.RawExcelPath, "raw BLAST Excel", "all current BLAST rows exported for audit comparison"},
+			{fileSet.RawTextPath, "raw BLAST peptide text", "all current BLAST peptide sequence records exported for audit comparison"},
 			{fileSet.TextPath, "BLAST peptide text", "BLAST peptide sequence records already produced by text export"},
 		}
 		for _, spec := range specs {
@@ -651,14 +652,17 @@ func blastInterProReport(rows []model.BlastResultRow) report.InterProReferenceRe
 
 func interProSettingsReport(settings model.InterProConservedRegionSettings) []report.NameValue {
 	return []report.NameValue{
-		{Name: "UsePfamAccession", Value: fmt.Sprintf("%t", settings.UsePfamAccession), Explanation: "Shared Pfam accessions contribute to conserved-region evidence."},
-		{Name: "UseInterProAccession", Value: fmt.Sprintf("%t", settings.UseInterProAccession), Explanation: "Exact InterPro accession matches contribute to evidence."},
-		{Name: "UseSignatureAccession", Value: fmt.Sprintf("%t", settings.UseSignatureAccession), Explanation: "Shared member signature accessions contribute to evidence."},
-		{Name: "UseCoverage", Value: fmt.Sprintf("%t", settings.UseCoverage), Explanation: "Coverage thresholds control present versus partial status."},
-		{Name: "PresentMinCoverage", Value: fmt.Sprintf("%.0f", settings.PresentMinCoverage), Explanation: "Minimum matched coverage for present status."},
-		{Name: "PartialMinCoverage", Value: fmt.Sprintf("%.0f", settings.PartialMinCoverage), Explanation: "Minimum matched coverage for partial status."},
-		{Name: "PresentMinMatchedItems", Value: strconv.Itoa(settings.PresentMinMatchedItems), Explanation: "Minimum matched conserved items required for present status."},
-		{Name: "PartialMinMatchedItems", Value: strconv.Itoa(settings.PartialMinMatchedItems), Explanation: "Minimum matched conserved items required for partial status."},
+		{Name: "Match Pfam IDs", Value: fmt.Sprintf("%t", settings.UsePfamAccession), Explanation: "Shared Pfam IDs contribute to the InterPro status label."},
+		{Name: "Match InterPro IDs", Value: fmt.Sprintf("%t", settings.UseInterProAccession), Explanation: "Shared InterPro IDs contribute to the InterPro status label."},
+		{Name: "Match member-database signature IDs", Value: fmt.Sprintf("%t", settings.UseSignatureAccession), Explanation: "Shared member-database signature IDs contribute supporting evidence."},
+		{Name: "Require compatible entry type", Value: fmt.Sprintf("%t", settings.UseEntryType), Explanation: "Entry types such as domain, family, repeat, and site are checked for compatibility."},
+		{Name: "Also compare entry names", Value: fmt.Sprintf("%t", settings.UseEntryName), Explanation: "Entry names are used as weak supporting evidence when enabled."},
+		{Name: "Use coverage cutoffs", Value: fmt.Sprintf("%t", settings.UseCoverage), Explanation: "Coverage thresholds help decide present versus partial status."},
+		{Name: "Use coordinate overlap evidence", Value: fmt.Sprintf("%t", settings.UseMatchRegions), Explanation: "InterPro match-region coordinates contribute supporting evidence."},
+		{Name: "present coverage >= %", Value: fmt.Sprintf("%.0f", settings.PresentMinCoverage), Explanation: "Minimum matched coverage needed for present status."},
+		{Name: "partial coverage >= %", Value: fmt.Sprintf("%.0f", settings.PartialMinCoverage), Explanation: "Minimum matched coverage needed for partial status."},
+		{Name: "present evidence count >=", Value: strconv.Itoa(settings.PresentMinMatchedItems), Explanation: "Minimum number of matched conserved evidence items required for present status."},
+		{Name: "partial evidence count >=", Value: strconv.Itoa(settings.PartialMinMatchedItems), Explanation: "Minimum number of matched conserved evidence items required for partial status."},
 	}
 }
 
@@ -680,9 +684,12 @@ func blastFamilyReportBatch(runs []blastQueryRun) *report.FamilyBlastReport {
 		}
 		group := groups[family]
 		if group == nil {
+			groupSource := firstNonEmpty(strings.TrimSpace(run.Item.FamilyGroupSource), "automatic detection")
+			detectionRule := firstNonEmpty(strings.TrimSpace(run.Item.FamilyDetectionRule), "family labels already computed by workflow")
 			group = &report.FamilyBlastGroupReport{
 				Name:           family,
-				DetectionRule:  "family labels already computed by workflow",
+				GroupSource:    groupSource,
+				DetectionRule:  detectionRule,
 				OutputBaseName: family,
 			}
 			groups[family] = group
@@ -720,21 +727,23 @@ func blastFamilyReportBatch(runs []blastQueryRun) *report.FamilyBlastReport {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	settingsRows := []report.NameValue{
-		{Name: "Enabled", Value: "true", Explanation: "Family BLAST grouping state was present in the exported run."},
-		{Name: "GroupByDetectedPrefix", Value: fmt.Sprintf("%t", familySettings.GroupByDetectedPrefix), Explanation: "Family grouping used detected shared prefixes from query labels and resolved source aliases."},
-		{Name: "MergeRowsByTarget", Value: fmt.Sprintf("%t", familySettings.MergeRowsByTarget), Explanation: "When enabled, rows hitting the same normalized target inside a family are merged into one review/export row."},
-		{Name: "KeepBestHitPerTarget", Value: fmt.Sprintf("%t", familySettings.KeepBestHitPerTarget), Explanation: "When duplicate family-member hits target the same protein or gene, the best-ranked row is retained as the family representative."},
-		{Name: "PrependOnlyFirstQuery", Value: fmt.Sprintf("%t", familySettings.PrependOnlyFirstQuery), Explanation: "Controls the TXT peptide export header block: true prepends only the first family-member query sequence, false prepends every family-member query sequence in family order."},
-		{Name: "MinimumGroupSize", Value: strconv.Itoa(maxInt(familySettings.MinimumGroupSize, 2)), Explanation: "Minimum number of related queries required before the workflow turns them into one Family BLAST review/export unit."},
-		{Name: "StripArabidopsisPrefix", Value: fmt.Sprintf("%t", familySettings.StripArabidopsisPrefix), Explanation: "If enabled, Arabidopsis At/AT prefixes are ignored while deriving the family_name used for grouping."},
-		{Name: "StripLeadingSpeciesPrefix", Value: fmt.Sprintf("%t", familySettings.StripLeadingSpeciesPrefix), Explanation: "If enabled, generic leading species-style prefixes are stripped before family-name detection."},
-		{Name: "StripTrailingQueryIndex", Value: fmt.Sprintf("%t", familySettings.StripTrailingQueryIndex), Explanation: "If enabled, trailing member numbers such as 1/2/3 are removed before family-name detection."},
-		{Name: "StripAfterNumberSuffix", Value: fmt.Sprintf("%t", familySettings.StripAfterNumberSuffix), Explanation: "If enabled, suffix text after the detected family member number is ignored during family-name detection."},
-		{Name: "NormalizeInnerPunctuation", Value: fmt.Sprintf("%t", familySettings.NormalizeInnerPunctuation), Explanation: "If enabled, punctuation variants inside the label are normalized before family-name detection."},
-		{Name: "StripTerminalSubtypeSuffix", Value: fmt.Sprintf("%t", familySettings.StripTerminalSubtypeSuffix), Explanation: "If enabled, subtype markers like -like are stripped before final family-name creation."},
-		{Name: "UseUniProtReference", Value: fmt.Sprintf("%t", familySettings.UseUniProtReference), Explanation: "If enabled, UniProt evidence contributes to duplicate-target merge ranking inside a family."},
-		{Name: "UseInterProReference", Value: fmt.Sprintf("%t", familySettings.UseInterProReference), Explanation: "If enabled, InterPro conserved-region evidence contributes to duplicate-target merge ranking inside a family."},
-		{Name: "RankingTieBreakerOrder", Value: familySettings.RankingTieBreakerOrder, Explanation: "Priority chain used when family rows are compared during merge and export preparation."},
+		{Name: "Group related queries as one family result", Value: "true", Explanation: "Family BLAST grouping state was present in the exported run."},
+		{Name: "Used custom group editor", Value: fmt.Sprintf("%t", familySettings.CustomizeGroups), Explanation: "Whether the proposed groups were opened in the editor and confirmed or changed before running."},
+		{Name: "Detect families from query names automatically", Value: fmt.Sprintf("%t", familySettings.GroupByDetectedPrefix), Explanation: "Shared query-name prefixes and source aliases were used to propose family groups."},
+		{Name: "Merge rows that hit the same target gene/protein", Value: fmt.Sprintf("%t", familySettings.MergeRowsByTarget), Explanation: "Rows hitting the same normalized target inside a family are merged into one review/export row."},
+		{Name: "When merged, keep the strongest member hit", Value: fmt.Sprintf("%t", familySettings.KeepBestHitPerTarget), Explanation: "When several family members hit the same target, the best-ranked row represents that target."},
+		{Name: "TXT export: include only the first query sequence", Value: fmt.Sprintf("%t", familySettings.PrependOnlyFirstQuery), Explanation: "If false, every family-member query sequence is prepended in family order."},
+		{Name: "minimum queries in a family", Value: strconv.Itoa(maxInt(familySettings.MinimumGroupSize, 2)), Explanation: "Minimum number of related queries required before a family review/export unit is formed."},
+		{Name: "Remove Arabidopsis At/AT prefix for grouping", Value: fmt.Sprintf("%t", familySettings.StripArabidopsisPrefix), Explanation: "Arabidopsis At/AT prefixes are ignored only while deriving the family name."},
+		{Name: "Remove leading species-style prefix", Value: fmt.Sprintf("%t", familySettings.StripLeadingSpeciesPrefix), Explanation: "Generic leading species-style prefixes are removed before family-name detection."},
+		{Name: "Remove trailing member number", Value: fmt.Sprintf("%t", familySettings.StripTrailingQueryIndex), Explanation: "Trailing member numbers such as 1/2/3 are removed before grouping."},
+		{Name: "Ignore suffix after a member number", Value: fmt.Sprintf("%t", familySettings.StripAfterNumberSuffix), Explanation: "Suffix text after a detected member number is ignored during family-name detection."},
+		{Name: "Treat punctuation as the same separator", Value: fmt.Sprintf("%t", familySettings.NormalizeInnerPunctuation), Explanation: "Punctuation variants inside labels are normalized before grouping."},
+		{Name: "Remove terminal subtype suffix", Value: fmt.Sprintf("%t", familySettings.StripTerminalSubtypeSuffix), Explanation: "Subtype markers such as -like are stripped before final family-name creation."},
+		{Name: "Keep detected subgroups as separate families", Value: fmt.Sprintf("%t", familySettings.KeepDistinctQuerySubgroups), Explanation: "Detected subgroups remain separate instead of being collapsed into the broader family name."},
+		{Name: "Use UniProt evidence when ranking merged rows", Value: fmt.Sprintf("%t", familySettings.UseUniProtReference), Explanation: "UniProt review, accession, annotation, and length evidence can contribute to duplicate-target ranking."},
+		{Name: "Use InterPro evidence when ranking merged rows", Value: fmt.Sprintf("%t", familySettings.UseInterProReference), Explanation: "InterPro conserved-region evidence can contribute to duplicate-target ranking."},
+		{Name: "best-hit ranking order", Value: familySettings.RankingTieBreakerOrder, Explanation: "Priority chain used when family rows are compared during merge and export preparation."},
 	}
 	return &report.FamilyBlastReport{
 		Settings: settingsRows,
@@ -1636,11 +1645,11 @@ func blastColumnLineage(rows []model.BlastResultRow, database string, program st
 
 func blastExportSettings(baseName string, outputDir string, settings exportSettings, rowNumbers []int, filterFlags []bool) []report.NameValue {
 	return []report.NameValue{
-		{Name: "File base name", Value: baseName, Explanation: "Base name used for selected Excel, raw Excel, peptide text, and report outputs."},
+		{Name: "File base name", Value: baseName, Explanation: "Base name used for selected Excel, raw Excel, peptide text, raw peptide text, and report outputs."},
 		{Name: "Output folder", Value: outputDir, Explanation: "Destination directory for this BLAST export action."},
 		{Name: "Family TXT prepend mode", Value: "first family query only / all family queries when disabled", Explanation: "Family BLAST controls whether TXT prepends only the first family-member query sequence or every family-member query sequence in family order."},
 		{Name: "Write selected Excel", Value: fmt.Sprintf("%t", settings.WriteExcel), Explanation: "Selected BLAST rows are written to the main workbook when true."},
-		{Name: "Write raw Excel", Value: fmt.Sprintf("%t", settings.WriteRawExcel), Explanation: "All current BLAST rows are written to raw workbook when true."},
+		{Name: "Write raw Excel and raw text", Value: fmt.Sprintf("%t", settings.WriteRawExcel), Explanation: "All current BLAST rows are written to _raw.xlsx, and _raw.txt is also written when text export is enabled."},
 		{Name: "Write peptide text", Value: fmt.Sprintf("%t", settings.WriteText), Explanation: "Peptide sequences are fetched during normal export and written only when true."},
 		{Name: "Write report PDF", Value: fmt.Sprintf("%t", settings.WriteReport), Explanation: "One PDF report is written for the current export action when true."},
 		{Name: "rowNumbers", Value: availabilityText(len(rowNumbers) > 0), Explanation: "Selected workbook can preserve original review table row identities."},

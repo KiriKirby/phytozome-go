@@ -70,6 +70,12 @@ const (
 	maxParallelInterProJobs = 24
 )
 
+var (
+	ecNumberLikeLabelPattern      = regexp.MustCompile(`^(?:EC[:\-]?)?[A-Za-z]?\d+(?:\.\d+){2,3}$`)
+	arabidopsisGeneIDLabelPattern = regexp.MustCompile(`(?i)^AT[1-5MC]G\d{5}(?:\.\d+)?$`)
+	lemnaGeneIDLabelPattern       = regexp.MustCompile(`(?i)^SP\d{4}D\d{3}G\d{6}(?:_T\d+)?$`)
+)
+
 type QueryMode string
 
 const (
@@ -78,14 +84,16 @@ const (
 )
 
 type blastQueryItem struct {
-	RawInput       string
-	LabelName      string
-	Sequence       string
-	QuerySource    *model.QuerySequenceSource
-	FamilyName     string
-	MemberLabel    string
-	FamilySources  []*model.QuerySequenceSource
-	FamilySettings model.FamilyBlastSettings
+	RawInput            string
+	LabelName           string
+	Sequence            string
+	QuerySource         *model.QuerySequenceSource
+	FamilyName          string
+	MemberLabel         string
+	FamilyGroupSource   string
+	FamilyDetectionRule string
+	FamilySources       []*model.QuerySequenceSource
+	FamilySettings      model.FamilyBlastSettings
 }
 
 type blastBatchSettings struct {
@@ -120,6 +128,7 @@ type exportSettings struct {
 type exportFileResult struct {
 	ExcelPath       string
 	TextPath        string
+	RawTextPath     string
 	RawExcelPath    string
 	ReportPath      string
 	Steps           []report.GenerationStep
@@ -188,9 +197,11 @@ type familyBlastPlan struct {
 }
 
 type familyBlastGroup struct {
-	Name    string
-	Indexes []int
-	Labels  []string
+	Name          string
+	Indexes       []int
+	Labels        []string
+	GroupSource   string
+	DetectionRule string
 }
 
 type sequenceFetchResult struct {
@@ -1426,22 +1437,56 @@ func (w *BlastWizard) collectFamilyBlastPlan(prepared []blastQueryItem, referenc
 	defaults := model.DefaultFamilyBlastSettings()
 	defaults.UseUniProtReference = references.UseUniProt
 	defaults.UseInterProReference = references.UseInterPro
-	groups := detectFamilyBlastGroups(prepared, defaults)
-	if len(groups) == 0 {
-		return nil, nil
+	settings := defaults
+	for {
+		groups := detectFamilyBlastGroups(prepared, settings)
+		if len(groups) == 0 {
+			return nil, nil
+		}
+		settingsResult, err := w.prompt.FamilyBlastSettings(buildPromptFamilyBlastPreview(prepared, groups), settings, prompt.ErrBackToQueryInput)
+		if err != nil {
+			return nil, err
+		}
+		settings = settingsResult.Settings
+		if settingsResult.Refresh {
+			continue
+		}
+		if !settings.Enabled {
+			return nil, nil
+		}
+		if len(settingsResult.CustomGroups) > 0 {
+			groups = customPromptFamilyBlastGroups(prepared, settingsResult.CustomGroups)
+		} else {
+			groups = detectFamilyBlastGroups(prepared, settings)
+		}
+		if len(groups) == 0 {
+			return nil, nil
+		}
+		return &familyBlastPlan{Settings: settings, Groups: groups}, nil
 	}
-	settings, err := w.prompt.FamilyBlastSettings(promptFamilyBlastGroups(groups), defaults, prompt.ErrBackToQueryInput)
-	if err != nil {
-		return nil, err
+}
+
+func buildPromptFamilyBlastPreview(prepared []blastQueryItem, groups []familyBlastGroup) prompt.FamilyBlastPreview {
+	preview := prompt.FamilyBlastPreview{
+		Groups: promptFamilyBlastGroups(groups),
 	}
-	if !settings.Enabled {
-		return nil, nil
+	grouped := map[int]struct{}{}
+	for _, group := range groups {
+		for _, idx := range group.Indexes {
+			grouped[idx] = struct{}{}
+		}
 	}
-	groups = detectFamilyBlastGroups(prepared, settings)
-	if len(groups) == 0 {
-		return nil, nil
+	for i, item := range prepared {
+		if _, ok := grouped[i]; ok {
+			continue
+		}
+		label := strings.TrimSpace(familyBlastQueryLabel(item))
+		if label == "" {
+			continue
+		}
+		preview.Ungrouped = append(preview.Ungrouped, label)
 	}
-	return &familyBlastPlan{Settings: settings, Groups: groups}, nil
+	return preview
 }
 
 func promptFamilyBlastGroups(groups []familyBlastGroup) []prompt.FamilyBlastGroup {
@@ -1451,6 +1496,46 @@ func promptFamilyBlastGroups(groups []familyBlastGroup) []prompt.FamilyBlastGrou
 			Name:    group.Name,
 			Labels:  append([]string(nil), group.Labels...),
 			Queries: len(group.Indexes),
+		})
+	}
+	return out
+}
+
+func customPromptFamilyBlastGroups(prepared []blastQueryItem, groups []prompt.FamilyBlastGroup) []familyBlastGroup {
+	indexByLabel := make(map[string]int, len(prepared))
+	for i, item := range prepared {
+		label := strings.TrimSpace(familyBlastQueryLabel(item))
+		if label == "" {
+			continue
+		}
+		indexByLabel[strings.ToLower(label)] = i
+	}
+	out := make([]familyBlastGroup, 0, len(groups))
+	for _, group := range groups {
+		indexes := make([]int, 0, len(group.Labels))
+		labels := make([]string, 0, len(group.Labels))
+		seen := map[int]struct{}{}
+		for _, label := range group.Labels {
+			idx, ok := indexByLabel[strings.ToLower(strings.TrimSpace(label))]
+			if !ok {
+				continue
+			}
+			if _, exists := seen[idx]; exists {
+				continue
+			}
+			seen[idx] = struct{}{}
+			indexes = append(indexes, idx)
+			labels = append(labels, strings.TrimSpace(label))
+		}
+		if len(indexes) < 2 {
+			continue
+		}
+		out = append(out, familyBlastGroup{
+			Name:          strings.TrimSpace(group.Name),
+			Indexes:       indexes,
+			Labels:        labels,
+			GroupSource:   "customized groups",
+			DetectionRule: "customized in Family BLAST group editor",
 		})
 	}
 	return out
@@ -3015,12 +3100,41 @@ func detectFamilyBlastGroups(items []blastQueryItem, settings model.FamilyBlastS
 			family = groupKey[:pipe]
 		}
 		out = append(out, familyBlastGroup{
-			Name:    family,
-			Indexes: append([]int(nil), indexes...),
-			Labels:  uniqueStrings(labelsByFamily[groupKey]),
+			Name:          family,
+			Indexes:       append([]int(nil), indexes...),
+			Labels:        uniqueStrings(labelsByFamily[groupKey]),
+			GroupSource:   "automatic detection",
+			DetectionRule: familyBlastAutoDetectionRule(settings),
 		})
 	}
 	return out
+}
+
+func familyBlastAutoDetectionRule(settings model.FamilyBlastSettings) string {
+	parts := []string{"auto-detected from query labels"}
+	modifiers := make([]string, 0, 6)
+	if settings.StripArabidopsisPrefix {
+		modifiers = append(modifiers, "strip At/AT")
+	}
+	if settings.StripLeadingSpeciesPrefix {
+		modifiers = append(modifiers, "strip species prefix")
+	}
+	if settings.StripTrailingQueryIndex {
+		modifiers = append(modifiers, "strip trailing index")
+	}
+	if settings.StripAfterNumberSuffix {
+		modifiers = append(modifiers, "ignore post-number suffix")
+	}
+	if settings.StripTerminalSubtypeSuffix {
+		modifiers = append(modifiers, "strip subtype suffix")
+	}
+	if settings.KeepDistinctQuerySubgroups {
+		modifiers = append(modifiers, "keep subgroups distinct")
+	}
+	if len(modifiers) == 0 {
+		return parts[0]
+	}
+	return parts[0] + "; " + strings.Join(modifiers, ", ")
 }
 
 func familyBlastSubgroupKey(item blastQueryItem, settings model.FamilyBlastSettings) string {
@@ -3120,7 +3234,7 @@ func familyBlastCanonicalLabel(label string, settings model.FamilyBlastSettings)
 }
 
 func normalizeFamilyPunctuation(label string) string {
-	replacer := strings.NewReplacer("’", "", "'", "", ".", ".", "-", "-", "_", "_", "/", "-", ":", "-", " ", "")
+	replacer := strings.NewReplacer("’", "'", ".", ".", "-", "-", "_", "_", "/", "-", ":", "-", " ", "")
 	return replacer.Replace(label)
 }
 
@@ -3291,13 +3405,15 @@ func buildFamilyBlastRun(group familyBlastGroup, prepared []blastQueryItem, runs
 	}
 	rows = annotateFamilyBlastConsensusRows(rows, group.Name, uniqueStrings(memberLabels), uniqueStrings(aliasTexts))
 	item := blastQueryItem{
-		RawInput:       strings.Join(memberLabels, "\n"),
-		LabelName:      group.Name,
-		FamilyName:     group.Name,
-		MemberLabel:    strings.Join(uniqueStrings(memberLabels), "\n"),
-		QuerySource:    sourceRuns[0].Item.QuerySource,
-		FamilySources:  querySources,
-		FamilySettings: settings,
+		RawInput:            strings.Join(memberLabels, "\n"),
+		LabelName:           group.Name,
+		FamilyName:          group.Name,
+		MemberLabel:         strings.Join(uniqueStrings(memberLabels), "\n"),
+		FamilyGroupSource:   strings.TrimSpace(group.GroupSource),
+		FamilyDetectionRule: strings.TrimSpace(group.DetectionRule),
+		QuerySource:         sourceRuns[0].Item.QuerySource,
+		FamilySources:       querySources,
+		FamilySettings:      settings,
 	}
 	result := sourceRuns[0].Results
 	result.Rows = rows
@@ -3897,10 +4013,6 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 			go func() {
 				defer workers.Done()
 				for idx := range jobs {
-					if strings.TrimSpace(out[idx].LabelName) != "" {
-						results <- labelResult{index: idx, label: out[idx].LabelName}
-						continue
-					}
 					results <- labelResult{
 						index: idx,
 						label: w.autoIdentifyBlastLabel(labelCtx, phytozomeSource, selected, out[idx]),
@@ -3984,7 +4096,7 @@ func blastAutoLabelCandidates(item blastQueryItem) []string {
 	out := make([]string, 0, 12)
 	add := func(value string) {
 		value = strings.TrimSpace(value)
-		if value == "" {
+		if value == "" || !isTrustedAutoLabelCandidate(value) {
 			return
 		}
 		key := strings.ToUpper(value)
@@ -4056,29 +4168,30 @@ func blastLabelFallbackSpecies(selected model.SpeciesCandidate, candidates []mod
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabelFromPhytozome(ctx context.Context, phytozomeSource source.DataSource, species model.SpeciesCandidate, item blastQueryItem) string {
+	candidates := make([]string, 0, 4)
 	for _, term := range blastLabelSearchTerms(item) {
 		rows, err := phytozomeSource.SearchKeywordRows(ctx, species, term)
 		if err != nil {
 			continue
 		}
 		if label := keywordLabelFromPhytozomeRows(rows); label != "" {
-			return label
+			candidates = append(candidates, label)
 		}
 	}
-	return ""
+	return bestTrustedAutoLabel(candidates...)
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabel(ctx context.Context, phytozomeSource source.DataSource, selected model.SpeciesCandidate, item blastQueryItem) string {
-	if label := fastaHeaderLabelNameFromInput(item.RawInput); label != "" {
-		return label
-	}
-	if label := querySourceAliasLabel(item.QuerySource); label != "" {
-		return label
-	}
+	candidates := make([]string, 0, 6)
+	candidates = append(candidates, fastaHeaderLabelNameFromInput(item.RawInput))
+	candidates = append(candidates, querySourceAliasLabel(item.QuerySource))
 	if labelSpecies, ok := w.phytozomeKeywordLabelSpecies(ctx, selected); ok {
 		if label := w.autoIdentifyBlastLabelFromPhytozome(ctx, phytozomeSource, labelSpecies, item); label != "" {
-			return label
+			candidates = append(candidates, label)
 		}
+	}
+	if label := bestTrustedAutoLabel(candidates...); label != "" {
+		return label
 	}
 	return autoIdentifyBlastLabel(item)
 }
@@ -4698,6 +4811,36 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 		files.Steps = append(files.Steps, keywordReportStep("Write raw BLAST Excel", stepStart, time.Now(), "ok", fmt.Sprintf("%d current rows written", len(allRows))))
 		files.RawExcelPath = rawPath
 	}
+	if settings.WriteRawExcel && settings.WriteText {
+		rawTextPath := filepath.Join(outputDir, fileBaseName+"_raw.txt")
+		exportMetadata := buildExportMetadata(displayName, querySource)
+		stepStart := time.Now()
+		rawRecords, err := w.fetchBlastRecordsForExport(ctx, allRows, exportMetadata)
+		if err != nil {
+			files.Steps = append(files.Steps, keywordReportStep("Fetch raw BLAST peptide sequences", stepStart, time.Now(), "failed", err.Error()))
+			return exportFileResult{}, err
+		}
+		files.Steps = append(files.Steps, keywordReportStep("Fetch raw BLAST peptide sequences", stepStart, time.Now(), "ok", fmt.Sprintf("%d peptide records available", len(rawRecords))))
+		hitRecords := append([]model.ProteinSequenceRecord(nil), rawRecords...)
+		prependStart := time.Now()
+		rawRecords = prependQuerySequenceRecord(rawRecords, querySource, txtHeaderLabel)
+		files.Steps = append(files.Steps, keywordReportStep("Prepend query sequence record to raw text", prependStart, time.Now(), "ok", blastQueryPrependStepDetails(querySource, rawRecords, hitRecords)))
+		writeStart := time.Now()
+		writeRawText := func() error {
+			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+		}
+		if w.suppressTaskModals {
+			err = writeRawText()
+		} else {
+			err = withSpinner(w.out, "Writing raw peptide text file...", writeRawText)
+		}
+		if err != nil {
+			files.Steps = append(files.Steps, keywordReportStep("Write raw BLAST peptide text", writeStart, time.Now(), "failed", err.Error()))
+			return exportFileResult{}, err
+		}
+		files.Steps = append(files.Steps, keywordReportStep("Write raw BLAST peptide text", writeStart, time.Now(), "ok", fmt.Sprintf("%d sequence records written", len(rawRecords))))
+		files.RawTextPath = rawTextPath
+	}
 	if settings.WriteText {
 		textPath := filepath.Join(outputDir, fileBaseName+".txt")
 		exportMetadata := buildExportMetadata(displayName, querySource)
@@ -4801,6 +4944,37 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		files.Steps = append(files.Steps, keywordReportStep("Write raw Family BLAST Excel", stepStart, time.Now(), "ok", fmt.Sprintf("%d current family rows written", len(allRows))))
 		files.RawExcelPath = rawPath
 	}
+	if settings.WriteRawExcel && settings.WriteText {
+		rawTextPath := filepath.Join(outputDir, fileBaseName+"_raw.txt")
+		stepStart := time.Now()
+		rawRecords, err := w.fetchBlastRecordsForExport(ctx, allRows, nil)
+		if err != nil {
+			files.Steps = append(files.Steps, keywordReportStep("Fetch raw Family BLAST peptide sequences", stepStart, time.Now(), "failed", err.Error()))
+			return exportFileResult{}, err
+		}
+		files.Steps = append(files.Steps, keywordReportStep("Fetch raw Family BLAST peptide sequences", stepStart, time.Now(), "ok", fmt.Sprintf("%d peptide records available", len(rawRecords))))
+		hitRecords := append([]model.ProteinSequenceRecord(nil), rawRecords...)
+		prependStart := time.Now()
+		var prependedQueries int
+		rawRecords, prependedQueries = prependFamilyQuerySequenceRecords(rawRecords, querySources, txtHeaderLabel, familySettings)
+		files.Steps = append(files.Steps, keywordReportStep("Prepend Family BLAST query sequence records to raw text", prependStart, time.Now(), "ok", familyQueryPrependStepDetails(prependedQueries, len(querySources), familySettings.PrependOnlyFirstQuery, len(hitRecords))))
+		writeStart := time.Now()
+		writeRawText := func() error {
+			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+		}
+		var writeErr error
+		if w.suppressTaskModals {
+			writeErr = writeRawText()
+		} else {
+			writeErr = withSpinner(w.out, "Writing raw peptide text file...", writeRawText)
+		}
+		if writeErr != nil {
+			files.Steps = append(files.Steps, keywordReportStep("Write raw Family BLAST peptide text", writeStart, time.Now(), "failed", writeErr.Error()))
+			return exportFileResult{}, writeErr
+		}
+		files.Steps = append(files.Steps, keywordReportStep("Write raw Family BLAST peptide text", writeStart, time.Now(), "ok", fmt.Sprintf("%d sequence records written", len(rawRecords))))
+		files.RawTextPath = rawTextPath
+	}
 	if settings.WriteText {
 		textPath := filepath.Join(outputDir, fileBaseName+".txt")
 		records := prefetchedTextRecords
@@ -4816,17 +4990,8 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		}
 		hitRecords := append([]model.ProteinSequenceRecord(nil), records...)
 		prependStart := time.Now()
-		prependedQueries := 0
-		queryIndexes := familyTXTQueryIndexes(querySources, familySettings)
-		for i := len(queryIndexes) - 1; i >= 0; i-- {
-			source := querySources[queryIndexes[i]]
-			if source == nil {
-				continue
-			}
-			headerLabel := familyTXTHeaderLabel(source, txtHeaderLabel)
-			records = prependQuerySequenceRecord(records, source, headerLabel)
-			prependedQueries++
-		}
+		var prependedQueries int
+		records, prependedQueries = prependFamilyQuerySequenceRecords(records, querySources, txtHeaderLabel, familySettings)
 		files.Steps = append(files.Steps, keywordReportStep("Prepend Family BLAST query sequence records", prependStart, time.Now(), "ok", familyQueryPrependStepDetails(prependedQueries, len(querySources), familySettings.PrependOnlyFirstQuery, len(hitRecords))))
 		writeText := func() error {
 			return export.WriteProteinSequencesText(textPath, records)
@@ -4900,6 +5065,21 @@ func familySequenceHeaderMode(onlyFirst bool) string {
 		return "family text export prepends only the first family member query header; hit records append selected row label_name"
 	}
 	return "family text export prepends all family member query headers in run order; hit records append selected row label_name"
+}
+
+func prependFamilyQuerySequenceRecords(records []model.ProteinSequenceRecord, querySources []*model.QuerySequenceSource, fallback string, familySettings model.FamilyBlastSettings) ([]model.ProteinSequenceRecord, int) {
+	prepended := 0
+	queryIndexes := familyTXTQueryIndexes(querySources, familySettings)
+	for i := len(queryIndexes) - 1; i >= 0; i-- {
+		source := querySources[queryIndexes[i]]
+		if source == nil {
+			continue
+		}
+		headerLabel := familyTXTHeaderLabel(source, fallback)
+		records = prependQuerySequenceRecord(records, source, headerLabel)
+		prepended++
+	}
+	return records, prepended
 }
 
 func (w *BlastWizard) exportBlastExcelAndFetchRecords(ctx context.Context, rows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, excelPath string, metadata *model.ExportMetadata) ([]model.ProteinSequenceRecord, error) {
@@ -4986,6 +5166,9 @@ func filesSummary(files exportFileResult) string {
 	}
 	if strings.TrimSpace(files.RawExcelPath) != "" {
 		lines = append(lines, "Raw Excel\n"+files.RawExcelPath)
+	}
+	if strings.TrimSpace(files.RawTextPath) != "" {
+		lines = append(lines, "Raw text\n"+files.RawTextPath)
 	}
 	if strings.TrimSpace(files.ReportPath) != "" {
 		lines = append(lines, "Data analysis report (PDF)\n"+files.ReportPath)
@@ -5506,7 +5689,7 @@ func autoIdentifyKeywordGroupLabel(group model.KeywordSearchGroup) string {
 		return label
 	}
 	for _, row := range group.Rows {
-		if label := rowKeywordLabelName(row); label != "" {
+		if label := bestTrustedAutoLabel(rowKeywordLabelName(row)); label != "" {
 			return label
 		}
 	}
@@ -5612,27 +5795,15 @@ func keywordLabelFromPhytozomeRows(rows []model.KeywordResultRow) string {
 }
 
 func bestKeywordRowLabel(rows []model.KeywordResultRow) string {
-	best := ""
-	bestScore := -1
+	candidates := make([]string, 0, len(rows)*3)
 	for _, row := range rows {
-		candidates := []string{
+		candidates = append(candidates,
 			rowKeywordLabelName(row),
 			bestAlias(row.Aliases),
 			labelFromAutoDefine(row.AutoDefine),
-		}
-		for _, candidate := range candidates {
-			candidate = strings.TrimSpace(candidate)
-			if candidate == "" {
-				continue
-			}
-			score := aliasPreferenceScore(candidate)
-			if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
-				best = candidate
-				bestScore = score
-			}
-		}
+		)
 	}
-	return best
+	return bestTrustedAutoLabel(candidates...)
 }
 
 func labelFromAutoDefine(value string) string {
@@ -5888,7 +6059,7 @@ func keywordRowLabelName(row model.KeywordResultRow) string {
 }
 
 func rowKeywordLabelName(row model.KeywordResultRow) string {
-	return strings.TrimSpace(row.LabelName)
+	return bestTrustedAutoLabel(strings.TrimSpace(row.LabelName))
 }
 
 func defaultKeywordExportLabel(rows []model.KeywordResultRow, groups []model.KeywordSearchGroup) string {
@@ -5975,7 +6146,7 @@ func bestAlias(value string) string {
 	bestScore := -1
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		if part == "" {
+		if part == "" || !isTrustedAutoLabelCandidate(part) {
 			continue
 		}
 		score := aliasPreferenceScore(part) + queryAliasPrimarySymbolBonus(part)
@@ -6104,24 +6275,15 @@ func aliasHasInternalDigitPattern(value string) bool {
 }
 
 func autoIdentifyBlastLabel(item blastQueryItem) string {
-	if label := fastaHeaderLabelNameFromInput(item.RawInput); label != "" {
+	candidates := []string{
+		fastaHeaderLabelNameFromInput(item.RawInput),
+		querySourceAliasLabel(item.QuerySource),
+		strings.TrimSpace(item.LabelName),
+	}
+	if label := bestTrustedAutoLabel(candidates...); label != "" {
 		return label
 	}
-	if label := querySourceAliasLabel(item.QuerySource); label != "" {
-		return label
-	}
-	if item.QuerySource != nil {
-		if label := firstNonEmpty(item.QuerySource.ProteinID, item.QuerySource.TranscriptID, item.QuerySource.GeneID, item.QuerySource.OrganismShort); label != "" {
-			return label
-		}
-	}
-	if header, _ := splitFastaHeaderAndSequence(item.RawInput); header != "" {
-		if label := fastaHeaderKeywordSearchTerm(header); label != "" {
-			return label
-		}
-		return strings.TrimSpace(stripTrailingParentheticalLabel(header))
-	}
-	return ""
+	return blastLabelIdentityFallback(item)
 }
 
 func fastaHeaderLabelNameFromInput(input string) string {
@@ -6162,11 +6324,133 @@ func querySourceAliasLabel(source *model.QuerySequenceSource) string {
 	if source == nil {
 		return ""
 	}
-	if label := strings.TrimSpace(source.LabelName); label != "" {
+	if label := bestTrustedAutoLabel(strings.TrimSpace(source.LabelName), bestAlias(source.Aliases)); label != "" {
 		return label
 	}
-	if label := bestAlias(source.Aliases); label != "" {
-		return label
+	if source != nil && isTrustedAutoLabelCandidate(strings.TrimSpace(source.AutoDefine)) {
+		return strings.TrimSpace(source.AutoDefine)
+	}
+	return ""
+}
+
+func bestTrustedAutoLabel(candidates ...string) string {
+	best := ""
+	bestScore := -1
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || !isTrustedAutoLabelCandidate(candidate) {
+			continue
+		}
+		score := trustedAutoLabelScore(candidate)
+		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
+			best = candidate
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func isTrustedAutoLabelCandidate(value string) bool {
+	return trustedAutoLabelScore(value) >= 12
+}
+
+func trustedAutoLabelScore(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return -1
+	}
+	if looksLikeECNumberLabel(value) {
+		return -100
+	}
+	if looksLikeDatabaseIdentifierLabel(value) {
+		return -80
+	}
+	score := aliasPreferenceScore(value)
+	hasDigit := false
+	letterCount := 0
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'):
+			letterCount++
+		}
+	}
+	lowerCount := lowercaseCount(value)
+	switch {
+	case lowerCount >= 3:
+		score -= 16
+	case lowerCount == 2:
+		score -= 8
+	case lowerCount == 1:
+		score -= 2
+	}
+	if strings.ContainsAny(value, "._:/") {
+		score -= 4
+	}
+	if strings.Contains(value, ".") {
+		score -= strings.Count(value, ".") * 8
+	}
+	if strings.Contains(value, "'") {
+		score += 6
+	}
+	if !hasDigit {
+		switch {
+		case letterCount > 8:
+			score -= 24
+		case letterCount > 6:
+			score -= 14
+		case letterCount > 4:
+			score -= 6
+		}
+	}
+	return score
+}
+
+func lowercaseCount(value string) int {
+	count := 0
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			count++
+		}
+	}
+	return count
+}
+
+func looksLikeECNumberLabel(value string) bool {
+	return ecNumberLikeLabelPattern.MatchString(strings.TrimSpace(value))
+}
+
+func looksLikeDatabaseIdentifierLabel(value string) bool {
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "":
+		return false
+	case strings.HasPrefix(strings.ToUpper(value), "PAC:"):
+		return true
+	case arabidopsisGeneIDLabelPattern.MatchString(value):
+		return true
+	case lemnaGeneIDLabelPattern.MatchString(value):
+		return true
+	default:
+		return false
+	}
+}
+
+func blastLabelIdentityFallback(item blastQueryItem) string {
+	if item.QuerySource != nil {
+		if label := firstNonEmpty(
+			strings.TrimSpace(item.QuerySource.ProteinID),
+			strings.TrimSpace(item.QuerySource.TranscriptID),
+			strings.TrimSpace(item.QuerySource.GeneID),
+		); label != "" {
+			return label
+		}
+	}
+	if header, _ := splitFastaHeaderAndSequence(item.RawInput); header != "" {
+		if id := fastaHeaderPrimaryID(header); id != "" {
+			return id
+		}
 	}
 	return ""
 }
@@ -6264,6 +6548,33 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		}
 		steps = append(steps, keywordReportStep("Write raw Excel", stepStart, time.Now(), "ok", fmt.Sprintf("%d current rows written", len(allRows))))
 		files.RawExcelPath = rawPath
+	}
+	if settings.WriteRawExcel && settings.WriteText {
+		rawTextPath := filepath.Join(outputDir, baseName+"_raw.txt")
+		fetchStart := time.Now()
+		var (
+			rawRecords []model.ProteinSequenceRecord
+			err        error
+		)
+		if w.suppressTaskModals {
+			rawRecords, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, allRows, nil)
+		} else {
+			rawRecords, err = w.fetchKeywordProteinSequenceRecords(ctx, allRows)
+		}
+		if err != nil {
+			steps = append(steps, keywordReportStep("Fetch/use raw peptide sequences", fetchStart, time.Now(), "failed", err.Error()))
+			return err
+		}
+		steps = append(steps, keywordReportStep("Fetch/use raw peptide sequences", fetchStart, time.Now(), "ok", fmt.Sprintf("%d sequence records available", len(rawRecords))))
+		writeStart := time.Now()
+		if err := withSpinner(w.out, "Writing raw peptide text file...", func() error {
+			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+		}); err != nil {
+			steps = append(steps, keywordReportStep("Write raw peptide text", writeStart, time.Now(), "failed", err.Error()))
+			return err
+		}
+		steps = append(steps, keywordReportStep("Write raw peptide text", writeStart, time.Now(), "ok", fmt.Sprintf("%d peptide records written", len(rawRecords))))
+		files.RawTextPath = rawTextPath
 	}
 	var sequenceRecords []model.ProteinSequenceRecord
 	var sequenceAudit report.SequenceAudit

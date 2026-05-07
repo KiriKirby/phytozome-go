@@ -99,6 +99,56 @@ func TestExportSettingsFromPromptKeepsFileTypeToggles(t *testing.T) {
 	}
 }
 
+func TestFilesSummaryIncludesRawText(t *testing.T) {
+	summary := filesSummary(exportFileResult{
+		TextPath:     filepath.Join("out", "PAL.txt"),
+		RawExcelPath: filepath.Join("out", "PAL_raw.xlsx"),
+		RawTextPath:  filepath.Join("out", "PAL_raw.txt"),
+	})
+
+	if !strings.Contains(summary, "Raw text") || !strings.Contains(summary, "PAL_raw.txt") {
+		t.Fatalf("raw text missing from files summary:\n%s", summary)
+	}
+}
+
+func TestInspectBlastGeneratedFilesIncludesRawText(t *testing.T) {
+	dir := t.TempDir()
+	rawTextPath := filepath.Join(dir, "PAL_raw.txt")
+	if err := os.WriteFile(rawTextPath, []byte(">PAL1\nMAAA\n"), 0o600); err != nil {
+		t.Fatalf("write raw text fixture: %v", err)
+	}
+
+	files, err := inspectBlastGeneratedFilesList([]exportFileResult{{RawTextPath: rawTextPath}})
+	if err != nil {
+		t.Fatalf("inspect generated files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("generated file count = %d, want 1", len(files))
+	}
+	if files[0].Name != "PAL_raw.txt" || files[0].Type != "raw BLAST peptide text" {
+		t.Fatalf("raw text file metadata not captured: %#v", files[0])
+	}
+}
+
+func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
+	dir := t.TempDir()
+	rawTextPath := filepath.Join(dir, "keyword_raw.txt")
+	if err := os.WriteFile(rawTextPath, []byte(">hit\nMAAA\n"), 0o600); err != nil {
+		t.Fatalf("write raw text fixture: %v", err)
+	}
+
+	files, err := inspectKeywordGeneratedFiles(exportFileResult{RawTextPath: rawTextPath}, report.SequenceAudit{})
+	if err != nil {
+		t.Fatalf("inspect generated files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("generated file count = %d, want 1", len(files))
+	}
+	if files[0].Name != "keyword_raw.txt" || files[0].Type != "raw peptide text" {
+		t.Fatalf("raw keyword text file metadata not captured: %#v", files[0])
+	}
+}
+
 func TestBuildKeywordReportDataRendersPDFForPhytozome(t *testing.T) {
 	now := time.Now()
 	row := model.KeywordResultRow{
@@ -309,6 +359,24 @@ func TestDetectFamilyBlastGroupsCanCollapseDistinctQuerySubgroupsWhenDisabled(t 
 	}
 }
 
+func TestDetectFamilyBlastGroupsKeepsApostropheFamiliesDistinct(t *testing.T) {
+	items := []blastQueryItem{
+		{LabelName: "C3H"},
+		{LabelName: "C3'H"},
+	}
+	settings := model.DefaultFamilyBlastSettings()
+	groups := detectFamilyBlastGroups(items, settings)
+	if len(groups) != 0 {
+		t.Fatalf("group count = %d, want 0 because C3H and C3'H should stay distinct: %#v", len(groups), groups)
+	}
+	if got := detectFamilyName("C3H", settings); got != "C3H" {
+		t.Fatalf("detectFamilyName(C3H)=%q want C3H", got)
+	}
+	if got := detectFamilyName("C3'H", settings); got != "C3'H" {
+		t.Fatalf("detectFamilyName(C3'H)=%q want C3'H", got)
+	}
+}
+
 func TestApplyFamilyBlastPlanMergesRunsByTarget(t *testing.T) {
 	prepared := []blastQueryItem{{LabelName: "PAL1"}, {LabelName: "PAL2"}}
 	runs := []blastQueryRun{
@@ -392,6 +460,110 @@ func TestApplyFamilyBlastPlanUsesExternalReferenceEvidenceWhenMerging(t *testing
 	}
 	if got := mergedRuns[0].Results.Rows[0].LabelName; got != "PAL2" {
 		t.Fatalf("reference-supported row should win duplicate target merge, got %q", got)
+	}
+}
+
+func TestCustomPromptFamilyBlastGroupsMapsLabelsBackToPreparedIndexes(t *testing.T) {
+	prepared := []blastQueryItem{
+		{LabelName: "PAL1"},
+		{LabelName: "PAL2"},
+		{LabelName: "CCR1"},
+	}
+	custom := []prompt.FamilyBlastGroup{{
+		Name:   "PAL",
+		Labels: []string{"PAL2", "PAL1"},
+	}}
+	groups := customPromptFamilyBlastGroups(prepared, custom)
+	if len(groups) != 1 {
+		t.Fatalf("group count = %d, want 1", len(groups))
+	}
+	if groups[0].Name != "PAL" {
+		t.Fatalf("group name = %q, want PAL", groups[0].Name)
+	}
+	if groups[0].GroupSource != "customized groups" {
+		t.Fatalf("group source = %q, want customized groups", groups[0].GroupSource)
+	}
+	if groups[0].DetectionRule != "customized in Family BLAST group editor" {
+		t.Fatalf("detection rule = %q", groups[0].DetectionRule)
+	}
+	if len(groups[0].Indexes) != 2 || groups[0].Indexes[0] != 1 || groups[0].Indexes[1] != 0 {
+		t.Fatalf("unexpected mapped indexes: %#v", groups[0].Indexes)
+	}
+}
+
+func TestDetectFamilyBlastGroupsAnnotatesAutomaticSource(t *testing.T) {
+	items := []blastQueryItem{{LabelName: "PAL1"}, {LabelName: "PAL2"}}
+	groups := detectFamilyBlastGroups(items, model.DefaultFamilyBlastSettings())
+	if len(groups) != 1 {
+		t.Fatalf("group count = %d, want 1", len(groups))
+	}
+	if groups[0].GroupSource != "automatic detection" {
+		t.Fatalf("group source = %q, want automatic detection", groups[0].GroupSource)
+	}
+	if !strings.Contains(groups[0].DetectionRule, "auto-detected from query labels") {
+		t.Fatalf("detection rule = %q", groups[0].DetectionRule)
+	}
+}
+
+func TestBlastFamilyReportBatchCapturesCustomizedGroupingMetadata(t *testing.T) {
+	settings := model.DefaultFamilyBlastSettings()
+	settings.CustomizeGroups = true
+	runs := []blastQueryRun{{
+		Index: 1,
+		Item: blastQueryItem{
+			LabelName:           "PAL",
+			FamilyName:          "PAL",
+			MemberLabel:         "PAL2\nPAL1",
+			FamilyGroupSource:   "customized groups",
+			FamilyDetectionRule: "customized in Family BLAST group editor",
+			FamilySettings:      settings,
+		},
+		Results:         model.BlastResult{Rows: []model.BlastResultRow{{Protein: "Spipo1"}}},
+		RowsBeforeMerge: 5,
+		RowsAfterMerge:  3,
+	}}
+
+	report := blastFamilyReportBatch(runs)
+	if report == nil {
+		t.Fatal("expected family report")
+	}
+	if len(report.Groups) != 1 {
+		t.Fatalf("group count = %d, want 1", len(report.Groups))
+	}
+	if report.Groups[0].GroupSource != "customized groups" {
+		t.Fatalf("group source = %q, want customized groups", report.Groups[0].GroupSource)
+	}
+	if report.Groups[0].DetectionRule != "customized in Family BLAST group editor" {
+		t.Fatalf("detection rule = %q", report.Groups[0].DetectionRule)
+	}
+	foundCustomizeSetting := false
+	for _, row := range report.Settings {
+		if row.Name == "Used custom group editor" {
+			foundCustomizeSetting = true
+			if row.Value != "true" {
+				t.Fatalf("group editor setting value = %q, want true", row.Value)
+			}
+		}
+	}
+	if !foundCustomizeSetting {
+		t.Fatal("group editor setting missing from family report")
+	}
+}
+
+func TestBuildPromptFamilyBlastPreviewKeepsUngroupedItems(t *testing.T) {
+	prepared := []blastQueryItem{
+		{LabelName: "PAL1"},
+		{LabelName: "PAL2"},
+		{LabelName: "CCR1"},
+	}
+	settings := model.DefaultFamilyBlastSettings()
+	groups := detectFamilyBlastGroups(prepared, settings)
+	preview := buildPromptFamilyBlastPreview(prepared, groups)
+	if len(preview.Groups) != 1 {
+		t.Fatalf("preview groups = %d, want 1", len(preview.Groups))
+	}
+	if len(preview.Ungrouped) != 1 || preview.Ungrouped[0] != "CCR1" {
+		t.Fatalf("unexpected ungrouped labels: %#v", preview.Ungrouped)
 	}
 }
 
@@ -632,6 +804,54 @@ func TestAutoIdentifyBlastLabelFallsBackToResolvedIDs(t *testing.T) {
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
 	if got != "PAC:19660032" {
 		t.Fatalf("unexpected fallback label: %q", got)
+	}
+}
+
+func TestAutoIdentifyBlastLabelRejectsECStyleHeaderAndFallsBackToProteinID(t *testing.T) {
+	w := &BlastWizard{}
+	item := blastQueryItem{
+		RawInput: ">A.thaliana TAIR10|AT5G48930.1 (AtE2.3.1.133)\nMPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID:    "AT5G48930.1",
+			TranscriptID: "AT5G48930.1",
+			GeneID:       "AT5G48930",
+			LabelName:    "E2.3.1.133",
+			Aliases:      "E2.3.1.133",
+		},
+	}
+	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
+	if got != "AT5G48930.1" {
+		t.Fatalf("unexpected fallback label: %q", got)
+	}
+}
+
+func TestAutoIdentifyBlastLabelRejectsLowercaseAliasStyleAndFallsBackToProteinID(t *testing.T) {
+	w := &BlastWizard{}
+	item := blastQueryItem{
+		RawInput: ">A.thaliana TAIR10|AT1G52760.1 (AtLysoPL2)\nMPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID:    "AT1G52760.1",
+			TranscriptID: "AT1G52760.1",
+			GeneID:       "AT1G52760",
+			LabelName:    "LysoPL2",
+			Aliases:      "LysoPL2",
+		},
+	}
+	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
+	if got != "AT1G52760.1" {
+		t.Fatalf("unexpected fallback label: %q", got)
+	}
+}
+
+func TestBestTrustedAutoLabelPrefersCanonicalCompactSymbol(t *testing.T) {
+	if got := bestTrustedAutoLabel("CYP84A1", "F5H1", "LysoPL2"); got != "F5H1" {
+		t.Fatalf("bestTrustedAutoLabel()=%q want F5H1", got)
+	}
+}
+
+func TestBestTrustedAutoLabelRejectsUntrustedCandidates(t *testing.T) {
+	if got := bestTrustedAutoLabel("E2.3.1.133", "LysoPL2"); got != "" {
+		t.Fatalf("bestTrustedAutoLabel()=%q want empty", got)
 	}
 }
 

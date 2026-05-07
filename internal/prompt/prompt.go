@@ -1081,10 +1081,10 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 	result, err := tui.RunExternalReferenceModal(tui.ExternalReferencePage{
 		Path:            p.blastTUIPath("BLAST input", "External references"),
 		Title:           p.t("External references"),
-		Message:         p.t("Choose external reference databases used only to add columns to BLAST results."),
-		UniProtLabel:    p.t("Use UniProt reference columns"),
+		Message:         p.t("Choose which external evidence columns to add to the BLAST result table. These references enrich the table; they do not remove rows."),
+		UniProtLabel:    p.t("Add UniProt annotation columns"),
 		UniProtInitial:  true,
-		InterProLabel:   p.t("Use InterPro reference columns"),
+		InterProLabel:   p.t("Add InterPro domain-evidence columns"),
 		InterProInitial: true,
 		InterProSettings: tui.InterProConservedRegionSettings{
 			UsePfamAccession:       defaultInterPro.UsePfamAccession,
@@ -1116,77 +1116,114 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 	}, nil
 }
 
-func (p *Prompter) FamilyBlastSettings(groups []FamilyBlastGroup, references model.FamilyBlastSettings, backTarget error) (model.FamilyBlastSettings, error) {
+func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references model.FamilyBlastSettings, backTarget error) (FamilyBlastSettingsResult, error) {
 	defaults := model.DefaultFamilyBlastSettings()
 	defaults.UseUniProtReference = references.UseUniProtReference
 	defaults.UseInterProReference = references.UseInterProReference
-	result, err := tui.RunFamilyBlastModal(tui.FamilyBlastPage{
-		Path:      p.blastTUIPath("BLAST input", "Family BLAST"),
-		Title:     p.t("Family BLAST"),
-		Message:   p.t("Detected query groups that look like members of the same gene family. Family BLAST keeps the BLAST execution per query but reviews and exports each detected family as one grouped result."),
-		Reference: familyBlastReferenceMessage(defaults.UseUniProtReference, defaults.UseInterProReference),
-		Groups:    tuiFamilyBlastGroups(groups),
-		Settings: tui.FamilyBlastSettings{
-			Enabled:                    defaults.Enabled,
-			GroupByDetectedPrefix:      defaults.GroupByDetectedPrefix,
-			MergeRowsByTarget:          defaults.MergeRowsByTarget,
-			KeepBestHitPerTarget:       defaults.KeepBestHitPerTarget,
-			PrependOnlyFirstQuery:      defaults.PrependOnlyFirstQuery,
-			MinimumGroupSize:           strconv.Itoa(defaults.MinimumGroupSize),
-			StripArabidopsisPrefix:     defaults.StripArabidopsisPrefix,
-			StripLeadingSpeciesPrefix:  defaults.StripLeadingSpeciesPrefix,
-			StripTrailingQueryIndex:    defaults.StripTrailingQueryIndex,
-			StripAfterNumberSuffix:     defaults.StripAfterNumberSuffix,
-			NormalizeInnerPunctuation:  defaults.NormalizeInnerPunctuation,
-			StripTerminalSubtypeSuffix: defaults.StripTerminalSubtypeSuffix,
-			UseUniProtReference:        defaults.UseUniProtReference,
-			UseInterProReference:       defaults.UseInterProReference,
-			RankingTieBreakerOrder:     defaults.RankingTieBreakerOrder,
-		},
-		AllowBack:   true,
-		AllowHome:   true,
-		ConfirmText: tui.ButtonApply,
-	})
-	if err != nil {
-		return model.FamilyBlastSettings{}, err
-	}
-	if navErr := tuiNavError(result.Nav, backTarget); navErr != nil {
-		return model.FamilyBlastSettings{}, navErr
-	}
-	settings := result.Settings
-	out := model.FamilyBlastSettings{
-		Enabled:                    settings.Enabled,
-		GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
-		MergeRowsByTarget:          settings.MergeRowsByTarget,
-		KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
-		PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
-		MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
-		StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
-		StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
-		StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
-		StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
-		NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
-		StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+	tuiSettings := tui.FamilyBlastSettings{
+		Enabled:                    defaults.Enabled,
+		GroupByDetectedPrefix:      defaults.GroupByDetectedPrefix,
+		MergeRowsByTarget:          defaults.MergeRowsByTarget,
+		KeepBestHitPerTarget:       defaults.KeepBestHitPerTarget,
+		PrependOnlyFirstQuery:      defaults.PrependOnlyFirstQuery,
+		CustomizeGroups:            defaults.CustomizeGroups,
+		MinimumGroupSize:           strconv.Itoa(defaults.MinimumGroupSize),
+		StripArabidopsisPrefix:     defaults.StripArabidopsisPrefix,
+		StripLeadingSpeciesPrefix:  defaults.StripLeadingSpeciesPrefix,
+		StripTrailingQueryIndex:    defaults.StripTrailingQueryIndex,
+		StripAfterNumberSuffix:     defaults.StripAfterNumberSuffix,
+		NormalizeInnerPunctuation:  defaults.NormalizeInnerPunctuation,
+		StripTerminalSubtypeSuffix: defaults.StripTerminalSubtypeSuffix,
+		KeepDistinctQuerySubgroups: defaults.KeepDistinctQuerySubgroups,
 		UseUniProtReference:        defaults.UseUniProtReference,
 		UseInterProReference:       defaults.UseInterProReference,
-		RankingTieBreakerOrder:     settings.RankingTieBreakerOrder,
+		RankingTieBreakerOrder:     defaults.RankingTieBreakerOrder,
 	}
-	if out.MinimumGroupSize < 2 {
-		out.MinimumGroupSize = 2
+	for {
+		result, err := tui.RunFamilyBlastModal(tui.FamilyBlastPage{
+			Path:             p.blastTUIPath("BLAST input", "Family BLAST"),
+			Title:            p.t("Family BLAST"),
+			Message:          p.t("Some query names look like members of the same gene family. Keep each BLAST search separate, then review and export related members together."),
+			Reference:        familyBlastReferenceMessage(defaults.UseUniProtReference, defaults.UseInterProReference),
+			Groups:           tuiFamilyBlastGroups(preview.Groups),
+			PreviewUngrouped: append([]string(nil), preview.Ungrouped...),
+			Settings:         tuiSettings,
+			AllowBack:        true,
+			AllowHome:        true,
+			ConfirmText:      tui.ButtonApply,
+		})
+		if err != nil {
+			return FamilyBlastSettingsResult{}, err
+		}
+		if result.Nav == tui.NavRefresh {
+			settings := result.Settings
+			out := model.FamilyBlastSettings{
+				Enabled:                    settings.Enabled,
+				GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
+				MergeRowsByTarget:          settings.MergeRowsByTarget,
+				KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
+				PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+				CustomizeGroups:            settings.CustomizeGroups,
+				MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
+				StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
+				StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
+				StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
+				StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
+				NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
+				StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+				KeepDistinctQuerySubgroups: settings.KeepDistinctQuerySubgroups,
+				UseUniProtReference:        defaults.UseUniProtReference,
+				UseInterProReference:       defaults.UseInterProReference,
+				RankingTieBreakerOrder:     settings.RankingTieBreakerOrder,
+			}
+			if out.MinimumGroupSize < 2 {
+				out.MinimumGroupSize = 2
+			}
+			return FamilyBlastSettingsResult{Settings: out, Refresh: true}, nil
+		}
+		if navErr := tuiNavError(result.Nav, backTarget); navErr != nil {
+			return FamilyBlastSettingsResult{}, navErr
+		}
+		settings := result.Settings
+		out := model.FamilyBlastSettings{
+			Enabled:                    settings.Enabled,
+			GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
+			MergeRowsByTarget:          settings.MergeRowsByTarget,
+			KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
+			PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+			CustomizeGroups:            settings.CustomizeGroups,
+			MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
+			StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
+			StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
+			StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
+			StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
+			NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
+			StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+			KeepDistinctQuerySubgroups: settings.KeepDistinctQuerySubgroups,
+			UseUniProtReference:        defaults.UseUniProtReference,
+			UseInterProReference:       defaults.UseInterProReference,
+			RankingTieBreakerOrder:     settings.RankingTieBreakerOrder,
+		}
+		if out.MinimumGroupSize < 2 {
+			out.MinimumGroupSize = 2
+		}
+		return FamilyBlastSettingsResult{
+			Settings:     out,
+			CustomGroups: promptFamilyBlastGroupsFromTUI(result.CustomGroups),
+		}, nil
 	}
-	return out, nil
 }
 
 func familyBlastReferenceMessage(useUniProt bool, useInterPro bool) string {
 	switch {
 	case useUniProt && useInterPro:
-		return "External references: UniProt + InterPro are enabled. Family BLAST will merge duplicate targets after both reference layers are added, and best-hit selection can use BLAST strength, UniProt review/length evidence, and InterPro conserved-region evidence."
+		return "Reference evidence available: UniProt and InterPro. Merged family rows can be ranked using BLAST strength, UniProt review/length evidence, and InterPro conserved-region evidence."
 	case useUniProt:
-		return "External references: UniProt is enabled and InterPro is disabled. Family BLAST will merge duplicate targets with BLAST strength plus UniProt review and canonical-length evidence. InterPro conserved-region evidence and the automatic filter will not be available."
+		return "Reference evidence available: UniProt only. Merged family rows can use UniProt review and canonical-length evidence; InterPro status and the automatic filter will not be available."
 	case useInterPro:
-		return "External references: InterPro is enabled and UniProt is disabled. Family BLAST will merge duplicate targets with BLAST strength plus InterPro conserved-region evidence. UniProt canonical-length evidence and the automatic filter will not be available."
+		return "Reference evidence available: InterPro only. Merged family rows can use conserved-region evidence; UniProt length evidence and the automatic filter will not be available."
 	default:
-		return "External references: none are enabled. Family BLAST will still group member queries, but duplicate-target best-hit selection uses BLAST columns only, and UniProt/InterPro evidence columns plus the automatic filter will not be available."
+		return "Reference evidence available: none. Family BLAST will still group related queries, but merged-row ranking uses BLAST columns only and the automatic filter will not be available."
 	}
 }
 
@@ -1194,6 +1231,17 @@ type FamilyBlastGroup struct {
 	Name    string
 	Labels  []string
 	Queries int
+}
+
+type FamilyBlastPreview struct {
+	Groups    []FamilyBlastGroup
+	Ungrouped []string
+}
+
+type FamilyBlastSettingsResult struct {
+	Settings     model.FamilyBlastSettings
+	CustomGroups []FamilyBlastGroup
+	Refresh      bool
 }
 
 func tuiFamilyBlastGroups(groups []FamilyBlastGroup) []tui.FamilyBlastGroup {
@@ -1208,6 +1256,18 @@ func tuiFamilyBlastGroups(groups []FamilyBlastGroup) []tui.FamilyBlastGroup {
 	return out
 }
 
+func promptFamilyBlastGroupsFromTUI(groups []tui.FamilyBlastCustomGroup) []FamilyBlastGroup {
+	out := make([]FamilyBlastGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, FamilyBlastGroup{
+			Name:    strings.TrimSpace(group.Name),
+			Labels:  append([]string(nil), group.Labels...),
+			Queries: len(group.Labels),
+		})
+	}
+	return out
+}
+
 func (p *Prompter) BlastFilterSettings(backTarget error) (BlastFilterSettingsResult, error) {
 	defaults := model.DefaultBlastFilterSettings()
 	if p.blastFilterSettings == (model.BlastFilterSettings{}) {
@@ -1216,7 +1276,7 @@ func (p *Prompter) BlastFilterSettings(backTarget error) (BlastFilterSettingsRes
 	result, err := tui.RunBlastFilterModal(tui.BlastFilterPage{
 		Path:        p.blastTUIPath("BLAST results", "Filter"),
 		Title:       p.t("BLAST filter"),
-		Message:     p.t("Tune the automatic uncheck suggestion. The filter marks suggested removals in red but you can still edit row checkboxes afterward."),
+		Message:     p.t("Set the rules for automatic row-selection suggestions. Applying the filter only checks or unchecks rows and marks suggested removals; you can still change the table manually afterward."),
 		Settings:    tuiBlastFilterSettings(p.blastFilterSettings),
 		AllowBack:   true,
 		AllowHome:   true,

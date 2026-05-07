@@ -26,10 +26,11 @@ var ErrTaskCancelled = errors.New("task cancelled")
 type NavAction string
 
 const (
-	NavNone NavAction = ""
-	NavBack NavAction = "back"
-	NavHome NavAction = "home"
-	NavExit NavAction = "exit"
+	NavNone    NavAction = ""
+	NavBack    NavAction = "back"
+	NavHome    NavAction = "home"
+	NavExit    NavAction = "exit"
+	NavRefresh NavAction = "refresh"
 )
 
 type Choice struct {
@@ -305,6 +306,12 @@ type clippedPrimitive struct {
 	child tview.Primitive
 }
 
+type focusProxyPrimitive struct {
+	*tview.Box
+	child       tview.Primitive
+	focusTarget func() tview.Primitive
+}
+
 type clippingScreen struct {
 	tcell.Screen
 	x      int
@@ -318,6 +325,7 @@ type pageSelectorPrimitive struct {
 	totalPages  int
 	currentPage int
 	matches     int
+	summary     string
 	onSelect    func(page int)
 }
 
@@ -860,16 +868,18 @@ type BlastFilterResult struct {
 }
 
 type FamilyBlastPage struct {
-	Breadcrumb  string
-	Path        []string
-	Title       string
-	Message     string
-	Reference   string
-	Groups      []FamilyBlastGroup
-	Settings    FamilyBlastSettings
-	AllowBack   bool
-	AllowHome   bool
-	ConfirmText string
+	Breadcrumb       string
+	Path             []string
+	Title            string
+	Message          string
+	Reference        string
+	Groups           []FamilyBlastGroup
+	PreviewNote      string
+	PreviewUngrouped []string
+	Settings         FamilyBlastSettings
+	AllowBack        bool
+	AllowHome        bool
+	ConfirmText      string
 }
 
 type FamilyBlastGroup struct {
@@ -878,9 +888,27 @@ type FamilyBlastGroup struct {
 	Queries int
 }
 
+type FamilyBlastCustomGroup struct {
+	Name   string
+	Labels []string
+}
+
+type FamilyBlastCustomizePage struct {
+	Breadcrumb  string
+	Path        []string
+	Title       string
+	Message     string
+	Groups      []FamilyBlastCustomGroup
+	Ungrouped   []string
+	AllowBack   bool
+	AllowHome   bool
+	ConfirmText string
+}
+
 type FamilyBlastResult struct {
-	Settings FamilyBlastSettings
-	Nav      NavAction
+	Settings     FamilyBlastSettings
+	CustomGroups []FamilyBlastCustomGroup
+	Nav          NavAction
 }
 
 type FamilyBlastSettings struct {
@@ -889,6 +917,7 @@ type FamilyBlastSettings struct {
 	MergeRowsByTarget          bool
 	KeepBestHitPerTarget       bool
 	PrependOnlyFirstQuery      bool
+	CustomizeGroups            bool
 	MinimumGroupSize           string
 	StripArabidopsisPrefix     bool
 	StripLeadingSpeciesPrefix  bool
@@ -896,6 +925,7 @@ type FamilyBlastSettings struct {
 	StripAfterNumberSuffix     bool
 	NormalizeInnerPunctuation  bool
 	StripTerminalSubtypeSuffix bool
+	KeepDistinctQuerySubgroups bool
 	UseUniProtReference        bool
 	UseInterProReference       bool
 	RankingTieBreakerOrder     string
@@ -3682,7 +3712,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	writeRawExcel := page.WriteRawExcel
 	outputTextBox := newCheckboxModule("Write text file", func() bool { return writeText }, func() { writeText = !writeText })
 	outputExcelBox := newCheckboxModule("Write Excel file", func() bool { return writeExcel }, func() { writeExcel = !writeExcel })
-	outputRawBox := newCheckboxModule("Write raw Excel file", func() bool { return writeRawExcel }, func() { writeRawExcel = !writeRawExcel })
+	outputRawBox := newCheckboxModule("Write raw Excel and raw text files", func() bool { return writeRawExcel }, func() { writeRawExcel = !writeRawExcel })
 	for _, box := range []*checkboxModule{outputTextBox, outputExcelBox, outputRawBox} {
 		box.SetBorder(false)
 	}
@@ -3784,12 +3814,12 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	outputGroup.SetBorder(true)
 	outputGroup.SetTitle(" Files to generate ")
 	outputGroup.SetTitleAlign(tview.AlignCenter)
-	outputHelp := "Text exports peptide sequences. Excel exports only the rows currently selected.\nRaw Excel exports every table row, including unchecked rows, to a separate _raw.xlsx file."
-	outputGroup.AddItem(textBlock(outputHelp), 2, 0, false)
+	outputHelp := "Text exports selected peptide sequences. Excel exports selected rows.\nRaw exports every table row to _raw.xlsx, and also writes _raw.txt when text export is enabled."
+	outputGroup.AddItem(textBlock(outputHelp), 3, 0, false)
 	outputGroup.AddItem(outputTextBox, 1, 0, false)
 	outputGroup.AddItem(outputExcelBox, 1, 0, false)
 	outputGroup.AddItem(outputRawBox, 1, 0, false)
-	outputGroupHeight := 7
+	outputGroupHeight := 8
 	modalBody.AddItem(outputGroup, outputGroupHeight, 0, false)
 	contentHeight += outputGroupHeight
 	modalBody.AddItem(reportBox, 3, 0, false)
@@ -3870,7 +3900,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	settings := normalizeTUIInterProSettings(page.InterProSettings)
 	helpVisible := false
 	var mainRoot tview.Primitive
-	uniProtBox := newCheckboxModule(firstNonEmptyText(page.UniProtLabel, "Use UniProt reference columns"), func() bool {
+	uniProtBox := newCheckboxModule(firstNonEmptyText(page.UniProtLabel, "Add UniProt annotation columns"), func() bool {
 		return useUniProt
 	}, func() {
 		useUniProt = !useUniProt
@@ -3880,7 +3910,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	uniProtBox.SetTitleAlign(tview.AlignCenter)
 	setFocusBorder(uniProtBox.Box, false)
 	attachFocusBorder(uniProtBox.Box)
-	interProBox := newCheckboxModule(firstNonEmptyText(page.InterProLabel, "Use InterPro reference columns"), func() bool {
+	interProBox := newCheckboxModule(firstNonEmptyText(page.InterProLabel, "Add InterPro domain-evidence columns"), func() bool {
 		return useInterPro
 	}, func() {
 		useInterPro = !useInterPro
@@ -3894,13 +3924,13 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		get    func() bool
 		toggle func()
 	}{
-		{"Use Pfam accession match", func() bool { return settings.UsePfamAccession }, func() { settings.UsePfamAccession = !settings.UsePfamAccession }},
-		{"Use InterPro accession match", func() bool { return settings.UseInterProAccession }, func() { settings.UseInterProAccession = !settings.UseInterProAccession }},
-		{"Use member signature accession match", func() bool { return settings.UseSignatureAccession }, func() { settings.UseSignatureAccession = !settings.UseSignatureAccession }},
-		{"Use entry type agreement", func() bool { return settings.UseEntryType }, func() { settings.UseEntryType = !settings.UseEntryType }},
-		{"Use entry name agreement", func() bool { return settings.UseEntryName }, func() { settings.UseEntryName = !settings.UseEntryName }},
-		{"Use coverage thresholds", func() bool { return settings.UseCoverage }, func() { settings.UseCoverage = !settings.UseCoverage }},
-		{"Use match-region evidence", func() bool { return settings.UseMatchRegions }, func() { settings.UseMatchRegions = !settings.UseMatchRegions }},
+		{"Match Pfam IDs", func() bool { return settings.UsePfamAccession }, func() { settings.UsePfamAccession = !settings.UsePfamAccession }},
+		{"Match InterPro IDs", func() bool { return settings.UseInterProAccession }, func() { settings.UseInterProAccession = !settings.UseInterProAccession }},
+		{"Match member-database signature IDs", func() bool { return settings.UseSignatureAccession }, func() { settings.UseSignatureAccession = !settings.UseSignatureAccession }},
+		{"Require compatible entry type", func() bool { return settings.UseEntryType }, func() { settings.UseEntryType = !settings.UseEntryType }},
+		{"Also compare entry names", func() bool { return settings.UseEntryName }, func() { settings.UseEntryName = !settings.UseEntryName }},
+		{"Use coverage cutoffs", func() bool { return settings.UseCoverage }, func() { settings.UseCoverage = !settings.UseCoverage }},
+		{"Use coordinate overlap evidence", func() bool { return settings.UseMatchRegions }, func() { settings.UseMatchRegions = !settings.UseMatchRegions }},
 	}
 	settingBoxes := make([]*checkboxModule, 0, len(settingRows))
 	for _, row := range settingRows {
@@ -3908,10 +3938,10 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		box.SetBorder(false)
 		settingBoxes = append(settingBoxes, box)
 	}
-	presentCoverage := tview.NewInputField().SetLabel("present min coverage (%) ").SetText(settings.PresentMinCoverage).SetFieldWidth(8)
-	partialCoverage := tview.NewInputField().SetLabel("partial min coverage (%) ").SetText(settings.PartialMinCoverage).SetFieldWidth(8)
-	presentItems := tview.NewInputField().SetLabel("present min matched items ").SetText(settings.PresentMinMatchedItems).SetFieldWidth(8)
-	partialItems := tview.NewInputField().SetLabel("partial min matched items ").SetText(settings.PartialMinMatchedItems).SetFieldWidth(8)
+	presentCoverage := tview.NewInputField().SetLabel("present coverage >= % ").SetText(settings.PresentMinCoverage).SetFieldWidth(8)
+	partialCoverage := tview.NewInputField().SetLabel("partial coverage >= % ").SetText(settings.PartialMinCoverage).SetFieldWidth(8)
+	presentItems := tview.NewInputField().SetLabel("present evidence count >= ").SetText(settings.PresentMinMatchedItems).SetFieldWidth(8)
+	partialItems := tview.NewInputField().SetLabel("partial evidence count >= ").SetText(settings.PartialMinMatchedItems).SetFieldWidth(8)
 	for _, input := range []*tview.InputField{presentCoverage, partialCoverage, presentItems, partialItems} {
 		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
 		input.SetLabelColor(tview.Styles.SecondaryTextColor)
@@ -3919,12 +3949,18 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 
 	params := newButtonFlex()
 	params.SetBorder(true)
-	params.SetTitle(" InterPro conserved region status ")
+	params.SetTitle(" InterPro status rules ")
 	params.SetTitleAlign(tview.AlignCenter)
-	params.AddItem(textBlock("Status values: present, partial, missing, uncertain. When a query InterPro template is available, hits are compared against it; otherwise the hit's own conserved-domain evidence is graded conservatively."), 3, 0, false)
-	for _, box := range settingBoxes {
+	params.AddItem(textBlock("These rules decide how the InterPro status column is labeled. They add evidence for review; they do not remove or hide BLAST rows."), 2, 0, false)
+	params.AddItem(sectionHeader("Identifier matches"), 1, 0, false)
+	for _, box := range settingBoxes[:3] {
 		params.AddItem(box, 1, 0, false)
 	}
+	params.AddItem(sectionHeader("Evidence quality checks"), 1, 0, false)
+	for _, box := range settingBoxes[3:] {
+		params.AddItem(box, 1, 0, false)
+	}
+	params.AddItem(sectionHeader("Status thresholds"), 1, 0, false)
 	thresholds := tview.NewFlex().SetDirection(tview.FlexRow)
 	presentThresholds := tview.NewFlex().SetDirection(tview.FlexColumn)
 	partialThresholds := tview.NewFlex().SetDirection(tview.FlexColumn)
@@ -3935,7 +3971,8 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	thresholds.AddItem(presentThresholds, 1, 0, true)
 	thresholds.AddItem(partialThresholds, 1, 0, false)
 	params.AddItem(thresholds, 2, 0, true)
-	params.AddItem(textBlock("present: enough conserved evidence and coverage. partial: related evidence exists but coverage is below present threshold. missing: InterPro lookup succeeded but no conserved region evidence was found. uncertain: the query template or hit evidence is not reliable enough."), 5, 0, false)
+	params.AddItem(sectionHeader("Status meaning"), 1, 0, false)
+	params.AddItem(textBlock("present: strong conserved-region support. partial: related support exists but is weaker or shorter. missing: InterPro returned data but no expected conserved evidence was found. uncertain: evidence is too weak or ambiguous to judge."), 5, 0, false)
 	setFocusBorder(params.Box, false)
 	attachFocusBorder(params.Box)
 
@@ -4083,9 +4120,14 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", closeWithNav, confirm))
-	addHints(modalBody, []string{"Tab switches UniProt/InterPro modules. In InterPro, use Up/Down to move through settings; same-row controls are ordered left to right. Space toggles checkboxes. Enter moves to the next module; on InterPro it applies. F1 opens parameter help."})
+	addHints(modalBody, []string{"Tab switches between UniProt and InterPro. Up/Down moves through InterPro options. Space toggles a checkbox. Enter continues from UniProt or applies from InterPro. F1 opens parameter help."})
 
-	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, 40)
+	messageHeight := 0
+	if strings.TrimSpace(page.Message) != "" {
+		messageHeight = 3
+	}
+	externalReferenceHeight := modalHeightForContent(messageHeight+3+2+2+3+len(settingBoxes)+1+2+1+5+1+4, 36, 46)
+	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
 	app.SetRoot(mainRoot, true)
 	setTopFocus(0)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
@@ -4165,22 +4207,23 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	helpVisible := false
 	var mainRoot tview.Primitive
 
-	enableBox := newCheckboxModule("Enable Family BLAST mode", func() bool { return settings.Enabled }, func() { settings.Enabled = !settings.Enabled })
-	detectBox := newCheckboxModule("Group queries by detected family prefix", func() bool { return settings.GroupByDetectedPrefix }, func() { settings.GroupByDetectedPrefix = !settings.GroupByDetectedPrefix })
-	mergeBox := newCheckboxModule("Merge grouped result rows by target protein/gene", func() bool { return settings.MergeRowsByTarget }, func() { settings.MergeRowsByTarget = !settings.MergeRowsByTarget })
-	bestBox := newCheckboxModule("Keep best BLAST hit when one target is hit by multiple queries", func() bool { return settings.KeepBestHitPerTarget }, func() { settings.KeepBestHitPerTarget = !settings.KeepBestHitPerTarget })
-	prependFirstBox := newCheckboxModule("TXT prepends only the first family query record", func() bool { return settings.PrependOnlyFirstQuery }, func() { settings.PrependOnlyFirstQuery = !settings.PrependOnlyFirstQuery })
-	stripAtBox := newCheckboxModule("Strip Arabidopsis At/AT prefix only for family_name", func() bool { return settings.StripArabidopsisPrefix }, func() { settings.StripArabidopsisPrefix = !settings.StripArabidopsisPrefix })
-	stripSpeciesBox := newCheckboxModule("Strip leading species-style prefix before grouping", func() bool { return settings.StripLeadingSpeciesPrefix }, func() { settings.StripLeadingSpeciesPrefix = !settings.StripLeadingSpeciesPrefix })
-	stripIndexBox := newCheckboxModule("Strip trailing member number before grouping", func() bool { return settings.StripTrailingQueryIndex }, func() { settings.StripTrailingQueryIndex = !settings.StripTrailingQueryIndex })
-	stripAfterNumberBox := newCheckboxModule("Ignore suffix after member number before grouping", func() bool { return settings.StripAfterNumberSuffix }, func() { settings.StripAfterNumberSuffix = !settings.StripAfterNumberSuffix })
-	normalizePunctuationBox := newCheckboxModule("Normalize punctuation before family-root detection", func() bool { return settings.NormalizeInnerPunctuation }, func() { settings.NormalizeInnerPunctuation = !settings.NormalizeInnerPunctuation })
-	stripSubtypeBox := newCheckboxModule("Strip terminal subtype suffix before grouping", func() bool { return settings.StripTerminalSubtypeSuffix }, func() { settings.StripTerminalSubtypeSuffix = !settings.StripTerminalSubtypeSuffix })
-	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripAtBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, normalizePunctuationBox, stripSubtypeBox} {
+	enableBox := newCheckboxModule("Group related queries as one family result", func() bool { return settings.Enabled }, func() { settings.Enabled = !settings.Enabled })
+	detectBox := newCheckboxModule("Detect families from query names automatically", func() bool { return settings.GroupByDetectedPrefix }, func() { settings.GroupByDetectedPrefix = !settings.GroupByDetectedPrefix })
+	mergeBox := newCheckboxModule("Merge rows that hit the same target gene/protein", func() bool { return settings.MergeRowsByTarget }, func() { settings.MergeRowsByTarget = !settings.MergeRowsByTarget })
+	bestBox := newCheckboxModule("When merged, keep the strongest member hit", func() bool { return settings.KeepBestHitPerTarget }, func() { settings.KeepBestHitPerTarget = !settings.KeepBestHitPerTarget })
+	prependFirstBox := newCheckboxModule("TXT export: include only the first query sequence", func() bool { return settings.PrependOnlyFirstQuery }, func() { settings.PrependOnlyFirstQuery = !settings.PrependOnlyFirstQuery })
+	stripAtBox := newCheckboxModule("Remove Arabidopsis At/AT prefix for grouping", func() bool { return settings.StripArabidopsisPrefix }, func() { settings.StripArabidopsisPrefix = !settings.StripArabidopsisPrefix })
+	stripSpeciesBox := newCheckboxModule("Remove leading species-style prefix", func() bool { return settings.StripLeadingSpeciesPrefix }, func() { settings.StripLeadingSpeciesPrefix = !settings.StripLeadingSpeciesPrefix })
+	stripIndexBox := newCheckboxModule("Remove trailing member number", func() bool { return settings.StripTrailingQueryIndex }, func() { settings.StripTrailingQueryIndex = !settings.StripTrailingQueryIndex })
+	stripAfterNumberBox := newCheckboxModule("Ignore suffix after a member number", func() bool { return settings.StripAfterNumberSuffix }, func() { settings.StripAfterNumberSuffix = !settings.StripAfterNumberSuffix })
+	normalizePunctuationBox := newCheckboxModule("Treat punctuation as the same separator", func() bool { return settings.NormalizeInnerPunctuation }, func() { settings.NormalizeInnerPunctuation = !settings.NormalizeInnerPunctuation })
+	stripSubtypeBox := newCheckboxModule("Remove terminal subtype suffix", func() bool { return settings.StripTerminalSubtypeSuffix }, func() { settings.StripTerminalSubtypeSuffix = !settings.StripTerminalSubtypeSuffix })
+	keepSubgroupsBox := newCheckboxModule("Keep detected subgroups as separate families", func() bool { return settings.KeepDistinctQuerySubgroups }, func() { settings.KeepDistinctQuerySubgroups = !settings.KeepDistinctQuerySubgroups })
+	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripAtBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, normalizePunctuationBox, stripSubtypeBox, keepSubgroupsBox} {
 		box.SetBorder(false)
 	}
-	minGroupInput := tview.NewInputField().SetLabel("minimum queries per group ").SetText(settings.MinimumGroupSize).SetFieldWidth(8)
-	rankingOrderInput := tview.NewInputField().SetLabel("merge tie-break order ").SetText(settings.RankingTieBreakerOrder).SetFieldWidth(36)
+	minGroupInput := tview.NewInputField().SetLabel("minimum queries in a family ").SetText(settings.MinimumGroupSize).SetFieldWidth(8)
+	rankingOrderInput := tview.NewInputField().SetLabel("best-hit ranking order ").SetText(settings.RankingTieBreakerOrder).SetFieldWidth(36)
 	minGroupInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
 	minGroupInput.SetLabelColor(tview.Styles.SecondaryTextColor)
 	minGroupInput.SetFieldBackgroundColor(colorPanel)
@@ -4188,37 +4231,56 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	rankingOrderInput.SetLabelColor(tview.Styles.SecondaryTextColor)
 	rankingOrderInput.SetFieldBackgroundColor(colorPanel)
 
-	detectedLines := make([]string, 0, len(page.Groups)+1)
-	if len(page.Groups) == 0 {
-		detectedLines = append(detectedLines, "No family-like groups were detected.")
-	} else {
+	buildPreviewLines := func() []string {
+		lines := make([]string, 0, len(page.Groups)*3+4)
+		if note := strings.TrimSpace(page.PreviewNote); note != "" {
+			lines = append(lines, note, "")
+		}
+		if len(page.Groups) == 0 {
+			return append(lines, "No likely family groups were detected.")
+		}
+		totalQueries := 0
+		for _, group := range page.Groups {
+			totalQueries += group.Queries
+		}
+		lines = append(lines, fmt.Sprintf("%d family group(s), %d grouped query record(s).", len(page.Groups), totalQueries), "")
 		for _, group := range page.Groups {
 			labels := compactFamilyBlastGroupLabels(group.Labels)
+			lines = append(lines, fmt.Sprintf("%s (%d)", group.Name, group.Queries))
 			if len(labels) == 0 {
-				detectedLines = append(detectedLines, fmt.Sprintf("%s: %d queries", group.Name, group.Queries))
+				lines = append(lines, "  (no members listed)")
 				continue
 			}
-			detectedLines = append(detectedLines, fmt.Sprintf("%s:", group.Name))
 			for _, label := range labels {
-				detectedLines = append(detectedLines, "  "+label)
+				lines = append(lines, "  - "+label)
 			}
+			lines = append(lines, "")
 		}
+		return lines
 	}
-	detectedModule := textPanel("Detected groups", strings.Join(detectedLines, "\n"))
+	detectedModule := textPanel("Preview", strings.Join(buildPreviewLines(), "\n"))
 	detectedModule.SetScrollable(true)
 	settingsModule := newButtonFlex()
 	settingsModule.SetBorder(true)
 	settingsModule.SetTitle(" Family BLAST settings ")
 	settingsModule.SetTitleAlign(tview.AlignCenter)
-	settingsDescriptionHeight := 3
-	settingsModule.AddItem(textBlock("Family BLAST keeps query execution separate, then reviews and exports detected members as one gene-family result. This prevents NAME1/NAME2/NAME3-style inputs from becoming separate final files."), settingsDescriptionHeight, 0, false)
-	for _, primitive := range []tview.Primitive{enableBox, detectBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, normalizePunctuationBox, stripAtBox, minGroupInput, rankingOrderInput, mergeBox, bestBox, prependFirstBox} {
+	settingsModule.AddItem(textBlock("Each query still runs its own BLAST job. Family BLAST only changes review/export: related query members are shown and exported as one family result."), 3, 0, false)
+	settingsModule.AddItem(sectionHeader("Workflow"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{enableBox, detectBox, minGroupInput} {
 		settingsModule.AddItem(primitive, 1, 0, primitive == minGroupInput)
+	}
+	settingsModule.AddItem(sectionHeader("Name cleanup before grouping"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, stripAtBox, keepSubgroupsBox} {
+		settingsModule.AddItem(primitive, 1, 0, false)
+	}
+	settingsModule.AddItem(sectionHeader("Merged rows and export"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{mergeBox, bestBox, rankingOrderInput, prependFirstBox} {
+		settingsModule.AddItem(primitive, 1, 0, primitive == rankingOrderInput)
 	}
 	setFocusBorder(settingsModule.Box, true)
 	attachFocusBorder(settingsModule.Box)
 
-	controls := []tview.Primitive{enableBox, detectBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, normalizePunctuationBox, stripAtBox, minGroupInput, rankingOrderInput, mergeBox, bestBox, prependFirstBox}
+	controls := []tview.Primitive{enableBox, detectBox, minGroupInput, stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, stripAtBox, keepSubgroupsBox, mergeBox, bestBox, rankingOrderInput, prependFirstBox}
 	focusIndex := 0
 	setFocusAt := func(index int) {
 		if index < 0 {
@@ -4255,13 +4317,14 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		result.Nav = nav
 		app.Stop()
 	}
-	confirm := func() {
-		result.Settings = FamilyBlastSettings{
+	captureSettingsWithCustomize := func(customizeGroups bool) FamilyBlastSettings {
+		return FamilyBlastSettings{
 			Enabled:                    settings.Enabled,
 			GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
 			MergeRowsByTarget:          settings.MergeRowsByTarget,
 			KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
 			PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+			CustomizeGroups:            customizeGroups,
 			MinimumGroupSize:           minGroupInput.GetText(),
 			StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
 			StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
@@ -4269,8 +4332,37 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
 			NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
 			StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+			KeepDistinctQuerySubgroups: settings.KeepDistinctQuerySubgroups,
 			RankingTieBreakerOrder:     rankingOrderInput.GetText(),
 		}
+	}
+	confirm := func() {
+		result.Settings = captureSettingsWithCustomize(false)
+		app.Stop()
+	}
+	captureSettings := func() FamilyBlastSettings {
+		return captureSettingsWithCustomize(false)
+	}
+	customizeGroups := func() {
+		settingsResult := captureSettingsWithCustomize(true)
+		customPage := FamilyBlastCustomizePage{
+			Breadcrumb:  page.Breadcrumb,
+			Path:        append(append([]string(nil), page.Path...), "Customize groups"),
+			Title:       "Customize Family BLAST groups",
+			Message:     "Review the proposed family groups. Move a member out from the left pane, or add an ungrouped query from the right pane. New groups can be created when the automatic grouping is not right.",
+			Groups:      groupsToCustomGroups(page.Groups),
+			Ungrouped:   append([]string(nil), page.PreviewUngrouped...),
+			AllowBack:   true,
+			AllowHome:   page.AllowHome,
+			ConfirmText: page.ConfirmText,
+		}
+		customResult, err := RunFamilyBlastCustomizeModal(customPage)
+		if err != nil || customResult.Nav == NavBack {
+			setFocusAt(focusIndex)
+			return
+		}
+		result.Settings = settingsResult
+		result.CustomGroups = append([]FamilyBlastCustomGroup(nil), customResult.CustomGroups...)
 		app.Stop()
 	}
 
@@ -4299,39 +4391,45 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	body.SetBorder(true)
 	body.SetTitle(" " + trimColon(page.Title) + " ")
 	body.SetTitleAlign(tview.AlignCenter)
-	if strings.TrimSpace(page.Message) != "" {
-		body.AddItem(textBlock(page.Message), 4, 0, false)
-	}
 	messageHeight := 0
 	if strings.TrimSpace(page.Message) != "" {
-		messageHeight = 4
+		messageHeight = 3
+		body.AddItem(textBlock(page.Message), messageHeight, 0, false)
 	}
 	referenceHeight := 0
 	if strings.TrimSpace(page.Reference) != "" {
-		referenceHeight = 4
+		referenceHeight = 3
 		body.AddItem(textBlock(page.Reference), referenceHeight, 0, false)
 	}
-	detectedHeight := minInt(8, maxInt(4, len(detectedLines)+2))
-	settingsHeight := settingsDescriptionHeight + len(controls) + 2
-	body.AddItem(detectedModule, detectedHeight, 0, false)
-	body.AddItem(settingsModule, settingsHeight, 0, true)
-	actionButtons := modalButtons([]buttonSpec{
-		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
-		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
-	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), ShortcutApply, closeWithNav, confirm)
+	contentRow := tview.NewFlex().
+		AddItem(detectedModule, 44, 0, false).
+		AddItem(settingsModule, 0, 1, true)
+	body.AddItem(contentRow, 0, 1, true)
+	actionButtons := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
+		buttonSpec{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
+		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+R", Action: func() {
+			result.Settings = captureSettings()
+			result.Nav = NavRefresh
+			app.Stop()
+		}, Visible: true},
+		buttonSpec{Label: "Customize groups", Shortcut: "Ctrl+G", Action: customizeGroups, Visible: true, Primary: true},
+		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: ShortcutApply, Action: confirm, Visible: true, Primary: true},
+	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Family BLAST settings: Up/Down moves through controls. Left/Right stays inside text fields. Space toggles checkboxes. Enter applies. F1 opens help."})
+	addHints(body, []string{"Up/Down moves through options. Space toggles a checkbox. Ctrl+G opens the group editor. Ctrl+R refreshes the preview after changing grouping rules. Enter applies. F1 opens help."})
 
 	buttonHeight := 1
 	if actionButtons != nil {
-		buttonHeight = actionButtons.requiredHeight(112)
+		buttonHeight = actionButtons.requiredHeight(132)
 	}
 	hintsHeight := 1
 	bodyBorderHeight := 2
 	framePaddingHeight := 4
-	height := messageHeight + referenceHeight + detectedHeight + settingsHeight + buttonHeight + hintsHeight + bodyBorderHeight + framePaddingHeight
-	height = maxInt(18, minInt(40, height))
-	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 118, height)
+	settingsRows := 3 + 1 + 4 + 1 + 7 + 1 + 4
+	contentRows := maxInt(18, settingsRows+2)
+	height := modalHeightForContent(messageHeight+referenceHeight+buttonHeight+hintsHeight+bodyBorderHeight+framePaddingHeight+contentRows, 34, 48)
+	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 144, height)
 	app.SetRoot(mainRoot, true)
 	setFocusAt(focusIndex)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
@@ -4341,6 +4439,16 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		}
 		if shortcutMatchesEvent(ShortcutHelp, event) {
 			showHelp()
+			return nil
+		}
+		if event.Key() == tcell.KeyCtrlR {
+			result.Settings = captureSettings()
+			result.Nav = NavRefresh
+			app.Stop()
+			return nil
+		}
+		if shortcutMatchesEvent("Ctrl+G", event) {
+			customizeGroups()
 			return nil
 		}
 		if input := focusedInput(); input != nil && inputFieldEditKey(event) {
@@ -4399,6 +4507,719 @@ func compactFamilyBlastGroupLabels(labels []string) []string {
 	return out
 }
 
+func groupsToCustomGroups(groups []FamilyBlastGroup) []FamilyBlastCustomGroup {
+	out := make([]FamilyBlastCustomGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, FamilyBlastCustomGroup{
+			Name:   strings.TrimSpace(group.Name),
+			Labels: compactFamilyBlastGroupLabels(group.Labels),
+		})
+	}
+	return out
+}
+
+func visibleTreeNodes(root *tview.TreeNode) []*tview.TreeNode {
+	out := make([]*tview.TreeNode, 0, 16)
+	var walk func(node *tview.TreeNode)
+	walk = func(node *tview.TreeNode) {
+		if node == nil {
+			return
+		}
+		if node.GetReference() != nil {
+			out = append(out, node)
+		}
+		if !node.IsExpanded() {
+			return
+		}
+		for _, child := range node.GetChildren() {
+			walk(child)
+		}
+	}
+	walk(root)
+	return out
+}
+
+func familyGroupUngroupedLabels(groups []FamilyBlastGroup) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, group := range groups {
+		for _, label := range compactFamilyBlastGroupLabels(group.Labels) {
+			key := strings.ToLower(strings.TrimSpace(label))
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+type familyBlastCustomizeModal struct {
+	app                      *tview.Application
+	root                     tview.Primitive
+	groupedList              *tview.List
+	rightList                *tview.List
+	chooseGroupOverlayHeight int
+	applyInitialFocus        func()
+}
+
+func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Application, result *FamilyBlastResult) *familyBlastCustomizeModal {
+	modal := &familyBlastCustomizeModal{app: app}
+	var mainRoot tview.Primitive
+
+	type editableGroup struct {
+		Name   string
+		Labels []string
+	}
+	type groupedListRef struct {
+		Group   int
+		Label   string
+		IsGroup bool
+	}
+
+	groups := make([]editableGroup, 0, len(page.Groups))
+	for _, group := range page.Groups {
+		groups = append(groups, editableGroup{
+			Name:   strings.TrimSpace(group.Name),
+			Labels: compactFamilyBlastGroupLabels(group.Labels),
+		})
+	}
+	ungrouped := compactFamilyBlastGroupLabels(page.Ungrouped)
+	activePane := 0
+	selectedGroup := 0
+	selectedGroupedLabel := ""
+	selectedUngrouped := 0
+	statusLine := ""
+	subModalOpen := false
+	var subModalCapture inputCaptureFunc
+	groupedRows := make([]groupedListRef, 0, 16)
+
+	sortStringsStable := func(values []string) {
+		sort.SliceStable(values, func(i, j int) bool {
+			return strings.ToLower(values[i]) < strings.ToLower(values[j])
+		})
+	}
+	sortStringsStable(ungrouped)
+
+	groupedList := tview.NewList()
+	groupedList.SetBorder(true).SetTitle(" Grouped items ").SetTitleAlign(tview.AlignCenter)
+	groupedList.ShowSecondaryText(false)
+	groupedList.SetSelectedFocusOnly(true)
+	groupedList.SetSelectedTextColor(tcell.ColorBlack)
+	groupedList.SetSelectedBackgroundColor(tcell.ColorWhite)
+	setFocusBorder(groupedList.Box, true)
+
+	rightList := tview.NewList()
+	rightList.SetBorder(true).SetTitle(" Ungrouped items ").SetTitleAlign(tview.AlignCenter)
+	rightList.ShowSecondaryText(false)
+	rightList.SetSelectedFocusOnly(true)
+	rightList.SetSelectedTextColor(tcell.ColorBlack)
+	rightList.SetSelectedBackgroundColor(tcell.ColorWhite)
+	setFocusBorder(rightList.Box, false)
+
+	statusView := hintView("")
+
+	setActivePane := func(index int) {
+		if index < 0 || index > 1 {
+			index = 0
+		}
+		activePane = index
+		setFocusBorder(groupedList.Box, index == 0)
+		setFocusBorder(rightList.Box, index == 1)
+	}
+
+	setPaneFocus := func(index int) {
+		setActivePane(index)
+		if index == 0 {
+			app.SetFocus(groupedList)
+			return
+		}
+		app.SetFocus(rightList)
+	}
+	moveListSelection := func(list *tview.List, delta int) {
+		if list == nil {
+			return
+		}
+		count := list.GetItemCount()
+		if count <= 0 {
+			return
+		}
+		index := list.GetCurrentItem() + delta
+		if index < 0 {
+			index = 0
+		}
+		if index >= count {
+			index = count - 1
+		}
+		list.SetCurrentItem(index)
+	}
+	setListSelection := func(list *tview.List, index int) {
+		if list == nil {
+			return
+		}
+		count := list.GetItemCount()
+		if count <= 0 {
+			return
+		}
+		if index < 0 {
+			index = 0
+		}
+		if index >= count {
+			index = count - 1
+		}
+		list.SetCurrentItem(index)
+	}
+	activeList := func() *tview.List {
+		if activePane == 1 {
+			return rightList
+		}
+		return groupedList
+	}
+
+	applyGroupedSelection := func(index int) {
+		if index < 0 || index >= len(groupedRows) {
+			if len(groups) == 0 {
+				selectedGroup = 0
+			}
+			selectedGroupedLabel = ""
+			return
+		}
+		ref := groupedRows[index]
+		selectedGroup = ref.Group
+		if ref.IsGroup {
+			selectedGroupedLabel = ""
+			return
+		}
+		selectedGroupedLabel = ref.Label
+	}
+
+	var refreshGroupedList func()
+	var refreshRightList func()
+	var refreshStatus func()
+	selectedGroupIndex := func() int {
+		if len(groups) == 0 {
+			return -1
+		}
+		if selectedGroup < 0 {
+			selectedGroup = 0
+		}
+		if selectedGroup >= len(groups) {
+			selectedGroup = len(groups) - 1
+		}
+		return selectedGroup
+	}
+	selectedUngroupedLabel := func() string {
+		if len(ungrouped) == 0 {
+			return ""
+		}
+		if selectedUngrouped < 0 {
+			selectedUngrouped = 0
+		}
+		if selectedUngrouped >= len(ungrouped) {
+			selectedUngrouped = len(ungrouped) - 1
+		}
+		return ungrouped[selectedUngrouped]
+	}
+	removeUngroupedAt := func(index int) string {
+		if index < 0 || index >= len(ungrouped) {
+			return ""
+		}
+		value := ungrouped[index]
+		ungrouped = append(ungrouped[:index], ungrouped[index+1:]...)
+		if selectedUngrouped >= len(ungrouped) && len(ungrouped) > 0 {
+			selectedUngrouped = len(ungrouped) - 1
+		}
+		return value
+	}
+	removeGroupLabel := func(groupIndex int, label string) bool {
+		if groupIndex < 0 || groupIndex >= len(groups) {
+			return false
+		}
+		for i, existing := range groups[groupIndex].Labels {
+			if strings.EqualFold(existing, label) {
+				groups[groupIndex].Labels = append(groups[groupIndex].Labels[:i], groups[groupIndex].Labels[i+1:]...)
+				return true
+			}
+		}
+		return false
+	}
+	moveSelectedUngroupedToGroup := func(groupIndex int) {
+		label := selectedUngroupedLabel()
+		if label == "" || groupIndex < 0 || groupIndex >= len(groups) {
+			return
+		}
+		removeUngroupedAt(selectedUngrouped)
+		groups[groupIndex].Labels = append(groups[groupIndex].Labels, label)
+		sortStringsStable(groups[groupIndex].Labels)
+		statusLine = fmt.Sprintf("Added %s to %s.", label, groups[groupIndex].Name)
+		selectedGroup = groupIndex
+		selectedGroupedLabel = label
+		refreshGroupedList()
+		refreshRightList()
+		refreshStatus()
+	}
+	moveLabelOutOfGroup := func(groupIndex int, label string) {
+		if !removeGroupLabel(groupIndex, label) {
+			return
+		}
+		ungrouped = append(ungrouped, label)
+		sortStringsStable(ungrouped)
+		statusLine = fmt.Sprintf("Removed %s from %s.", label, groups[groupIndex].Name)
+		selectedGroup = groupIndex
+		selectedGroupedLabel = ""
+		refreshGroupedList()
+		refreshRightList()
+		refreshStatus()
+	}
+	deleteGroup := func(groupIndex int) {
+		if groupIndex < 0 || groupIndex >= len(groups) {
+			return
+		}
+		ungrouped = append(ungrouped, groups[groupIndex].Labels...)
+		sortStringsStable(ungrouped)
+		statusLine = fmt.Sprintf("Deleted group %s.", groups[groupIndex].Name)
+		groups = append(groups[:groupIndex], groups[groupIndex+1:]...)
+		if selectedGroup >= len(groups) && len(groups) > 0 {
+			selectedGroup = len(groups) - 1
+		}
+		selectedGroupedLabel = ""
+		refreshGroupedList()
+		refreshRightList()
+		refreshStatus()
+	}
+	showNameInputModal := func(title string, confirmLabel string, onConfirm func(string) string) {
+		input := tview.NewInputField().SetLabel("name ").SetFieldWidth(24)
+		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
+		input.SetLabelColor(tview.Styles.SecondaryTextColor)
+		input.SetFieldBackgroundColor(colorPanel)
+		message := hintView("")
+		closeModal := func() {
+			subModalOpen = false
+			subModalCapture = nil
+			app.SetRoot(mainRoot, true)
+			setPaneFocus(activePane)
+		}
+		confirmModal := func() {
+			if msg := onConfirm(strings.TrimSpace(input.GetText())); msg != "" {
+				message.SetText(msg)
+				return
+			}
+			closeModal()
+		}
+		box := newButtonFlex()
+		box.SetBorder(true)
+		box.SetTitle(" " + trimColon(title) + " ")
+		box.SetTitleAlign(tview.AlignCenter)
+		box.AddItem(input, 1, 0, true)
+		box.AddItem(message, 1, 0, false)
+		addButtonRow(box, modalButtons([]buttonSpec{
+			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
+		}, true, confirmLabel, ShortcutApply, func(NavAction) {}, confirmModal))
+		subModalOpen = true
+		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape:
+				closeModal()
+				return nil
+			case tcell.KeyEnter:
+				confirmModal()
+				return nil
+			case tcell.KeyTab, tcell.KeyBacktab:
+				return nil
+			}
+			if inputFieldEditKey(event) {
+				deliverInputFieldKey(input, event, app)
+				return nil
+			}
+			return nil
+		}
+		overlay := overlayRootOn(mainRoot, box, 40, 7)
+		app.SetRoot(overlay, true)
+		app.SetFocus(input)
+	}
+	createGroup := func() {
+		showNameInputModal("New group", "Create", func(name string) string {
+			if name == "" {
+				return "Enter a group name."
+			}
+			for _, group := range groups {
+				if strings.EqualFold(group.Name, name) {
+					return "That group name already exists."
+				}
+			}
+			groups = append(groups, editableGroup{Name: name})
+			selectedGroup = len(groups) - 1
+			statusLine = fmt.Sprintf("Created group %s.", name)
+			selectedGroupedLabel = ""
+			refreshGroupedList()
+			refreshStatus()
+			return ""
+		})
+	}
+	showChooseGroupModal := func(label string) {
+		if strings.TrimSpace(label) == "" || len(groups) == 0 {
+			statusLine = "Create a group first."
+			refreshStatus()
+			return
+		}
+		list := tview.NewList()
+		list.ShowSecondaryText(false)
+		list.SetSelectedTextColor(tcell.ColorBlack)
+		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetBorder(true).SetTitle(" Choose target group ").SetTitleAlign(tview.AlignCenter)
+		for _, group := range groups {
+			list.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Labels)), "", 0, nil)
+		}
+		if idx := selectedGroupIndex(); idx >= 0 {
+			list.SetCurrentItem(idx)
+		}
+		closeModal := func() {
+			subModalOpen = false
+			subModalCapture = nil
+			app.SetRoot(mainRoot, true)
+			setPaneFocus(1)
+		}
+		applyMove := func() {
+			index := list.GetCurrentItem()
+			if index < 0 || index >= len(groups) {
+				return
+			}
+			for ui, candidate := range ungrouped {
+				if strings.EqualFold(candidate, label) {
+					selectedUngrouped = ui
+					break
+				}
+			}
+			moveSelectedUngroupedToGroup(index)
+		}
+		box := newButtonFlex()
+		box.SetBorder(true)
+		box.SetTitle(" Add to group ")
+		box.SetTitleAlign(tview.AlignCenter)
+		box.AddItem(textBlock("Choose the destination group for the selected ungrouped item."), 2, 0, false)
+		box.AddItem(list, 0, 1, true)
+		addButtonRow(box, modalButtons([]buttonSpec{
+			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
+		}, true, "Add", ShortcutApply, func(NavAction) {}, func() {
+			applyMove()
+			closeModal()
+		}))
+		subModalOpen = true
+		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape:
+				closeModal()
+				return nil
+			case tcell.KeyEnter:
+				applyMove()
+				closeModal()
+				return nil
+			}
+			if handler := list.InputHandler(); handler != nil {
+				handler(event, func(p tview.Primitive) {
+					if p != nil {
+						app.SetFocus(p)
+					}
+				})
+			}
+			return nil
+		}
+		overlayHeight := minInt(36, maxInt(12, len(groups)+8))
+		modal.chooseGroupOverlayHeight = overlayHeight
+		overlay := overlayRootOn(mainRoot, box, 60, overlayHeight)
+		app.SetRoot(overlay, true)
+		app.SetFocus(list)
+	}
+	confirm := func() {
+		if len(groups) == 0 {
+			statusLine = "Create at least one group."
+			refreshStatus()
+			return
+		}
+		for _, group := range groups {
+			if len(group.Labels) < 2 {
+				statusLine = fmt.Sprintf("Group %s must contain at least 2 items.", group.Name)
+				refreshStatus()
+				return
+			}
+		}
+		result.CustomGroups = make([]FamilyBlastCustomGroup, 0, len(groups))
+		for _, group := range groups {
+			result.CustomGroups = append(result.CustomGroups, FamilyBlastCustomGroup{
+				Name:   group.Name,
+				Labels: append([]string(nil), group.Labels...),
+			})
+		}
+		app.Stop()
+	}
+
+	refreshGroupedList = func() {
+		groupedList.Clear()
+		groupedRows = groupedRows[:0]
+		currentIndex := -1
+		for gi, group := range groups {
+			groupedRows = append(groupedRows, groupedListRef{Group: gi, IsGroup: true})
+			groupedList.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Labels)), "", 0, nil)
+			if gi == selectedGroup && selectedGroupedLabel == "" {
+				currentIndex = len(groupedRows) - 1
+			}
+			for _, label := range group.Labels {
+				groupedRows = append(groupedRows, groupedListRef{Group: gi, Label: label})
+				groupedList.AddItem("  - "+label, "", 0, nil)
+				if gi == selectedGroup && strings.EqualFold(selectedGroupedLabel, label) {
+					currentIndex = len(groupedRows) - 1
+				}
+			}
+		}
+		if currentIndex < 0 && len(groupedRows) > 0 {
+			groupIndex := selectedGroupIndex()
+			for i, row := range groupedRows {
+				if row.Group == groupIndex && row.IsGroup {
+					currentIndex = i
+					break
+				}
+			}
+		}
+		if currentIndex < 0 && len(groupedRows) > 0 {
+			currentIndex = 0
+		}
+		if currentIndex >= 0 {
+			groupedList.SetCurrentItem(currentIndex)
+			applyGroupedSelection(currentIndex)
+		} else {
+			selectedGroupedLabel = ""
+		}
+	}
+	refreshRightList = func() {
+		rightList.Clear()
+		for _, label := range ungrouped {
+			rightList.AddItem(label, "", 0, nil)
+		}
+		if len(ungrouped) > 0 {
+			if selectedUngrouped >= len(ungrouped) {
+				selectedUngrouped = len(ungrouped) - 1
+			}
+			rightList.SetCurrentItem(selectedUngrouped)
+		} else {
+			selectedUngrouped = 0
+		}
+	}
+	refreshStatus = func() {
+		statusView.SetText(strings.TrimSpace(statusLine))
+	}
+
+	groupedList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		applyGroupedSelection(index)
+	})
+	rightList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+		selectedUngrouped = index
+	})
+	groupedList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if event != nil && (action == tview.MouseLeftClick || action == tview.MouseLeftDown) {
+			setPaneFocus(0)
+		}
+		return action, event
+	})
+	rightList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		if event != nil && (action == tview.MouseLeftClick || action == tview.MouseLeftDown) {
+			setPaneFocus(1)
+		}
+		return action, event
+	})
+
+	body := newButtonFlex()
+	body.SetBorder(true)
+	body.SetTitle(" " + trimColon(page.Title) + " ")
+	body.SetTitleAlign(tview.AlignCenter)
+	if strings.TrimSpace(page.Message) != "" {
+		body.AddItem(textBlock(page.Message), 4, 0, false)
+	}
+
+	workArea := tview.NewFlex().
+		AddItem(groupedList, 0, 1, false).
+		AddItem(rightList, 0, 1, false)
+	content := &focusProxyPrimitive{
+		Box:   tview.NewBox(),
+		child: workArea,
+		focusTarget: func() tview.Primitive {
+			if activePane == 1 {
+				return rightList
+			}
+			return groupedList
+		},
+	}
+	body.AddItem(content, 0, 1, true)
+
+	body.AddItem(statusView, 1, 0, false)
+
+	actionButtons := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; app.Stop() }, Visible: page.AllowBack},
+		buttonSpec{Label: "New group", Shortcut: "Ctrl+N", Action: createGroup, Visible: true},
+		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: func() {
+			if activePane != 0 {
+				return
+			}
+			index := groupedList.GetCurrentItem()
+			if index < 0 || index >= len(groupedRows) {
+				return
+			}
+			ref := groupedRows[index]
+			if !ref.IsGroup && ref.Label != "" {
+				moveLabelOutOfGroup(ref.Group, ref.Label)
+				return
+			}
+			if ref.IsGroup && ref.Group >= 0 {
+				deleteGroup(ref.Group)
+			}
+		}, Visible: true},
+		buttonSpec{Label: "Add to group", Shortcut: "Enter", Action: func() {
+			if activePane == 1 {
+				showChooseGroupModal(selectedUngroupedLabel())
+			}
+		}, Visible: true},
+		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
+	)
+	addButtonRow(body, actionButtons)
+	addHints(body, []string{"Tab switches between grouped and ungrouped panes. Use Up/Down to choose items. Enter on a grouped member removes it from its group. Enter on an ungrouped item opens the target-group picker. Delete removes the selected member or deletes the selected group. Ctrl+N opens the new-group dialog. Ctrl+Enter applies."})
+
+	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
+	refreshGroupedList()
+	refreshRightList()
+	refreshStatus()
+	app.SetRoot(mainRoot, true)
+	setPaneFocus(0)
+	modal.applyInitialFocus = func() {
+		setPaneFocus(activePane)
+	}
+	var initialFocusOnce sync.Once
+	initialFocusReady := make(chan struct{})
+	afterDraw := app.GetAfterDrawFunc()
+	app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if afterDraw != nil {
+			afterDraw(screen)
+		}
+		initialFocusOnce.Do(func() {
+			close(initialFocusReady)
+		})
+	})
+	go func() {
+		<-initialFocusReady
+		app.QueueUpdateDraw(func() {
+			if modal.applyInitialFocus != nil {
+				modal.applyInitialFocus()
+			}
+		})
+	}()
+	modal.root = mainRoot
+	modal.groupedList = groupedList
+	modal.rightList = rightList
+
+	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
+		if subModalOpen {
+			if subModalCapture != nil {
+				return subModalCapture(event)
+			}
+			return nil
+		}
+		switch event.Key() {
+		case tcell.KeyEscape:
+			if page.AllowBack {
+				result.Nav = NavBack
+				app.Stop()
+				return nil
+			}
+		case tcell.KeyTab:
+			setPaneFocus((activePane + 1) % 2)
+			return nil
+		case tcell.KeyBacktab:
+			setPaneFocus((activePane + 1) % 2)
+			return nil
+		case tcell.KeyUp:
+			moveListSelection(activeList(), -1)
+			return nil
+		case tcell.KeyDown:
+			moveListSelection(activeList(), 1)
+			return nil
+		case tcell.KeyHome:
+			setListSelection(activeList(), 0)
+			return nil
+		case tcell.KeyEnd:
+			if list := activeList(); list != nil {
+				setListSelection(list, list.GetItemCount()-1)
+			}
+			return nil
+		case tcell.KeyPgUp:
+			moveListSelection(activeList(), -8)
+			return nil
+		case tcell.KeyPgDn:
+			moveListSelection(activeList(), 8)
+			return nil
+		case tcell.KeyDelete, tcell.KeyDEL:
+			if activePane != 0 {
+				return event
+			}
+			index := groupedList.GetCurrentItem()
+			if index < 0 || index >= len(groupedRows) {
+				return nil
+			}
+			ref := groupedRows[index]
+			if !ref.IsGroup && ref.Label != "" {
+				moveLabelOutOfGroup(ref.Group, ref.Label)
+			} else if ref.IsGroup && ref.Group >= 0 {
+				deleteGroup(ref.Group)
+			}
+			return nil
+		case tcell.KeyEnter:
+			if event.Modifiers()&tcell.ModCtrl != 0 {
+				confirm()
+				return nil
+			}
+			if activePane == 0 {
+				index := groupedList.GetCurrentItem()
+				if index < 0 || index >= len(groupedRows) {
+					return event
+				}
+				ref := groupedRows[index]
+				if !ref.IsGroup && ref.Label != "" {
+					moveLabelOutOfGroup(ref.Group, ref.Label)
+					return nil
+				}
+				return nil
+			}
+			if activePane == 1 {
+				showChooseGroupModal(selectedUngroupedLabel())
+				return nil
+			}
+		}
+		if event.Key() == tcell.KeyCtrlN {
+			createGroup()
+			return nil
+		}
+		return event
+	})
+	return modal
+}
+
+func RunFamilyBlastCustomizeModal(page FamilyBlastCustomizePage) (FamilyBlastResult, error) {
+	app := newApp()
+	var result FamilyBlastResult
+	buildFamilyBlastCustomizeModal(page, app, &result)
+	if err := runApp(app); err != nil {
+		return FamilyBlastResult{}, err
+	}
+	return result, nil
+}
+
 func splitSidebarLines(value string) []string {
 	lines := make([]string, 0, 4)
 	for _, line := range strings.Split(strings.TrimSpace(value), "\n") {
@@ -4427,55 +5248,55 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		return input
 	}
 
-	minIdentity := newInput("min identity", settings.MinIdentityPercent, 6)
-	minQueryCoverage := newInput("min query coverage", settings.MinAlignQueryCoveragePercent, 6)
-	maxEValue := newInput("max E-value", settings.MaxEValue, 10)
-	minLengthRatio := newInput("min length ratio", settings.MinTargetCanonicalLengthPercent, 6)
-	maxLengthRatio := newInput("max length ratio", settings.MaxTargetCanonicalLengthPercent, 6)
-	minTargetQueryRatio := newInput("min tgt/query %", settings.MinTargetQueryLengthPercent, 6)
-	maxTargetQueryRatio := newInput("max tgt/query %", settings.MaxTargetQueryLengthPercent, 6)
-	minInterProCoverage := newInput("min IPR cover", settings.MinInterProCoveragePercent, 6)
-	strongFallbackMinIdentity := newInput("fallback min id", settings.StrongBlastFallbackMinIdentityPercent, 6)
-	strongFallbackMaxEValue := newInput("fallback max E", settings.StrongBlastFallbackMaxEValue, 10)
-	strongFallbackMinTargetQuery := newInput("fallback min tq", settings.StrongBlastFallbackMinTargetQueryPercent, 6)
-	strongFallbackMaxTargetQuery := newInput("fallback max tq", settings.StrongBlastFallbackMaxTargetQueryPercent, 6)
-	strongFallbackMinConsensusSupport := newInput("fallback min support", settings.StrongFallbackMinFamilyConsensusSupport, 6)
-	strongFallbackMinConsensusPercent := newInput("fallback min family %", settings.StrongFallbackMinFamilyConsensusPercent, 6)
-	familySemanticMinMatches := newInput("semantic min hits", settings.FamilySemanticMinTokenMatches, 6)
-	familySemanticMinPercent := newInput("semantic min %", settings.FamilySemanticMinAgreementPercent, 6)
-	topHitsPerQuery := newInput("top hits/query", settings.TopHitsPerQuery, 6)
-	minSoftScore := newInput("min soft score", settings.MinSoftScore, 6)
-	identityWeight := newInput("identity wt", settings.IdentityWeight, 5)
-	coverageWeight := newInput("coverage wt", settings.CoverageWeight, 5)
-	lengthWeight := newInput("length wt", settings.LengthRatioWeight, 5)
-	targetQueryLengthWeight := newInput("tgt/query wt", settings.TargetQueryLengthWeight, 5)
-	interProWeight := newInput("InterPro wt", settings.InterProWeight, 5)
-	interProPartialWeight := newInput("partial wt", settings.InterProPartialWeight, 5)
-	interProCoverageWeight := newInput("IPR cov wt", settings.InterProCoverageWeight, 5)
-	reviewedWeight := newInput("reviewed wt", settings.UniProtReviewedWeight, 5)
-	annotationWeight := newInput("annotation wt", settings.UniProtAnnotationWeight, 5)
-	familySemanticWeight := newInput("semantic wt", settings.FamilySemanticAgreementWeight, 5)
-	sequenceCautionPenalty := newInput("caution pen", settings.PenaltySequenceCaution, 5)
-	fragmentPenalty := newInput("fragment pen", settings.PenaltyFragment, 5)
-	presentReferenceScore := newInput("present ref", settings.InterProPresentReferenceScore, 5)
-	partialReferenceScore := newInput("partial ref", settings.InterProPartialReferenceScore, 5)
-	uncertainReferenceScore := newInput("uncertain ref", settings.InterProUncertainReferenceScore, 5)
-	missingReferencePenalty := newInput("missing pen", settings.InterProMissingReferencePenalty, 5)
-	interProCoverageReferenceDivisor := newInput("IPR cov div", settings.InterProCoverageReferenceDivisor, 5)
-	uniProtAccessionReferenceScore := newInput("accession ref", settings.UniProtAccessionReferenceScore, 5)
-	uniProtReviewedReferenceScore := newInput("reviewed ref", settings.UniProtReviewedReferenceScore, 5)
-	uniProtAnnotationReferenceScore := newInput("annotation ref", settings.UniProtAnnotationReferenceScore, 5)
-	familySemanticReferenceScore := newInput("semantic ref", settings.FamilySemanticReferenceScore, 5)
-	fragmentReferencePenaltyMultiplier := newInput("fragment x", settings.FragmentReferencePenaltyMultiplier, 5)
-	cautionReferencePenaltyMultiplier := newInput("caution x", settings.SequenceCautionReferencePenaltyMultiplier, 5)
-	lengthNearDistance := newInput("near dist", settings.LengthNearDistancePercent, 5)
-	lengthNearScore := newInput("near ref", settings.LengthNearReferenceScore, 5)
-	lengthAcceptableDistance := newInput("ok dist", settings.LengthAcceptableDistancePercent, 5)
-	lengthAcceptableScore := newInput("ok ref", settings.LengthAcceptableReferenceScore, 5)
-	lengthFarDistance := newInput("far dist", settings.LengthFarDistancePercent, 5)
-	lengthFarPenalty := newInput("far penalty", settings.LengthFarReferencePenalty, 5)
+	minIdentity := newInput("minimum identity (%)", settings.MinIdentityPercent, 6)
+	minQueryCoverage := newInput("minimum query coverage (%)", settings.MinAlignQueryCoveragePercent, 6)
+	maxEValue := newInput("maximum E-value", settings.MaxEValue, 10)
+	minLengthRatio := newInput("min target/UniProt length (%)", settings.MinTargetCanonicalLengthPercent, 6)
+	maxLengthRatio := newInput("max target/UniProt length (%)", settings.MaxTargetCanonicalLengthPercent, 6)
+	minTargetQueryRatio := newInput("min target/query length (%)", settings.MinTargetQueryLengthPercent, 6)
+	maxTargetQueryRatio := newInput("max target/query length (%)", settings.MaxTargetQueryLengthPercent, 6)
+	minInterProCoverage := newInput("minimum InterPro coverage (%)", settings.MinInterProCoveragePercent, 6)
+	strongFallbackMinIdentity := newInput("fallback minimum identity (%)", settings.StrongBlastFallbackMinIdentityPercent, 6)
+	strongFallbackMaxEValue := newInput("fallback maximum E-value", settings.StrongBlastFallbackMaxEValue, 10)
+	strongFallbackMinTargetQuery := newInput("fallback min target/query (%)", settings.StrongBlastFallbackMinTargetQueryPercent, 6)
+	strongFallbackMaxTargetQuery := newInput("fallback max target/query (%)", settings.StrongBlastFallbackMaxTargetQueryPercent, 6)
+	strongFallbackMinConsensusSupport := newInput("fallback family members >=", settings.StrongFallbackMinFamilyConsensusSupport, 6)
+	strongFallbackMinConsensusPercent := newInput("fallback family support (%)", settings.StrongFallbackMinFamilyConsensusPercent, 6)
+	familySemanticMinMatches := newInput("minimum token matches", settings.FamilySemanticMinTokenMatches, 6)
+	familySemanticMinPercent := newInput("minimum agreement (%)", settings.FamilySemanticMinAgreementPercent, 6)
+	topHitsPerQuery := newInput("rows to keep per query", settings.TopHitsPerQuery, 6)
+	minSoftScore := newInput("minimum soft score", settings.MinSoftScore, 6)
+	identityWeight := newInput("identity score weight", settings.IdentityWeight, 5)
+	coverageWeight := newInput("query coverage score weight", settings.CoverageWeight, 5)
+	lengthWeight := newInput("UniProt length score weight", settings.LengthRatioWeight, 5)
+	targetQueryLengthWeight := newInput("target/query length score weight", settings.TargetQueryLengthWeight, 5)
+	interProWeight := newInput("InterPro present score", settings.InterProWeight, 5)
+	interProPartialWeight := newInput("InterPro partial score", settings.InterProPartialWeight, 5)
+	interProCoverageWeight := newInput("InterPro coverage score", settings.InterProCoverageWeight, 5)
+	reviewedWeight := newInput("reviewed UniProt score", settings.UniProtReviewedWeight, 5)
+	annotationWeight := newInput("annotation richness score", settings.UniProtAnnotationWeight, 5)
+	familySemanticWeight := newInput("semantic agreement score", settings.FamilySemanticAgreementWeight, 5)
+	sequenceCautionPenalty := newInput("sequence caution penalty", settings.PenaltySequenceCaution, 5)
+	fragmentPenalty := newInput("fragment record penalty", settings.PenaltyFragment, 5)
+	presentReferenceScore := newInput("InterPro present rank score", settings.InterProPresentReferenceScore, 5)
+	partialReferenceScore := newInput("InterPro partial rank score", settings.InterProPartialReferenceScore, 5)
+	uncertainReferenceScore := newInput("InterPro uncertain rank score", settings.InterProUncertainReferenceScore, 5)
+	missingReferencePenalty := newInput("InterPro missing rank penalty", settings.InterProMissingReferencePenalty, 5)
+	interProCoverageReferenceDivisor := newInput("InterPro coverage score divisor", settings.InterProCoverageReferenceDivisor, 5)
+	uniProtAccessionReferenceScore := newInput("UniProt accession rank score", settings.UniProtAccessionReferenceScore, 5)
+	uniProtReviewedReferenceScore := newInput("reviewed UniProt rank score", settings.UniProtReviewedReferenceScore, 5)
+	uniProtAnnotationReferenceScore := newInput("annotation rank score", settings.UniProtAnnotationReferenceScore, 5)
+	familySemanticReferenceScore := newInput("semantic rank score", settings.FamilySemanticReferenceScore, 5)
+	fragmentReferencePenaltyMultiplier := newInput("fragment rank penalty multiplier", settings.FragmentReferencePenaltyMultiplier, 5)
+	cautionReferencePenaltyMultiplier := newInput("caution rank penalty multiplier", settings.SequenceCautionReferencePenaltyMultiplier, 5)
+	lengthNearDistance := newInput("near length distance (%)", settings.LengthNearDistancePercent, 5)
+	lengthNearScore := newInput("near length rank score", settings.LengthNearReferenceScore, 5)
+	lengthAcceptableDistance := newInput("acceptable length distance (%)", settings.LengthAcceptableDistancePercent, 5)
+	lengthAcceptableScore := newInput("acceptable length rank score", settings.LengthAcceptableReferenceScore, 5)
+	lengthFarDistance := newInput("far length distance (%)", settings.LengthFarDistancePercent, 5)
+	lengthFarPenalty := newInput("far length rank penalty", settings.LengthFarReferencePenalty, 5)
 
-	identityBox := newCheckboxModule("Use identity hard rule", func() bool {
+	identityBox := newCheckboxModule("Reject rows below the identity cutoff", func() bool {
 		return strings.TrimSpace(minIdentity.GetText()) != "" && strings.TrimSpace(minIdentity.GetText()) != "0"
 	}, func() {
 		if strings.TrimSpace(minIdentity.GetText()) == "" || strings.TrimSpace(minIdentity.GetText()) == "0" {
@@ -4485,7 +5306,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		}
 	})
 	identityBox.SetBorder(false)
-	coverageBox := newCheckboxModule("Use query coverage hard rule", func() bool {
+	coverageBox := newCheckboxModule("Reject rows below the query-coverage cutoff", func() bool {
 		return strings.TrimSpace(minQueryCoverage.GetText()) != "" && strings.TrimSpace(minQueryCoverage.GetText()) != "0"
 	}, func() {
 		if strings.TrimSpace(minQueryCoverage.GetText()) == "" || strings.TrimSpace(minQueryCoverage.GetText()) == "0" {
@@ -4495,7 +5316,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		}
 	})
 	coverageBox.SetBorder(false)
-	eValueBox := newCheckboxModule("Use E-value hard rule", func() bool {
+	eValueBox := newCheckboxModule("Reject rows above the E-value cutoff", func() bool {
 		return strings.TrimSpace(maxEValue.GetText()) != "" && strings.TrimSpace(maxEValue.GetText()) != "0"
 	}, func() {
 		if strings.TrimSpace(maxEValue.GetText()) == "" || strings.TrimSpace(maxEValue.GetText()) == "0" {
@@ -4505,57 +5326,57 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		}
 	})
 	eValueBox.SetBorder(false)
-	lengthBox := newCheckboxModule("Use length ratio", func() bool {
+	lengthBox := newCheckboxModule("Check target length against UniProt canonical length", func() bool {
 		return settings.UseTargetCanonicalLengthRatio
 	}, func() {
 		settings.UseTargetCanonicalLengthRatio = !settings.UseTargetCanonicalLengthRatio
 	})
-	targetQueryLengthBox := newCheckboxModule("Use target/query length rule", func() bool {
+	targetQueryLengthBox := newCheckboxModule("Check target length against query length", func() bool {
 		return settings.UseTargetQueryLengthRatio
 	}, func() {
 		settings.UseTargetQueryLengthRatio = !settings.UseTargetQueryLengthRatio
 	})
-	requireLengthRatio := newCheckboxModule("Require length ratio data", func() bool { return settings.RequireTargetCanonicalLengthRatio }, func() { settings.RequireTargetCanonicalLengthRatio = !settings.RequireTargetCanonicalLengthRatio })
-	requireTargetQueryRatio := newCheckboxModule("Require target/query ratio data", func() bool { return settings.RequireTargetQueryLengthRatio }, func() { settings.RequireTargetQueryLengthRatio = !settings.RequireTargetQueryLengthRatio })
-	requireUniProt := newCheckboxModule("Require UniProt accession", func() bool { return settings.RequireUniProtAccession }, func() { settings.RequireUniProtAccession = !settings.RequireUniProtAccession })
-	preferReviewed := newCheckboxModule("Prefer reviewed", func() bool { return settings.PreferUniProtReviewed }, func() { settings.PreferUniProtReviewed = !settings.PreferUniProtReviewed })
-	rejectFragments := newCheckboxModule("Reject fragments", func() bool { return settings.RejectUniProtFragments }, func() { settings.RejectUniProtFragments = !settings.RejectUniProtFragments })
-	rejectCautions := newCheckboxModule("Reject sequence cautions", func() bool { return settings.RejectUniProtSequenceCautions }, func() { settings.RejectUniProtSequenceCautions = !settings.RejectUniProtSequenceCautions })
-	requireInterPro := newCheckboxModule("Require conserved region", func() bool { return settings.RequireInterProConservedRegion }, func() { settings.RequireInterProConservedRegion = !settings.RequireInterProConservedRegion })
-	allowPartial := newCheckboxModule("Allow partial status", func() bool { return settings.AllowInterProPartial }, func() { settings.AllowInterProPartial = !settings.AllowInterProPartial })
-	rejectMissing := newCheckboxModule("Reject InterPro missing", func() bool { return settings.RejectInterProMissing }, func() { settings.RejectInterProMissing = !settings.RejectInterProMissing })
-	rejectUncertain := newCheckboxModule("Reject InterPro uncertain", func() bool { return settings.RejectInterProUncertain }, func() { settings.RejectInterProUncertain = !settings.RejectInterProUncertain })
-	requireInterProCoverage := newCheckboxModule("Require InterPro coverage when used", func() bool { return settings.RequireInterProCoverageWhenUsed }, func() { settings.RequireInterProCoverageWhenUsed = !settings.RequireInterProCoverageWhenUsed })
-	strongFallback := newCheckboxModule("Allow strong BLAST fallback without references", func() bool { return settings.AllowStrongBlastFallbackWithoutReferences }, func() {
+	requireLengthRatio := newCheckboxModule("Require canonical-length data", func() bool { return settings.RequireTargetCanonicalLengthRatio }, func() { settings.RequireTargetCanonicalLengthRatio = !settings.RequireTargetCanonicalLengthRatio })
+	requireTargetQueryRatio := newCheckboxModule("Reject rows missing target/query length data", func() bool { return settings.RequireTargetQueryLengthRatio }, func() { settings.RequireTargetQueryLengthRatio = !settings.RequireTargetQueryLengthRatio })
+	requireUniProt := newCheckboxModule("Reject rows without a UniProt accession", func() bool { return settings.RequireUniProtAccession }, func() { settings.RequireUniProtAccession = !settings.RequireUniProtAccession })
+	preferReviewed := newCheckboxModule("Prefer reviewed UniProt records", func() bool { return settings.PreferUniProtReviewed }, func() { settings.PreferUniProtReviewed = !settings.PreferUniProtReviewed })
+	rejectFragments := newCheckboxModule("Reject UniProt fragment records", func() bool { return settings.RejectUniProtFragments }, func() { settings.RejectUniProtFragments = !settings.RejectUniProtFragments })
+	rejectCautions := newCheckboxModule("Reject UniProt sequence cautions", func() bool { return settings.RejectUniProtSequenceCautions }, func() { settings.RejectUniProtSequenceCautions = !settings.RejectUniProtSequenceCautions })
+	requireInterPro := newCheckboxModule("Require InterPro conserved-region support", func() bool { return settings.RequireInterProConservedRegion }, func() { settings.RequireInterProConservedRegion = !settings.RequireInterProConservedRegion })
+	allowPartial := newCheckboxModule("Allow InterPro partial status", func() bool { return settings.AllowInterProPartial }, func() { settings.AllowInterProPartial = !settings.AllowInterProPartial })
+	rejectMissing := newCheckboxModule("Reject InterPro status: missing", func() bool { return settings.RejectInterProMissing }, func() { settings.RejectInterProMissing = !settings.RejectInterProMissing })
+	rejectUncertain := newCheckboxModule("Reject InterPro status: uncertain", func() bool { return settings.RejectInterProUncertain }, func() { settings.RejectInterProUncertain = !settings.RejectInterProUncertain })
+	requireInterProCoverage := newCheckboxModule("Reject rows missing InterPro coverage when cutoff is used", func() bool { return settings.RequireInterProCoverageWhenUsed }, func() { settings.RequireInterProCoverageWhenUsed = !settings.RequireInterProCoverageWhenUsed })
+	strongFallback := newCheckboxModule("Let very strong BLAST evidence rescue weak references", func() bool { return settings.AllowStrongBlastFallbackWithoutReferences }, func() {
 		settings.AllowStrongBlastFallbackWithoutReferences = !settings.AllowStrongBlastFallbackWithoutReferences
 	})
-	requireFallbackConsensus := newCheckboxModule("Require family consensus for strong fallback", func() bool { return settings.RequireFamilyConsensusForStrongFallback }, func() {
+	requireFallbackConsensus := newCheckboxModule("Require family-member support for fallback rescue", func() bool { return settings.RequireFamilyConsensusForStrongFallback }, func() {
 		settings.RequireFamilyConsensusForStrongFallback = !settings.RequireFamilyConsensusForStrongFallback
 	})
-	useFamilySemantic := newCheckboxModule("Use family semantic agreement", func() bool { return settings.UseFamilySemanticAgreement }, func() {
+	useFamilySemantic := newCheckboxModule("Compare query family name with annotations", func() bool { return settings.UseFamilySemanticAgreement }, func() {
 		settings.UseFamilySemanticAgreement = !settings.UseFamilySemanticAgreement
 	})
-	requireFamilySemantic := newCheckboxModule("Require family semantic agreement", func() bool { return settings.RequireFamilySemanticAgreement }, func() {
+	requireFamilySemantic := newCheckboxModule("Reject rows with poor family-name agreement", func() bool { return settings.RequireFamilySemanticAgreement }, func() {
 		settings.RequireFamilySemanticAgreement = !settings.RequireFamilySemanticAgreement
 	})
-	familySemanticBypass := newCheckboxModule("Allow strong reference bypass", func() bool { return settings.FamilySemanticAllowStrongReferenceBypass }, func() {
+	familySemanticBypass := newCheckboxModule("Let strong reference evidence override name mismatch", func() bool { return settings.FamilySemanticAllowStrongReferenceBypass }, func() {
 		settings.FamilySemanticAllowStrongReferenceBypass = !settings.FamilySemanticAllowStrongReferenceBypass
 	})
-	interProAnyDomain := newCheckboxModule("InterPro domain mode: any_domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "any_domain") }, func() { settings.InterProDomainMode = "any_domain" })
-	interProConservedDomain := newCheckboxModule("InterPro domain mode: conserved_region", func() bool { return strings.EqualFold(settings.InterProDomainMode, "conserved_region") }, func() { settings.InterProDomainMode = "conserved_region" })
-	interProConsensusDomain := newCheckboxModule("InterPro domain mode: family_consensus_domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "family_consensus_domain") }, func() { settings.InterProDomainMode = "family_consensus_domain" })
-	interProOff := newCheckboxModule("InterPro domain mode: off", func() bool { return strings.EqualFold(settings.InterProDomainMode, "off") }, func() { settings.InterProDomainMode = "off" })
-	keepBestIsoform := newCheckboxModule("Keep best isoform per target gene", func() bool { return settings.KeepBestIsoformPerTargetGene }, func() { settings.KeepBestIsoformPerTargetGene = !settings.KeepBestIsoformPerTargetGene })
-	keepTopHits := newCheckboxModule("Keep top hits only", func() bool { return settings.KeepTopHitsPerQuery }, func() { settings.KeepTopHitsPerQuery = !settings.KeepTopHitsPerQuery })
-	rankingOrder := newInput("tie-break order", settings.RankingTieBreakerOrder, 36)
-	preferEValue := newCheckboxModule("Prefer lower E-value", func() bool { return settings.PreferLowerEValueWhenTies }, func() { settings.PreferLowerEValueWhenTies = !settings.PreferLowerEValueWhenTies })
-	preferIdentity := newCheckboxModule("Prefer higher identity", func() bool { return settings.PreferHigherIdentityWhenTies }, func() { settings.PreferHigherIdentityWhenTies = !settings.PreferHigherIdentityWhenTies })
-	preferCoverage := newCheckboxModule("Prefer higher coverage", func() bool { return settings.PreferHigherCoverageWhenTies }, func() { settings.PreferHigherCoverageWhenTies = !settings.PreferHigherCoverageWhenTies })
-	preferReference := newCheckboxModule("Prefer higher reference score", func() bool { return settings.PreferHigherReferenceScoreWhenTies }, func() { settings.PreferHigherReferenceScoreWhenTies = !settings.PreferHigherReferenceScoreWhenTies })
-	preferFilterScore := newCheckboxModule("Prefer higher filter score", func() bool { return settings.PreferHigherFilterScoreWhenRanking }, func() { settings.PreferHigherFilterScoreWhenRanking = !settings.PreferHigherFilterScoreWhenRanking })
-	preferBitscore := newCheckboxModule("Prefer higher bitscore", func() bool { return settings.PreferHigherBitscoreWhenTies }, func() { settings.PreferHigherBitscoreWhenTies = !settings.PreferHigherBitscoreWhenTies })
-	hardFail := newCheckboxModule("Hard-rule reject", func() bool { return settings.RejectIfAnyHardRuleFails }, func() { settings.RejectIfAnyHardRuleFails = !settings.RejectIfAnyHardRuleFails })
-	enableSoftScore := newCheckboxModule("Use soft score", func() bool { return settings.EnableSoftScore }, func() { settings.EnableSoftScore = !settings.EnableSoftScore })
+	interProAnyDomain := newCheckboxModule("InterPro rule: accept any domain evidence", func() bool { return strings.EqualFold(settings.InterProDomainMode, "any_domain") }, func() { settings.InterProDomainMode = "any_domain" })
+	interProConservedDomain := newCheckboxModule("InterPro rule: use conserved-region status", func() bool { return strings.EqualFold(settings.InterProDomainMode, "conserved_region") }, func() { settings.InterProDomainMode = "conserved_region" })
+	interProConsensusDomain := newCheckboxModule("InterPro rule: require family consensus domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "family_consensus_domain") }, func() { settings.InterProDomainMode = "family_consensus_domain" })
+	interProOff := newCheckboxModule("InterPro rule: ignore InterPro domain evidence", func() bool { return strings.EqualFold(settings.InterProDomainMode, "off") }, func() { settings.InterProDomainMode = "off" })
+	keepBestIsoform := newCheckboxModule("Keep only the best isoform per target gene", func() bool { return settings.KeepBestIsoformPerTargetGene }, func() { settings.KeepBestIsoformPerTargetGene = !settings.KeepBestIsoformPerTargetGene })
+	keepTopHits := newCheckboxModule("Keep only the top-ranked rows per query", func() bool { return settings.KeepTopHitsPerQuery }, func() { settings.KeepTopHitsPerQuery = !settings.KeepTopHitsPerQuery })
+	rankingOrder := newInput("order", settings.RankingTieBreakerOrder, 24)
+	preferEValue := newCheckboxModule("Tie break: lower E-value wins", func() bool { return settings.PreferLowerEValueWhenTies }, func() { settings.PreferLowerEValueWhenTies = !settings.PreferLowerEValueWhenTies })
+	preferIdentity := newCheckboxModule("Tie break: higher identity wins", func() bool { return settings.PreferHigherIdentityWhenTies }, func() { settings.PreferHigherIdentityWhenTies = !settings.PreferHigherIdentityWhenTies })
+	preferCoverage := newCheckboxModule("Tie break: higher query coverage wins", func() bool { return settings.PreferHigherCoverageWhenTies }, func() { settings.PreferHigherCoverageWhenTies = !settings.PreferHigherCoverageWhenTies })
+	preferReference := newCheckboxModule("Tie break: stronger reference evidence wins", func() bool { return settings.PreferHigherReferenceScoreWhenTies }, func() { settings.PreferHigherReferenceScoreWhenTies = !settings.PreferHigherReferenceScoreWhenTies })
+	preferFilterScore := newCheckboxModule("Ranking: use the soft filter score first", func() bool { return settings.PreferHigherFilterScoreWhenRanking }, func() { settings.PreferHigherFilterScoreWhenRanking = !settings.PreferHigherFilterScoreWhenRanking })
+	preferBitscore := newCheckboxModule("Tie break: higher BLAST bitscore wins", func() bool { return settings.PreferHigherBitscoreWhenTies }, func() { settings.PreferHigherBitscoreWhenTies = !settings.PreferHigherBitscoreWhenTies })
+	hardFail := newCheckboxModule("Reject when any enabled hard rule fails", func() bool { return settings.RejectIfAnyHardRuleFails }, func() { settings.RejectIfAnyHardRuleFails = !settings.RejectIfAnyHardRuleFails })
+	enableSoftScore := newCheckboxModule("Enable soft evidence score", func() bool { return settings.EnableSoftScore }, func() { settings.EnableSoftScore = !settings.EnableSoftScore })
 
 	for _, box := range []*checkboxModule{identityBox, coverageBox, eValueBox, lengthBox, targetQueryLengthBox, requireLengthRatio, requireTargetQueryRatio, requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, strongFallback, requireFallbackConsensus, useFamilySemantic, requireFamilySemantic, familySemanticBypass, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, keepBestIsoform, keepTopHits, preferEValue, preferIdentity, preferCoverage, preferReference, preferFilterScore, preferBitscore, hardFail, enableSoftScore} {
 		box.SetBorder(false)
@@ -4580,19 +5401,19 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	}
 	thresholdModule := newButtonFlex()
 	thresholdModule.SetBorder(true)
-	thresholdModule.SetTitle(" Sequence similarity and length ")
+	thresholdModule.SetTitle(" Alignment and length rules ")
 	thresholdModule.SetTitleAlign(tview.AlignCenter)
-	thresholdModule.AddItem(textBlock("Default hard checks now separate search strength, target/query length sanity, canonical-length sanity, and domain evidence. Identity, query coverage, and E-value remain optional stricter rules."), 4, 0, false)
-	thresholdModule.AddItem(identityBox, 1, 0, false)
-	thresholdModule.AddItem(minIdentity, 1, 0, true)
-	thresholdModule.AddItem(coverageBox, 1, 0, false)
-	thresholdModule.AddItem(minQueryCoverage, 1, 0, true)
-	thresholdModule.AddItem(eValueBox, 1, 0, false)
-	thresholdModule.AddItem(maxEValue, 1, 0, true)
+	thresholdModule.AddItem(textBlock("Use this page for hard pass/fail rules based on BLAST strength and protein length. Identity, query coverage, and E-value stay off by default; length checks are the conservative default guards."), 4, 0, false)
+	thresholdModule.AddItem(sectionHeader("Optional BLAST-strength cutoffs"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{identityBox, minIdentity, coverageBox, minQueryCoverage, eValueBox, maxEValue} {
+		thresholdModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == minIdentity)
+	}
+	thresholdModule.AddItem(sectionHeader("Target length compared with query"), 1, 0, false)
 	thresholdModule.AddItem(targetQueryLengthBox, 1, 0, false)
 	thresholdModule.AddItem(requireTargetQueryRatio, 1, 0, false)
 	thresholdModule.AddItem(minTargetQueryRatio, 1, 0, true)
 	thresholdModule.AddItem(maxTargetQueryRatio, 1, 0, true)
+	thresholdModule.AddItem(sectionHeader("Target length compared with UniProt"), 1, 0, false)
 	thresholdModule.AddItem(lengthBox, 1, 0, false)
 	thresholdModule.AddItem(requireLengthRatio, 1, 0, false)
 	thresholdModule.AddItem(minLengthRatio, 1, 0, true)
@@ -4600,48 +5421,96 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 
 	semanticModule := newButtonFlex()
 	semanticModule.SetBorder(true)
-	semanticModule.SetTitle(" Family semantic agreement ")
+	semanticModule.SetTitle(" Family-name agreement ")
 	semanticModule.SetTitleAlign(tview.AlignCenter)
-	semanticModule.AddItem(textBlock("Compare family/query labels with enriched annotation text so neighbor families with valid but mismatched annotation can be demoted or rejected without family-specific whitelists."), 4, 0, false)
-	semanticModule.AddItem(useFamilySemantic, 1, 0, false)
-	semanticModule.AddItem(requireFamilySemantic, 1, 0, false)
-	semanticModule.AddItem(familySemanticBypass, 1, 0, false)
-	semanticModule.AddItem(familySemanticMinMatches, 1, 0, true)
-	semanticModule.AddItem(familySemanticMinPercent, 1, 0, true)
+	semanticModule.AddItem(textBlock("Compare the query/family name with UniProt and InterPro annotation text. This helps catch plausible-looking hits from a neighboring but different family."), 4, 0, false)
+	semanticModule.AddItem(sectionHeader("Name-agreement behavior"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{useFamilySemantic, requireFamilySemantic, familySemanticBypass} {
+		semanticModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
+	}
+	semanticModule.AddItem(sectionHeader("Minimum agreement"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{familySemanticMinMatches, familySemanticMinPercent} {
+		semanticModule.AddItem(primitive, 1, 0, primitive == familySemanticMinMatches)
+	}
 
 	referenceModule := newButtonFlex()
 	referenceModule.SetBorder(true)
-	referenceModule.SetTitle(" UniProt and InterPro evidence ")
+	referenceModule.SetTitle(" External-reference rules ")
 	referenceModule.SetTitleAlign(tview.AlignCenter)
-	for _, primitive := range []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent} {
+	referenceModule.AddItem(sectionHeader("UniProt evidence"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions} {
+		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
+	}
+	referenceModule.AddItem(sectionHeader("How to use InterPro"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{interProConservedDomain, interProAnyDomain, interProConsensusDomain, interProOff} {
+		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
+	}
+	referenceModule.AddItem(sectionHeader("InterPro status handling"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage} {
+		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == minInterProCoverage)
+	}
+	referenceModule.AddItem(sectionHeader("Fallback rescue for very strong BLAST hits"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{strongFallback, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, requireFallbackConsensus, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent} {
 		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
 	}
 
 	rankingModule := newButtonFlex()
 	rankingModule.SetBorder(true)
-	rankingModule.SetTitle(" Gene-level ranking and score ")
+	rankingModule.SetTitle(" Keep and rank rows ")
 	rankingModule.SetTitleAlign(tview.AlignCenter)
-	rankingModule.AddItem(textBlock("Ranking controls decide which duplicate isoform or top-hit candidate survives. Score fields tune optional soft scoring and reference-based tie breaks."), 3, 0, false)
-	for _, primitive := range []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore} {
-		rankingModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
+	rankingModule.AddItem(textBlock("Control how many rows stay selected, then choose the ranking order used when several hits look similar."), 2, 0, false)
+	rankingModule.AddItem(sectionHeader("Rows kept after ranking"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery} {
+		rankingModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == topHitsPerQuery)
+	}
+	rankingModule.AddItem(sectionHeader("Priority list and tie breaks"), 1, 0, false)
+	rankingModule.AddItem(textBlock("Ranking priority list. Edit comma-separated names in order."), 2, 0, false)
+	for _, primitive := range []tview.Primitive{rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore} {
+		rankingModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == rankingOrder)
+	}
+	rankingModule.AddItem(sectionHeader("Final pass/fail score"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{hardFail, enableSoftScore, minSoftScore} {
+		rankingModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == minSoftScore)
 	}
 
-	scoreColumns := tview.NewFlex().SetDirection(tview.FlexColumn)
 	softScoreModule := newButtonFlex()
 	softScoreModule.SetBorder(true)
-	softScoreModule.SetTitle(" Soft-score weights ")
+	softScoreModule.SetTitle(" Soft evidence score ")
+	softScoreModule.SetTitleAlign(tview.AlignCenter)
 	referenceScoreModule := newButtonFlex()
 	referenceScoreModule.SetBorder(true)
-	referenceScoreModule.SetTitle(" Reference ranking scores ")
-	for _, primitive := range []tview.Primitive{identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty} {
+	referenceScoreModule.SetTitle(" Reference ranking score ")
+	referenceScoreModule.SetTitleAlign(tview.AlignCenter)
+	softScoreModule.AddItem(textBlock("Weights used by the optional soft score. Higher values make that evidence count more; penalties subtract from weak or risky rows."), 3, 0, false)
+	softScoreModule.AddItem(sectionHeader("BLAST and length evidence"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight} {
 		softScoreModule.AddItem(primitive, 1, 0, false)
 	}
-	for _, primitive := range []tview.Primitive{presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty} {
+	softScoreModule.AddItem(sectionHeader("Reference and name evidence"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight} {
+		softScoreModule.AddItem(primitive, 1, 0, false)
+	}
+	softScoreModule.AddItem(sectionHeader("Penalties"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{sequenceCautionPenalty, fragmentPenalty} {
+		softScoreModule.AddItem(primitive, 1, 0, false)
+	}
+	referenceScoreModule.AddItem(textBlock("Scores used to rank external-reference evidence before the best rows are kept."), 2, 0, false)
+	referenceScoreModule.AddItem(sectionHeader("InterPro evidence"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor} {
 		referenceScoreModule.AddItem(primitive, 1, 0, false)
 	}
-	scoreColumns.AddItem(softScoreModule, 0, 1, false)
-	scoreColumns.AddItem(referenceScoreModule, 0, 1, false)
-	rankingModule.AddItem(scoreColumns, 0, 1, false)
+	referenceScoreModule.AddItem(sectionHeader("UniProt and family-name evidence"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore} {
+		referenceScoreModule.AddItem(primitive, 1, 0, false)
+	}
+	referenceScoreModule.AddItem(sectionHeader("Fragment and caution penalties"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier} {
+		referenceScoreModule.AddItem(primitive, 1, 0, false)
+	}
+	referenceScoreModule.AddItem(sectionHeader("Length-distance bands"), 1, 0, false)
+	for _, primitive := range []tview.Primitive{lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty} {
+		referenceScoreModule.AddItem(primitive, 1, 0, false)
+	}
 
 	modules := []struct {
 		page     int
@@ -4651,13 +5520,11 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		{page: 0, box: thresholdModule, controls: []tview.Primitive{identityBox, minIdentity, coverageBox, minQueryCoverage, eValueBox, maxEValue, targetQueryLengthBox, requireTargetQueryRatio, minTargetQueryRatio, maxTargetQueryRatio, lengthBox, requireLengthRatio, minLengthRatio, maxLengthRatio}},
 		{page: 0, box: referenceModule, controls: []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent}},
 		{page: 0, box: semanticModule, controls: []tview.Primitive{useFamilySemantic, requireFamilySemantic, familySemanticBypass, familySemanticMinMatches, familySemanticMinPercent}},
-		{page: 1, box: rankingModule, controls: []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore, identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty, presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty}},
+		{page: 1, box: rankingModule, controls: []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore}},
+		{page: 1, box: softScoreModule, controls: []tview.Primitive{identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty}},
+		{page: 1, box: referenceScoreModule, controls: []tview.Primitive{presentReferenceScore, partialReferenceScore, uncertainReferenceScore, missingReferencePenalty, interProCoverageReferenceDivisor, uniProtAccessionReferenceScore, uniProtReviewedReferenceScore, uniProtAnnotationReferenceScore, familySemanticReferenceScore, fragmentReferencePenaltyMultiplier, cautionReferencePenaltyMultiplier, lengthNearDistance, lengthNearScore, lengthAcceptableDistance, lengthAcceptableScore, lengthFarDistance, lengthFarPenalty}},
 	}
-	pageIndicator := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter).
-		SetWrap(false)
-	pageIndicator.SetBackgroundColor(colorPanel)
+	pageSelector := &pageSelectorPrimitive{Box: tview.NewBox(), totalPages: 2, currentPage: 0}
 
 	pageOne := tview.NewFlex().SetDirection(tview.FlexColumn)
 	pageOne.AddItem(thresholdModule, 0, 1, true)
@@ -4666,31 +5533,34 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 
 	pageTwo := tview.NewFlex().SetDirection(tview.FlexColumn)
 	pageTwo.AddItem(rankingModule, 0, 1, true)
+	pageTwo.AddItem(softScoreModule, 0, 1, false)
+	pageTwo.AddItem(referenceScoreModule, 0, 1, false)
 
 	pageContainer := tview.NewPages()
 	pageContainer.AddPage("page-0", pageOne, true, true)
 	pageContainer.AddPage("page-1", pageTwo, true, false)
-	module.AddItem(pageIndicator, 1, 0, false)
+	module.AddItem(pageSelector, 3, 0, false)
 	module.AddItem(pageContainer, 0, 1, true)
 
 	moduleIndex := 0
 	controlIndexes := make([]int, len(modules))
 	controlIndexes[0] = 1
 	activePage := 0
-	pageLabel := func(pageIndex int) string {
-		switch pageIndex {
-		case 0:
-			return "[::b]1[::-]/2   [gray]Sequence similarity + evidence"
-		case 1:
-			return "[gray]1/2   [::b]2[::-]   [gray]Ranking + score"
-		default:
-			return fmt.Sprintf("[::b]%d[::-]/2", pageIndex+1)
-		}
-	}
 	setActivePage := func(pageIndex int) {
+		if pageIndex < 0 {
+			pageIndex = 1
+		}
+		if pageIndex > 1 {
+			pageIndex = 0
+		}
 		activePage = pageIndex
 		pageContainer.SwitchToPage(fmt.Sprintf("page-%d", pageIndex))
-		pageIndicator.SetText("Page " + pageLabel(pageIndex))
+		pageSelector.currentPage = pageIndex
+		if pageIndex == 0 {
+			pageSelector.summary = "Settings page 1/2 | Rules and evidence"
+		} else {
+			pageSelector.summary = "Settings page 2/2 | Ranking and scores"
+		}
 	}
 	currentControls := func() []tview.Primitive {
 		if moduleIndex < 0 || moduleIndex >= len(modules) {
@@ -4744,6 +5614,15 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		controlIndexes[moduleIndex] = index
 		setModuleFocus(moduleIndex)
 	}
+	pageSelector.onSelect = func(pageIndex int) {
+		for i := range modules {
+			if modules[i].page == pageIndex {
+				setModuleFocus(i)
+				return
+			}
+		}
+		setActivePage(pageIndex)
+	}
 	focusedInput := func() *tview.InputField {
 		controls := currentControls()
 		if len(controls) == 0 {
@@ -4776,10 +5655,15 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			RequireTargetCanonicalLengthRatio:         settings.RequireTargetCanonicalLengthRatio,
 			MinTargetCanonicalLengthPercent:           minLengthRatio.GetText(),
 			MaxTargetCanonicalLengthPercent:           maxLengthRatio.GetText(),
+			UseTargetQueryLengthRatio:                 settings.UseTargetQueryLengthRatio,
+			RequireTargetQueryLengthRatio:             settings.RequireTargetQueryLengthRatio,
+			MinTargetQueryLengthPercent:               minTargetQueryRatio.GetText(),
+			MaxTargetQueryLengthPercent:               maxTargetQueryRatio.GetText(),
 			RequireUniProtAccession:                   settings.RequireUniProtAccession,
 			PreferUniProtReviewed:                     settings.PreferUniProtReviewed,
 			RejectUniProtFragments:                    settings.RejectUniProtFragments,
 			RejectUniProtSequenceCautions:             settings.RejectUniProtSequenceCautions,
+			InterProDomainMode:                        settings.InterProDomainMode,
 			RequireInterProConservedRegion:            settings.RequireInterProConservedRegion,
 			AllowInterProPartial:                      settings.AllowInterProPartial,
 			RejectInterProMissing:                     settings.RejectInterProMissing,
@@ -4815,6 +5699,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			IdentityWeight:                            identityWeight.GetText(),
 			CoverageWeight:                            coverageWeight.GetText(),
 			LengthRatioWeight:                         lengthWeight.GetText(),
+			TargetQueryLengthWeight:                   targetQueryLengthWeight.GetText(),
 			InterProWeight:                            interProWeight.GetText(),
 			InterProPartialWeight:                     interProPartialWeight.GetText(),
 			InterProCoverageWeight:                    interProCoverageWeight.GetText(),
@@ -4874,9 +5759,14 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		{Label: ButtonClearFilter, Shortcut: ShortcutClearFilter, Action: clearFilter, Visible: true},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonFilter), ShortcutConfirm, closeWithNav, confirm))
-	addHints(module, []string{"Tab switches modules across both pages. Inside a module, Up/Down moves through settings. Left/Right stays inside text fields. Space toggles checkboxes. Enter moves to the next module and applies on the final page. Ctrl+L clears filter marks and reselects all rows. F1 opens help."})
+	addHints(module, []string{"Tab switches sections. Up/Down moves within the active section. Space toggles a checkbox. Enter advances and applies from the final page. Ctrl+L clears filter marks and reselects all rows. F1 opens help."})
 
-	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), module, 148, 50)
+	filterContentRows := 3 + maxInt(31, 46)
+	if strings.TrimSpace(page.Message) != "" {
+		filterContentRows += 3
+	}
+	filterContentRows += 2
+	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), module, 148, modalHeightForContent(filterContentRows, 50, 58))
 	app.SetRoot(mainRoot, true)
 	setActivePage(activePage)
 	setModuleFocus(moduleIndex)
@@ -6495,6 +7385,17 @@ func minInt(left, right int) int {
 	return right
 }
 
+func modalHeightForContent(contentRows int, minHeight int, maxHeight int) int {
+	height := contentRows
+	if height < minHeight {
+		height = minHeight
+	}
+	if maxHeight > 0 && height > maxHeight {
+		height = maxHeight
+	}
+	return height
+}
+
 func rowSelectionFirstSortableColumn(columns []TableColumn) int {
 	for i, column := range columns {
 		if column.Sortable {
@@ -6617,6 +7518,18 @@ func textPanel(title string, text string) *tview.TextView {
 	setFocusBorder(view.Box, true)
 	attachFocusBorder(view.Box)
 	return view
+}
+
+func sectionHeader(title string) *tview.TextView {
+	title = strings.TrimSpace(trimColon(title))
+	if title == "" {
+		title = "Section"
+	}
+	return tview.NewTextView().
+		SetText("[gray]-- " + title + " " + strings.Repeat("-", 48)).
+		SetTextColor(tview.Styles.SecondaryTextColor).
+		SetDynamicColors(true).
+		SetWrap(false)
 }
 
 func centeredPrimitive(primitive tview.Primitive, width int, height int) tview.Primitive {
@@ -6770,6 +7683,82 @@ func (c *clippedPrimitive) PasteHandler() func(text string, setFocus func(p tvie
 			return
 		}
 		if handler := c.child.PasteHandler(); handler != nil {
+			handler(text, setFocus)
+		}
+	})
+}
+
+func (p *focusProxyPrimitive) Draw(screen tcell.Screen) {
+	p.Box.DrawForSubclass(screen, p)
+	if p.child == nil {
+		return
+	}
+	x, y, width, height := p.GetInnerRect()
+	p.child.SetRect(x, y, width, height)
+	p.child.Draw(screen)
+}
+
+func (p *focusProxyPrimitive) InputHandler() func(event *tcell.EventKey, setFocus func(pr tview.Primitive)) {
+	return p.WrapInputHandler(func(event *tcell.EventKey, setFocus func(pr tview.Primitive)) {
+		if p.child == nil {
+			return
+		}
+		if handler := p.child.InputHandler(); handler != nil {
+			handler(event, setFocus)
+		}
+	})
+}
+
+func (p *focusProxyPrimitive) Focus(delegate func(pr tview.Primitive)) {
+	if p.focusTarget != nil {
+		if target := p.focusTarget(); target != nil {
+			delegate(target)
+			return
+		}
+	}
+	if p.child != nil {
+		delegate(p.child)
+		return
+	}
+	p.Box.Focus(delegate)
+}
+
+func (p *focusProxyPrimitive) HasFocus() bool {
+	if p.child != nil && p.child.HasFocus() {
+		return true
+	}
+	return p.Box.HasFocus()
+}
+
+func (p *focusProxyPrimitive) Blur() {
+	p.Box.Blur()
+	if p.child != nil {
+		p.child.Blur()
+	}
+}
+
+func (p *focusProxyPrimitive) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(pr tview.Primitive)) (bool, tview.Primitive) {
+	return p.WrapMouseHandler(func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(pr tview.Primitive)) (bool, tview.Primitive) {
+		if p.child == nil || event == nil {
+			return false, nil
+		}
+		mouseX, mouseY := event.Position()
+		if !primitiveContains(p.child, mouseX, mouseY) {
+			return false, nil
+		}
+		if handler := p.child.MouseHandler(); handler != nil {
+			return handler(action, event, setFocus)
+		}
+		return false, nil
+	})
+}
+
+func (p *focusProxyPrimitive) PasteHandler() func(text string, setFocus func(pr tview.Primitive)) {
+	return p.WrapPasteHandler(func(text string, setFocus func(pr tview.Primitive)) {
+		if p.child == nil {
+			return
+		}
+		if handler := p.child.PasteHandler(); handler != nil {
 			handler(text, setFocus)
 		}
 	})
@@ -7036,7 +8025,10 @@ func (p *pageSelectorPrimitive) Draw(screen tcell.Screen) {
 		total = 1
 	}
 	lines := p.pageLines(width, total)
-	header := fmt.Sprintf("Page %d/%d | %d matches", p.currentPage+1, total, p.matches)
+	header := strings.TrimSpace(p.summary)
+	if header == "" {
+		header = fmt.Sprintf("Page %d/%d | %d matches", p.currentPage+1, total, p.matches)
+	}
 	printCentered(screen, x, y, width, style, header)
 	for i, line := range lines {
 		if i+1 >= height {

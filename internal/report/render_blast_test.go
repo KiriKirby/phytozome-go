@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,21 @@ func TestRenderBlastPDFCreatesPDF(t *testing.T) {
 	}
 	if len(content) < 20_000 {
 		t.Fatalf("rendered PDF is unexpectedly small: %d bytes", len(content))
+	}
+}
+
+func TestBlastReportDoesNotRenderLimitationsChapter(t *testing.T) {
+	source, err := os.ReadFile("render_blast.go")
+	if err != nil {
+		t.Fatalf("read render_blast.go: %v", err)
+	}
+	for _, text := range []string{
+		"Report Limitations" + " And Data Availability Notes",
+		"renderBlast" + "Limitations",
+	} {
+		if bytes.Contains(source, []byte(text)) {
+			t.Fatalf("BLAST report renderer still contains removed limitations chapter marker %q", text)
+		}
 	}
 }
 
@@ -72,6 +88,34 @@ func TestRenderBlastPDFAllowsLongWrappedContent(t *testing.T) {
 	}
 	if !bytes.HasPrefix(content, []byte("%PDF-")) || !bytes.Contains(content, []byte("%%EOF")) {
 		t.Fatalf("long-content PDF is malformed")
+	}
+}
+
+func TestBlastReportSettingsUseReadableLabels(t *testing.T) {
+	data := SampleBlastReportData()
+	if len(data.Blast.ExternalReferences.InterPro.Settings) == 0 {
+		t.Fatal("sample InterPro settings should be present")
+	}
+	for _, setting := range data.Blast.ExternalReferences.InterPro.Settings {
+		if strings.Contains(setting.Name, "UsePfam") || strings.Contains(setting.Name, "UseInterPro") || strings.Contains(setting.Name, "UseSignature") || strings.Contains(setting.Name, "PresentMin") {
+			t.Fatalf("InterPro setting label still looks internal: %q", setting.Name)
+		}
+	}
+	if data.Blast.Family == nil || len(data.Blast.Family.Settings) == 0 {
+		t.Fatal("sample Family BLAST settings should be present")
+	}
+	for _, setting := range data.Blast.Family.Settings {
+		if strings.Contains(setting.Name, "GroupBy") || strings.Contains(setting.Name, "Strip") || strings.Contains(setting.Name, "PrependOnly") {
+			t.Fatalf("Family setting label still looks internal: %q", setting.Name)
+		}
+	}
+	if data.Blast.Filter == nil || len(data.Blast.Filter.Settings) == 0 {
+		t.Fatal("sample filter settings should be present")
+	}
+	for _, setting := range data.Blast.Filter.Settings {
+		if strings.Contains(setting.Name, "MinIdentityPercent") || strings.Contains(setting.Name, "UseTarget") || strings.Contains(setting.Name, "InterProDomainMode") {
+			t.Fatalf("Filter setting label still looks internal: %q", setting.Name)
+		}
 	}
 }
 

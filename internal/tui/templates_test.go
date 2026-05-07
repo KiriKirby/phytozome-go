@@ -10,6 +10,68 @@ import (
 	"github.com/rivo/tview"
 )
 
+func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
+	externalHeight := modalHeightForContent(3+3+2+2+3+7+1+2+1+5+1+4, 36, 46)
+	if externalHeight < 36 || externalHeight > 46 {
+		t.Fatalf("external reference modal height = %d, want within [36,46]", externalHeight)
+	}
+
+	familySettingsRows := 3 + 1 + 4 + 1 + 7 + 1 + 4
+	familyContentRows := maxInt(18, familySettingsRows+2)
+	familyHeight := modalHeightForContent(3+3+1+1+2+4+familyContentRows, 34, 48)
+	if familyHeight < familySettingsRows+10 {
+		t.Fatalf("family modal height = %d, too small for settings rows %d", familyHeight, familySettingsRows)
+	}
+	if familyHeight > 48 {
+		t.Fatalf("family modal height = %d, want <= 48", familyHeight)
+	}
+
+	filterHeight := modalHeightForContent(3+maxInt(31, 46)+3+2, 50, 58)
+	if filterHeight < 52 || filterHeight > 58 {
+		t.Fatalf("filter modal height = %d, want within [52,58]", filterHeight)
+	}
+}
+
+func TestBlastFilterSecondPageThreeColumnRowsFitModal(t *testing.T) {
+	rankingRows := 2 + 1 + 5 + 1 + 2 + 10 + 1 + 4
+	softScoreRows := 3 + 1 + 4 + 1 + 6 + 1 + 2
+	referenceScoreRows := 2 + 1 + 5 + 1 + 4 + 1 + 2 + 1 + 6
+	secondPageRows := maxInt(rankingRows, maxInt(softScoreRows, referenceScoreRows))
+	firstPageRows := maxInt(31, 46)
+	filterHeight := modalHeightForContent(3+maxInt(firstPageRows, secondPageRows)+3+2, 50, 58)
+
+	if secondPageRows > firstPageRows {
+		t.Fatalf("second page rows = %d, should fit within first-page height budget %d", secondPageRows, firstPageRows)
+	}
+	if filterHeight < 54 || filterHeight > 58 {
+		t.Fatalf("filter modal height = %d, want within [54,58]", filterHeight)
+	}
+}
+
+func TestBlastFilterRankingOrderInputFitsThreeColumnLayout(t *testing.T) {
+	labelWidth := len([]rune("order "))
+	fieldWidth := 24
+	panelInnerWidth := 148/3 - 4
+
+	if labelWidth+fieldWidth > panelInnerWidth {
+		t.Fatalf("ranking priority input width = %d, panel inner width = %d", labelWidth+fieldWidth, panelInnerWidth)
+	}
+}
+
+func TestBlastSettingsModalLabelsUseReadableText(t *testing.T) {
+	for _, text := range []string{
+		"Add UniProt annotation columns",
+		"Add InterPro domain-evidence columns",
+		"Group related queries as one family result",
+		"Reject rows below the identity cutoff",
+		"InterPro rule: use conserved-region status",
+	} {
+		if strings.Contains(text, "UseTarget") || strings.Contains(text, "InterProDomainMode") {
+			t.Fatalf("label %q still looks like an internal field name", text)
+		}
+	}
+}
+
 func TestButtonRowKeepsLeftAndPrimaryButtonsVisibleOnWideRows(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
@@ -113,6 +175,33 @@ func TestButtonRowPrimaryLabelUpdatesOnlyPrimaryButtons(t *testing.T) {
 	}
 	if row.buttons[1].Label != ButtonAuto {
 		t.Fatalf("primary button label = %q, want %q", row.buttons[1].Label, ButtonAuto)
+	}
+}
+
+func TestFamilyBlastCustomizeButtonSitsLeftOfApply(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
+		buttonSpec{Label: ButtonHelp, Shortcut: ShortcutHelp, Visible: true},
+		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+R", Visible: true},
+		buttonSpec{Label: "Customize groups", Shortcut: "Ctrl+G", Visible: true, Primary: true},
+		buttonSpec{Label: ButtonApply, Shortcut: ShortcutApply, Visible: true, Primary: true},
+	)
+	positions := row.buttonPositions(132)
+	customizeLeft := -1
+	applyLeft := -1
+	for _, pos := range positions {
+		switch pos.button.Label {
+		case "Customize groups":
+			customizeLeft = pos.left
+		case ButtonApply:
+			applyLeft = pos.left
+		}
+	}
+	if customizeLeft < 0 || applyLeft < 0 {
+		t.Fatalf("missing primary buttons in positions: %#v", positions)
+	}
+	if customizeLeft >= applyLeft {
+		t.Fatalf("customize button should sit left of Apply, got customize x=%d apply x=%d", customizeLeft, applyLeft)
 	}
 }
 
@@ -226,6 +315,32 @@ func TestSearchResultOffsetStaysZeroWhenViewportFitsPage(t *testing.T) {
 	offset := searchResultOffsetForSelection(0, 9, 10, 20)
 	if offset != 0 {
 		t.Fatalf("offset = %d, want 0", offset)
+	}
+}
+
+func TestPageSelectorClickSelectsPageNumber(t *testing.T) {
+	selector := &pageSelectorPrimitive{Box: tview.NewBox(), totalPages: 3, currentPage: 0, summary: "Settings page 1/3"}
+	selected := -1
+	selector.onSelect = func(page int) {
+		selected = page
+	}
+	selector.SetRect(0, 0, 40, 3)
+
+	lines := selector.pageLines(40, 3)
+	if len(lines) == 0 || len(lines[0].segments) < 2 {
+		t.Fatalf("page selector did not expose page segments: %#v", lines)
+	}
+	lineWidth := len([]rune(lines[0].text))
+	left := (40 - lineWidth) / 2
+	clickX := left + lines[0].segments[1].left + 1
+	clickY := 1
+	consumed, _ := selector.MouseHandler()(tview.MouseLeftClick, tcell.NewEventMouse(clickX, clickY, tcell.ButtonNone, 0), nil)
+
+	if !consumed {
+		t.Fatal("page selector should consume clicks on page numbers")
+	}
+	if selected != 1 {
+		t.Fatalf("selected page = %d, want 1", selected)
 	}
 }
 
@@ -463,6 +578,136 @@ func TestClippedPrimitiveBlocksChildOverflowBelowItsRect(t *testing.T) {
 	}
 	if main, _, _, _ := screen.GetContent(3, 4); main != '.' {
 		t.Fatalf("expected overflow below clip rect to be blocked, got %q", main)
+	}
+}
+
+func TestFamilyBlastCustomizeModalStartsInteractiveImmediately(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title:     "Customize Family BLAST groups",
+		Groups:    []FamilyBlastCustomGroup{{Name: "PAL", Labels: []string{"PAL1", "PAL2"}}},
+		Ungrouped: []string{"PAL3", "PAL4"},
+		AllowBack: true,
+	}, app, &result)
+
+	if modal == nil || modal.groupedList == nil || modal.rightList == nil {
+		t.Fatal("expected customize modal to expose interactive lists")
+	}
+	if app.GetFocus() != modal.groupedList {
+		t.Fatalf("initial focus = %T, want grouped list", app.GetFocus())
+	}
+	if got := modal.groupedList.GetCurrentItem(); got != 0 {
+		t.Fatalf("initial grouped selection = %d, want 0", got)
+	}
+
+	if afterDraw := app.GetAfterDrawFunc(); afterDraw != nil {
+		screen := tcell.NewSimulationScreen("")
+		if err := screen.Init(); err != nil {
+			t.Fatalf("screen init failed: %v", err)
+		}
+		screen.SetSize(160, 40)
+		afterDraw(screen)
+	}
+	if modal.applyInitialFocus != nil {
+		modal.applyInitialFocus()
+	}
+	if app.GetFocus() != modal.groupedList {
+		t.Fatalf("focus after first draw = %T, want grouped list", app.GetFocus())
+	}
+}
+
+func TestFamilyBlastCustomizeModalKeyboardNavigationAndTabSwitch(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+			{Name: "CAD", Labels: []string{"CAD1", "CAD2"}},
+		},
+		Ungrouped: []string{"X1", "X2", "X3"},
+		AllowBack: true,
+	}, app, &result)
+
+	capture := app.GetInputCapture()
+	if capture == nil {
+		t.Fatal("expected input capture to be installed")
+	}
+	capture(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if got := modal.groupedList.GetCurrentItem(); got != 1 {
+		t.Fatalf("grouped selection after Down = %d, want 1", got)
+	}
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus after Tab = %T, want right list", app.GetFocus())
+	}
+	capture(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if got := modal.rightList.GetCurrentItem(); got != 1 {
+		t.Fatalf("right selection after Down = %d, want 1", got)
+	}
+	capture(tcell.NewEventKey(tcell.KeyEnd, 0, 0))
+	if got := modal.rightList.GetCurrentItem(); got != 2 {
+		t.Fatalf("right selection after End = %d, want 2", got)
+	}
+}
+
+func TestFamilyBlastCustomizeModalMouseSelectsRightPaneWithoutSnapBack(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+		},
+		Ungrouped: []string{"X1", "X2", "X3"},
+		AllowBack: true,
+	}, app, &result)
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(160, 40)
+	modal.root.SetRect(0, 0, 160, 40)
+	modal.root.Draw(screen)
+
+	x, y, _, _ := modal.rightList.GetInnerRect()
+	mouse := tcell.NewEventMouse(x+1, y+1, tcell.Button1, 0)
+	consumed, _ := modal.rightList.MouseHandler()(tview.MouseLeftClick, mouse, func(p tview.Primitive) {
+		app.SetFocus(p)
+	})
+	if !consumed {
+		t.Fatal("right list should consume mouse click")
+	}
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus after right click = %T, want right list", app.GetFocus())
+	}
+}
+
+func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+			{Name: "CAD", Labels: []string{"CAD1", "CAD2"}},
+			{Name: "CCR", Labels: []string{"CCR1", "CCR2"}},
+		},
+		Ungrouped: []string{"X1", "X2", "X3"},
+		AllowBack: true,
+	}, app, &result)
+
+	capture := app.GetInputCapture()
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	capture(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+
+	if got, wantMin := modal.chooseGroupOverlayHeight, 12; got < wantMin {
+		t.Fatalf("choose-group overlay height = %d, want at least %d", got, wantMin)
+	}
+	if got, wantExact := modal.chooseGroupOverlayHeight, 12; got != wantExact {
+		t.Fatalf("choose-group overlay height = %d, want %d for 3 groups with extra padding", got, wantExact)
 	}
 }
 

@@ -240,6 +240,7 @@ type FamilyBlastSettings struct {
 	MergeRowsByTarget          bool
 	KeepBestHitPerTarget       bool
 	PrependOnlyFirstQuery      bool
+	CustomizeGroups            bool
 	MinimumGroupSize           int
 	StripArabidopsisPrefix     bool
 	StripLeadingSpeciesPrefix  bool
@@ -260,6 +261,7 @@ func DefaultFamilyBlastSettings() FamilyBlastSettings {
 		MergeRowsByTarget:          true,
 		KeepBestHitPerTarget:       true,
 		PrependOnlyFirstQuery:      true,
+		CustomizeGroups:            false,
 		MinimumGroupSize:           2,
 		StripArabidopsisPrefix:     false,
 		StripLeadingSpeciesPrefix:  true,

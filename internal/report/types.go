@@ -264,6 +264,7 @@ type FamilyBlastReport struct {
 type FamilyBlastGroupReport struct {
 	Name           string
 	MemberLabels   []string
+	GroupSource    string
 	DetectionRule  string
 	OriginalRuns   int
 	RowsBefore     int

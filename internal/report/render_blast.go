@@ -55,7 +55,6 @@ func renderBlastReport(r *pdfReportRenderer, data ReportData) {
 	renderBlastExportLog(r, b)
 	renderBlastSequenceAudit(r, b)
 	renderBlastFileAppendix(r, data.Files, b.Runs)
-	renderBlastLimitations(r)
 }
 
 func renderBlastGeneratedFileIndex(r *pdfReportRenderer, files []GeneratedFile, runs []BlastRunReport) {
@@ -306,15 +305,15 @@ func renderBlastFamily(r *pdfReportRenderer, b BlastReportData) {
 	}
 	f := b.Family
 	r.chapterHeading("Chapter 10. Family BLAST Analysis")
-	r.paragraph("Family BLAST keeps BLAST execution per query, then groups review/export units after individual results exist. It derives a family name from labels/source IDs without rewriting original label_name values, and it can merge duplicate targets by keeping the best-ranked row for each normalized target key.", 9.2, colorText, pageWidth-marginLeft-marginRight)
+	r.paragraph("Family BLAST keeps BLAST execution per query, then groups review/export units after individual results exist. Automatic family detection proposes groups from labels/source IDs without rewriting original label_name values, and the optional group editor can confirm or change those groups before execution. After grouping, duplicate targets can be merged by keeping the best-ranked row for each normalized target key.", 9.2, colorText, pageWidth-marginLeft-marginRight)
 	r.flow([]string{"Resolved queries", "Detect family name", "Group members", "Run BLAST per member", "Merge target rows", "Review/export family"})
 	r.table([]string{"Setting", "Value", "Meaning"}, sortedRowsFromNameValues(f.Settings), []float64{132, 62, 313})
-	r.subheading("Detected family groups")
+	r.subheading("Final family groups")
 	rows := make([][]string, 0, len(f.Groups))
 	for _, group := range f.Groups {
-		rows = append(rows, []string{group.Name, strings.Join(group.MemberLabels, ", "), group.DetectionRule, fmt.Sprintf("%d", group.OriginalRuns), fmt.Sprintf("%d -> %d", group.RowsBefore, group.RowsAfter), group.OutputBaseName})
+		rows = append(rows, []string{group.Name, strings.Join(group.MemberLabels, ", "), valueOr(group.GroupSource, "-"), group.DetectionRule, fmt.Sprintf("%d", group.OriginalRuns), fmt.Sprintf("%d -> %d", group.RowsBefore, group.RowsAfter), group.OutputBaseName})
 	}
-	r.table([]string{"Family", "Members", "Detection rule", "Runs", "Rows", "Output"}, rows, []float64{50, 112, 145, 35, 52, 70})
+	r.table([]string{"Family", "Members", "Group source", "Grouping rule", "Runs", "Rows", "Output"}, rows, []float64{44, 98, 72, 132, 28, 46, 62})
 	r.familyMergeChart(f.Groups)
 	r.subheading("Merge audit")
 	mergeRows := make([][]string, 0, len(f.MergeRecords))
@@ -557,21 +556,6 @@ func normalizeReportMatchKey(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	value = strings.TrimSuffix(value, "_raw")
 	return value
-}
-
-func renderBlastLimitations(r *pdfReportRenderer) {
-	r.chapterHeading("Chapter 16. Report Limitations And Data Availability Notes")
-	r.paragraph("This report is an audit explanation of what phytozome GO did during this BLAST export action. It is not a biological conclusion document. Final interpretation should combine exported rows, source database pages, sequence/domain evidence, experimental context, and expert review.", 9.2, colorText, pageWidth-marginLeft-marginRight)
-	r.table([]string{"Category", "Required interpretation"}, [][]string{
-		{"Input interpretation", "The parser records how input was split and resolved, but ambiguous labels or pasted sequences may still require user review."},
-		{"BLAST alignment", "BLAST similarity supports candidate discovery; it does not prove orthology, function, pathway role, or copy-number completeness."},
-		{"Server/local execution", "Server and local BLAST paths may differ in database contents, availability, and parsing detail; the report documents the path used in this run."},
-		{"External references", "Missing UniProt or InterPro data can reflect disabled features, unavailable accessions, incomplete APIs/caches, or no match; it is not proof of absent function."},
-		{"InterPro status", "Present/partial/missing/uncertain depend on configured evidence switches and thresholds; they are review aids, not final biological labels."},
-		{"Family BLAST", "Family grouping is derived from labels/source IDs and parameterized string handling; ambiguous family names require human inspection."},
-		{"Filter", "Filter defaults are conservative generic heuristics for selection assistance, not homolog certification."},
-		{"Instrumentation", "Unavailable values were not captured before report generation and were not filled by report-only lookups."},
-	}, []float64{110, 397})
 }
 
 func blastReferenceSummary(ref ExternalReferenceReport) string {

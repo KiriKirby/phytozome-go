@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,12 @@ import (
 const (
 	blastSubmitURL   = "https://phytozome-next.jgi.doe.gov/api/blast/submit/sequence"
 	blastResultsBase = "https://phytozome-next.jgi.doe.gov/api/blast/results/"
+)
+
+var (
+	ecNumberLikeLabelPattern      = regexp.MustCompile(`^(?:EC[:\-]?)?[A-Za-z]?\d+(?:\.\d+){2,3}$`)
+	arabidopsisGeneIDLabelPattern = regexp.MustCompile(`(?i)^AT[1-5MC]G\d{5}(?:\.\d+)?$`)
+	lemnaGeneIDLabelPattern       = regexp.MustCompile(`(?i)^SP\d{4}D\d{3}G\d{6}(?:_T\d+)?$`)
 )
 
 type submitResponse struct {
@@ -1212,14 +1219,21 @@ func bestQuerySourceLabel(aliases string, autoDefine string) string {
 	bestScore := -1
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
+		if candidate == "" || looksLikeECNumberLabel(candidate) || looksLikeDatabaseIdentifierLabel(candidate) {
 			continue
 		}
 		score := aliasPreferenceScore(candidate) + querySourceLabelPreferenceBonus(candidate)
+		score -= lowercaseCount(candidate) * 6
+		if strings.Contains(candidate, ".") {
+			score -= strings.Count(candidate, ".") * 8
+		}
 		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
 			best = candidate
 			bestScore = score
 		}
+	}
+	if bestScore < 22 {
+		return ""
 	}
 	return best
 }
@@ -1371,6 +1385,36 @@ func aliasHasInternalDigitPattern(value string) bool {
 	}
 	last := rune(value[len(value)-1])
 	return last >= '0' && last <= '9'
+}
+
+func lowercaseCount(value string) int {
+	count := 0
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			count++
+		}
+	}
+	return count
+}
+
+func looksLikeECNumberLabel(value string) bool {
+	return ecNumberLikeLabelPattern.MatchString(strings.TrimSpace(value))
+}
+
+func looksLikeDatabaseIdentifierLabel(value string) bool {
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "":
+		return false
+	case strings.HasPrefix(strings.ToUpper(value), "PAC:"):
+		return true
+	case arabidopsisGeneIDLabelPattern.MatchString(value):
+		return true
+	case lemnaGeneIDLabelPattern.MatchString(value):
+		return true
+	default:
+		return false
+	}
 }
 
 func labelFromAutoDefine(value string) string {

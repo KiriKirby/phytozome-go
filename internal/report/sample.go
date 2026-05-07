@@ -114,10 +114,10 @@ func SampleKeywordReportData() ReportData {
 			},
 			Columns: sampleKeywordColumns("lemna", true, nil),
 			ExportSettings: []NameValue{
-				{Name: "File base name", Value: "spirodela_lignin_keyword", Explanation: "Base name used for selected Excel, raw Excel, and peptide text outputs."},
+				{Name: "File base name", Value: "spirodela_lignin_keyword", Explanation: "Base name used for selected Excel, raw Excel, peptide text, and raw peptide text outputs."},
 				{Name: "Output folder", Value: session.OutputDir, Explanation: "Destination folder for the current export action."},
 				{Name: "Write selected Excel", Value: "true", Explanation: "Selected rows are written to the main workbook."},
-				{Name: "Write raw Excel", Value: "true", Explanation: "All current rows are written to the raw workbook."},
+				{Name: "Write raw Excel and raw text", Value: "true", Explanation: "All current rows are written to _raw.xlsx, and _raw.txt is also written when text export is enabled."},
 				{Name: "Write peptide text", Value: "true", Explanation: "Peptide sequences are written for selected rows with sequence IDs."},
 				{Name: "Write report PDF", Value: "true", Explanation: "This PDF is generated once for the export action."},
 			},
@@ -294,17 +294,17 @@ func SampleBlastReportData() ReportData {
 				},
 				InterPro: InterProReferenceReport{
 					Settings: []NameValue{
-						{Name: "UsePfamAccession", Value: "true", Explanation: "Shared Pfam accessions contribute 5 evidence points per query/hit match."},
-						{Name: "UseInterProAccession", Value: "true", Explanation: "Exact InterPro accession matches contribute 4 evidence points."},
-						{Name: "UseSignatureAccession", Value: "true", Explanation: "Shared member signatures contribute 3 evidence points."},
-						{Name: "UseEntryType", Value: "true", Explanation: "Domain/family/homologous_superfamily/repeat/site entries are treated as conserved candidates."},
-						{Name: "UseEntryName", Value: "false", Explanation: "Entry-name string equality was not required in this run."},
-						{Name: "UseCoverage", Value: "true", Explanation: "Coverage thresholds control present versus partial status."},
-						{Name: "UseMatchRegions", Value: "true", Explanation: "Region-level evidence contributes to match scoring."},
-						{Name: "PresentMinCoverage", Value: "70", Explanation: "Matched coverage at or above 70% can support present status."},
-						{Name: "PartialMinCoverage", Value: "25", Explanation: "Matched coverage at or above 25% can support partial status."},
-						{Name: "PresentMinMatchedItems", Value: "1", Explanation: "At least one matched conserved item is required for present status."},
-						{Name: "PartialMinMatchedItems", Value: "1", Explanation: "At least one matched conserved item is required for partial status."},
+						{Name: "Match Pfam IDs", Value: "true", Explanation: "Shared Pfam IDs contribute to the InterPro status label."},
+						{Name: "Match InterPro IDs", Value: "true", Explanation: "Shared InterPro IDs contribute to the InterPro status label."},
+						{Name: "Match member-database signature IDs", Value: "true", Explanation: "Shared member signatures contribute supporting evidence."},
+						{Name: "Require compatible entry type", Value: "true", Explanation: "Domain/family/homologous_superfamily/repeat/site entries are treated as conserved candidates."},
+						{Name: "Also compare entry names", Value: "false", Explanation: "Entry-name string equality was not required in this run."},
+						{Name: "Use coverage cutoffs", Value: "true", Explanation: "Coverage thresholds control present versus partial status."},
+						{Name: "Use coordinate overlap evidence", Value: "true", Explanation: "Region-level evidence contributes to match scoring."},
+						{Name: "present coverage >= %", Value: "70", Explanation: "Matched coverage at or above 70% can support present status."},
+						{Name: "partial coverage >= %", Value: "25", Explanation: "Matched coverage at or above 25% can support partial status."},
+						{Name: "present evidence count >=", Value: "1", Explanation: "At least one matched conserved item is required for present status."},
+						{Name: "partial evidence count >=", Value: "1", Explanation: "At least one matched conserved item is required for partial status."},
 					},
 					Outcome: []NameValue{
 						{Name: "Query entry", Value: "available", Explanation: "The query-side PAL1 UniProt accession had InterPro matches during enrichment."},
@@ -322,19 +322,20 @@ func SampleBlastReportData() ReportData {
 			},
 			Family: &FamilyBlastReport{
 				Settings: []NameValue{
-					{Name: "Enabled", Value: "true", Explanation: "Family BLAST grouped detected PAL member queries after individual BLAST execution."},
-					{Name: "GroupByDetectedPrefix", Value: "true", Explanation: "Common label prefixes were used to derive family groups."},
-					{Name: "MergeRowsByTarget", Value: "true", Explanation: "Rows from member queries were merged by normalized target key."},
-					{Name: "KeepBestHitPerTarget", Value: "true", Explanation: "One best-ranked row was kept when several member queries hit the same target."},
-					{Name: "MinimumGroupSize", Value: "2", Explanation: "At least two member queries were required for a family group."},
-					{Name: "StripArabidopsisPrefix", Value: "false", Explanation: "Leading At/AT was preserved for family-name derivation in this sample."},
-					{Name: "StripTrailingQueryIndex", Value: "true", Explanation: "Trailing numeric member indexes were removed."},
-					{Name: "StripAfterNumberSuffix", Value: "true", Explanation: "Suffixes after member numbers were normalized before final family name creation."},
-					{Name: "UseUniProtReference", Value: "true", Explanation: "UniProt evidence contributed to best-hit merge ranking."},
-					{Name: "UseInterProReference", Value: "true", Explanation: "InterPro conserved-region evidence contributed to best-hit merge ranking."},
+					{Name: "Group related queries as one family result", Value: "true", Explanation: "Family BLAST grouped detected PAL member queries after individual BLAST execution."},
+					{Name: "Used custom group editor", Value: "true", Explanation: "The Family BLAST group editor was opened so final groups could be reviewed or changed."},
+					{Name: "Detect families from query names automatically", Value: "true", Explanation: "Common label prefixes were used to derive family groups."},
+					{Name: "Merge rows that hit the same target gene/protein", Value: "true", Explanation: "Rows from member queries were merged by normalized target key."},
+					{Name: "When merged, keep the strongest member hit", Value: "true", Explanation: "One best-ranked row was kept when several member queries hit the same target."},
+					{Name: "minimum queries in a family", Value: "2", Explanation: "At least two member queries were required for a family group."},
+					{Name: "Remove Arabidopsis At/AT prefix for grouping", Value: "false", Explanation: "Leading At/AT was preserved for family-name derivation in this sample."},
+					{Name: "Remove trailing member number", Value: "true", Explanation: "Trailing numeric member indexes were removed."},
+					{Name: "Ignore suffix after a member number", Value: "true", Explanation: "Suffixes after member numbers were normalized before final family name creation."},
+					{Name: "Use UniProt evidence when ranking merged rows", Value: "true", Explanation: "UniProt evidence contributed to best-hit merge ranking."},
+					{Name: "Use InterPro evidence when ranking merged rows", Value: "true", Explanation: "InterPro conserved-region evidence contributed to best-hit merge ranking."},
 				},
 				Groups: []FamilyBlastGroupReport{
-					{Name: "PAL", MemberLabels: []string{"PAL1", "PAL2", "PAL-like"}, DetectionRule: "label prefix PAL after trailing member-number handling", OriginalRuns: 3, RowsBefore: 46, RowsAfter: 27, OutputBaseName: "PAL"},
+					{Name: "PAL", MemberLabels: []string{"PAL1", "PAL2", "PAL-like"}, GroupSource: "customized groups", DetectionRule: "customized in Family BLAST group editor", OriginalRuns: 3, RowsBefore: 46, RowsAfter: 27, OutputBaseName: "PAL"},
 				},
 				MergeRecords: []FamilyMergeRecord{
 					{Family: "PAL", TargetKey: "sp7498v3_pal_a", MemberRows: "PAL1 row 1; PAL2 row 3", ChosenRow: "PAL1 row 1", Reason: "higher reference score, lower E-value", ScoreDetails: "InterPro present +80; UniProt reviewed +30; length near +25"},
@@ -385,10 +386,10 @@ func SampleBlastReportData() ReportData {
 			Columns:            sampleBlastColumns("lemna", "BLASTP", true, true),
 			ExportSettings: []NameValue{
 				{Name: "Export mode", Value: "Family BLAST single group", Explanation: "One family group was exported from three executed query runs."},
-				{Name: "File base name", Value: "PAL", Explanation: "Family name used for selected Excel, raw Excel, TXT, and report context."},
+				{Name: "File base name", Value: "PAL", Explanation: "Family name used for selected Excel, raw Excel, TXT, raw TXT, and report context."},
 				{Name: "Output folder", Value: session.OutputDir, Explanation: "Destination folder for this sample BLAST export action."},
 				{Name: "Write selected Excel", Value: "true", Explanation: "Selected rows are written to the main workbook."},
-				{Name: "Write raw Excel", Value: "true", Explanation: "All current family rows are written to raw workbook."},
+				{Name: "Write raw Excel and raw text", Value: "true", Explanation: "All current family rows are written to _raw.xlsx, and all current peptide records are written to _raw.txt."},
 				{Name: "Write peptide text", Value: "true", Explanation: "Selected hit peptides and prepended query sequences are written to TXT."},
 				{Name: "Write report PDF", Value: "true", Explanation: "One PDF report is written for this export action."},
 				{Name: "rowNumbers", Value: "available", Explanation: "Selected Excel row numbers preserve original review table row identities."},
@@ -457,7 +458,7 @@ func SampleBlastWithoutReferencesReportData() ReportData {
 	if data.Blast.Family != nil {
 		for i := range data.Blast.Family.Settings {
 			switch data.Blast.Family.Settings[i].Name {
-			case "UseUniProtReference", "UseInterProReference":
+			case "Use UniProt evidence when ranking merged rows", "Use InterPro evidence when ranking merged rows":
 				data.Blast.Family.Settings[i].Value = "false"
 				data.Blast.Family.Settings[i].Explanation = "External reference scoring was disabled in this sample no-reference BLAST scenario."
 			}
@@ -565,6 +566,7 @@ func sampleFiles(now time.Time, outputDir string) []GeneratedFile {
 	return []GeneratedFile{
 		sampleFile(now, outputDir, "spirodela_lignin_keyword.xlsx", "selected Excel", "selected keyword rows exported as the main review workbook", 28541),
 		sampleFile(now, outputDir, "spirodela_lignin_keyword_raw.xlsx", "raw Excel", "all current keyword rows exported for audit comparison", 49322),
+		sampleFile(now, outputDir, "spirodela_lignin_keyword_raw.txt", "raw peptide text", "all current keyword peptide records exported for audit comparison", 18452),
 		sampleFile(now, outputDir, "spirodela_lignin_keyword.txt", "peptide text", "peptide FASTA-style sequence records for selected rows", 7148),
 	}
 }
@@ -573,6 +575,7 @@ func sampleBlastFiles(now time.Time, outputDir string) []GeneratedFile {
 	return []GeneratedFile{
 		sampleFile(now, outputDir, "PAL.xlsx", "selected BLAST Excel", "selected Family BLAST rows exported after filter-assisted review", 38428),
 		sampleFile(now, outputDir, "PAL_raw.xlsx", "raw BLAST Excel", "all current Family BLAST rows exported for audit comparison", 81240),
+		sampleFile(now, outputDir, "PAL_raw.txt", "raw BLAST peptide text", "all current Family BLAST peptide records exported for audit comparison", 39812),
 		sampleFile(now, outputDir, "PAL.txt", "BLAST peptide text", "prepended PAL query sequences plus selected target peptide records", 18244),
 	}
 }
@@ -700,10 +703,11 @@ func sampleBlastSteps(start time.Time, now time.Time) []GenerationStep {
 		makeStep("Resolve BLAST export directory", 54, "ok", "output folder resolved before file writing"),
 		makeStep("Write selected BLAST Excel", 842, "ok", "12 selected Family BLAST rows written with rowNumbers/filterFlags"),
 		makeStep("Write raw BLAST Excel", 1395, "ok", "27 current Family BLAST rows written for audit comparison"),
+		makeStep("Write raw Family BLAST peptide text", 686, "ok", "all current family hit records written to PAL_raw.txt"),
 		makeStep("Fetch/use BLAST peptide sequences", 5380, "warning", "14 sequence records available, 1 selected hit unavailable"),
 		makeStep("Prepend query sequence records", 88, "ok", "3 family member query records prepended to TXT output"),
 		makeStep("Write BLAST peptide text", 477, "ok", "query records plus selected hit records written"),
-		makeStep("Capture file metadata and hashes", 221, "ok", "3 generated data files inspected in sample data"),
+		makeStep("Capture file metadata and hashes", 221, "ok", "4 generated data files inspected in sample data"),
 		makeStep("Render BLAST report PDF", now.Sub(cursor).Milliseconds(), "ok", "PDF report rendered from structured BLAST sample data"),
 	}
 }
@@ -836,9 +840,10 @@ func sampleSteps(start time.Time, now time.Time) []GenerationStep {
 		makeStep("Resolve output directory", 42, "ok", "output directory resolved from application path"),
 		makeStep("Write selected Excel", 731, "ok", "11 selected rows written"),
 		makeStep("Write raw Excel", 1048, "ok", "23 current rows written"),
+		makeStep("Write raw peptide text", 502, "ok", "all current keyword peptide records written to _raw.txt"),
 		makeStep("Use peptide sequences", 4260, "warning", "10 written, 1 skipped because sequence ID was unavailable"),
 		makeStep("Write peptide text", 388, "ok", "10 records written"),
-		makeStep("Capture file metadata", 96, "ok", "3 generated files inspected in sample data"),
+		makeStep("Capture file metadata", 96, "ok", "4 generated files inspected in sample data"),
 		makeStep("Compute hashes", 183, "ok", "SHA-256, SHA-1, and MD5 captured"),
 		makeStep("Render report PDF", now.Sub(cursor).Milliseconds(), "ok", "PDF report was written from completed sample export data"),
 	}

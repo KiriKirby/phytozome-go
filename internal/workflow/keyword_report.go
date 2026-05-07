@@ -124,6 +124,7 @@ func inspectKeywordGeneratedFiles(files exportFileResult, sequenceAudit report.S
 	specs := []fileSpec{
 		{files.ExcelPath, "selected Excel", "selected keyword rows exported as the main workbook"},
 		{files.RawExcelPath, "raw Excel", "all current keyword rows exported for audit comparison"},
+		{files.RawTextPath, "raw peptide text", "all current keyword peptide sequence records exported for audit comparison"},
 		{files.TextPath, "peptide text", keywordTextFileRole(sequenceAudit)},
 	}
 	out := make([]report.GeneratedFile, 0, len(specs))
@@ -768,10 +769,10 @@ func dynamicColumnStatsUse(header string) string {
 
 func keywordExportSettings(baseName string, outputDir string, settings exportSettings) []report.NameValue {
 	return []report.NameValue{
-		{Name: "File base name", Value: baseName, Explanation: "Base name used for selected Excel, raw Excel, and peptide text outputs."},
+		{Name: "File base name", Value: baseName, Explanation: "Base name used for selected Excel, raw Excel, peptide text, and raw peptide text outputs."},
 		{Name: "Output folder", Value: outputDir, Explanation: "Destination directory for the current export action."},
 		{Name: "Write selected Excel", Value: fmt.Sprintf("%t", settings.WriteExcel), Explanation: "Selected rows are written to the main workbook when true."},
-		{Name: "Write raw Excel", Value: fmt.Sprintf("%t", settings.WriteRawExcel), Explanation: "All current rows are written to the raw workbook when true."},
+		{Name: "Write raw Excel and raw text", Value: fmt.Sprintf("%t", settings.WriteRawExcel), Explanation: "All current rows are written to _raw.xlsx, and _raw.txt is also written when text export is enabled."},
 		{Name: "Write peptide text", Value: fmt.Sprintf("%t", settings.WriteText), Explanation: "Peptide sequences are fetched and written only when true."},
 		{Name: "Write report PDF", Value: fmt.Sprintf("%t", settings.WriteReport), Explanation: "One PDF report is written for the current export action when true."},
 	}
