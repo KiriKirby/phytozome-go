@@ -2,13 +2,14 @@
 
 ## Version
 
-`v20260507T194049Z`
+`v20260508T042023Z`
 
 ## Highlights
 
-- Rebuilt release assets from the current working tree for Windows, Linux, and macOS.
-- Includes performance helper package updates, faster workflow paths, richer BLAST/filter/report behavior, and TUI refinements from the current source changes.
-- Preserves the repository's existing zip asset names for GitHub Releases.
+- Stabilized the Family BLAST custom grouping modal focus model.
+- Custom grouping now opens as a fresh modal flow after closing the Family BLAST settings modal, preventing nested TUI focus leaks.
+- Mouse selection in the two-pane grouping editor now switches panes only on the final click event, avoiding the left-pane/right-pane focus flash.
+- Preserves stacked child modal behavior inside the custom grouping editor and restores parent selection state after child dialogs close.
 
 ## Validation
 
