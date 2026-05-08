@@ -1182,6 +1182,56 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 			}
 			return FamilyBlastSettingsResult{Settings: out, Refresh: true}, nil
 		}
+		if result.Nav == tui.NavCustomizeGroups {
+			settings := result.Settings
+			out := model.FamilyBlastSettings{
+				Enabled:                    settings.Enabled,
+				GroupByDetectedPrefix:      settings.GroupByDetectedPrefix,
+				MergeRowsByTarget:          settings.MergeRowsByTarget,
+				KeepBestHitPerTarget:       settings.KeepBestHitPerTarget,
+				PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
+				CustomizeGroups:            true,
+				MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
+				StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
+				StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
+				StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
+				StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
+				NormalizeInnerPunctuation:  settings.NormalizeInnerPunctuation,
+				StripTerminalSubtypeSuffix: settings.StripTerminalSubtypeSuffix,
+				KeepDistinctQuerySubgroups: settings.KeepDistinctQuerySubgroups,
+				UseUniProtReference:        defaults.UseUniProtReference,
+				UseInterProReference:       defaults.UseInterProReference,
+				RankingTieBreakerOrder:     settings.RankingTieBreakerOrder,
+			}
+			if out.MinimumGroupSize < 2 {
+				out.MinimumGroupSize = 2
+			}
+			customResult, err := tui.RunFamilyBlastCustomizeModal(tui.FamilyBlastCustomizePage{
+				Path:             p.blastTUIPath("BLAST input", "Family BLAST", "Customize groups"),
+				Title:            p.t("Customize Family BLAST groups"),
+				Message:          p.t("Review the proposed family groups. Move a member out from the left pane, or add an ungrouped query from the right pane. New groups can be created when the automatic grouping is not right."),
+				Groups:           tuiFamilyBlastCustomGroups(preview.Groups),
+				Ungrouped:        append([]string(nil), preview.Ungrouped...),
+				UngroupedMembers: tuiFamilyBlastMembers(preview.UngroupedMembers),
+				AllowBack:        true,
+				AllowHome:        true,
+				ConfirmText:      tui.ButtonApply,
+			})
+			if err != nil {
+				return FamilyBlastSettingsResult{}, err
+			}
+			if customResult.Nav == tui.NavBack {
+				tuiSettings = settings
+				continue
+			}
+			if navErr := tuiNavError(customResult.Nav, backTarget); navErr != nil {
+				return FamilyBlastSettingsResult{}, navErr
+			}
+			return FamilyBlastSettingsResult{
+				Settings:     out,
+				CustomGroups: promptFamilyBlastGroupsFromTUI(customResult.CustomGroups),
+			}, nil
+		}
 		if navErr := tuiNavError(result.Nav, backTarget); navErr != nil {
 			return FamilyBlastSettingsResult{}, navErr
 		}
@@ -1263,6 +1313,18 @@ func tuiFamilyBlastGroups(groups []FamilyBlastGroup) []tui.FamilyBlastGroup {
 			Labels:  append([]string(nil), group.Labels...),
 			Members: tuiFamilyBlastMembers(group.Members),
 			Queries: group.Queries,
+		})
+	}
+	return out
+}
+
+func tuiFamilyBlastCustomGroups(groups []FamilyBlastGroup) []tui.FamilyBlastCustomGroup {
+	out := make([]tui.FamilyBlastCustomGroup, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, tui.FamilyBlastCustomGroup{
+			Name:    strings.TrimSpace(group.Name),
+			Labels:  append([]string(nil), group.Labels...),
+			Members: tuiFamilyBlastMembers(group.Members),
 		})
 	}
 	return out

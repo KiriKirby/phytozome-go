@@ -821,7 +821,7 @@ func TestAutoIdentifyBlastLabelUsesResolvedPhytozomeAliases(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyBlastLabelResultRetainsKeywordAliasesForFastaHeader(t *testing.T) {
+func TestAutoIdentifyBlastLabelResultKeepsFastaHeaderLabelAndRetainsKeywordAliases(t *testing.T) {
 	w := &BlastWizard{}
 	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
 		"AT1G01010.1": {{Aliases: "NAC001; ANAC001", LabelName: "NAC001", AutoDefine: "NAC domain protein"}},
@@ -838,8 +838,8 @@ func TestAutoIdentifyBlastLabelResultRetainsKeywordAliasesForFastaHeader(t *test
 	}
 
 	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"}, item)
-	if result.Label == "" || result.Label == "OldName" || result.Label == "AT1G01010.1" {
-		t.Fatalf("label = %q, want a keyword-derived alias label", result.Label)
+	if result.Label != "OldName" {
+		t.Fatalf("label = %q, want FASTA header label OldName", result.Label)
 	}
 	found := false
 	for _, alias := range result.Aliases {
@@ -884,6 +884,32 @@ func TestAutoIdentifyBlastLabelResultUsesDraggedFastaFileHeaderSpecies(t *testin
 	}
 	if !found {
 		t.Fatalf("aliases = %#v, want TT10 from keyword lookup", result.Aliases)
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultDoesNotLetDatabaseAliasOverrideFastaHeaderLabel(t *testing.T) {
+	w := &BlastWizard{}
+	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
+		"AT5G62380.1": {{Aliases: "VND6; ANAC101", LabelName: "VND6", AutoDefine: "vascular related NAC domain 6"}},
+	}}
+	item := blastQueryItem{
+		RawInput: ">Arabidopsis thaliana TAIR10|AT5G62380.1 (HeaderName)\nMESLAHIPP",
+		QuerySource: &model.QuerySequenceSource{
+			SourceDatabase: "fasta",
+			ProteinID:      "AT5G62380.1",
+			TranscriptID:   "AT5G62380.1",
+			GeneID:         "AT5G62380",
+			LabelName:      "HeaderName",
+		},
+		LabelName: "HeaderName",
+	}
+
+	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"}, item)
+	if result.Label != "HeaderName" {
+		t.Fatalf("label = %q, want FASTA header label HeaderName", result.Label)
+	}
+	if !containsString(result.Aliases, "VND6") {
+		t.Fatalf("aliases = %#v, want database alias retained without overriding label", result.Aliases)
 	}
 }
 
@@ -965,7 +991,7 @@ func TestAutoIdentifyBlastLabelFallsBackToResolvedIDs(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyBlastLabelRejectsECStyleHeaderAndFallsBackToProteinID(t *testing.T) {
+func TestAutoIdentifyBlastLabelKeepsECStyleFastaHeaderLabel(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{
 		RawInput: ">A.thaliana TAIR10|AT5G48930.1 (AtE2.3.1.133)\nMPEPTIDE",
@@ -978,12 +1004,12 @@ func TestAutoIdentifyBlastLabelRejectsECStyleHeaderAndFallsBackToProteinID(t *te
 		},
 	}
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "AT5G48930.1" {
-		t.Fatalf("unexpected fallback label: %q", got)
+	if got != "E2.3.1.133" {
+		t.Fatalf("unexpected FASTA header label: %q", got)
 	}
 }
 
-func TestAutoIdentifyBlastLabelRejectsLowercaseAliasStyleAndFallsBackToProteinID(t *testing.T) {
+func TestAutoIdentifyBlastLabelKeepsLowercaseFastaHeaderLabel(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{
 		RawInput: ">A.thaliana TAIR10|AT1G52760.1 (AtLysoPL2)\nMPEPTIDE",
@@ -996,8 +1022,8 @@ func TestAutoIdentifyBlastLabelRejectsLowercaseAliasStyleAndFallsBackToProteinID
 		},
 	}
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "AT1G52760.1" {
-		t.Fatalf("unexpected fallback label: %q", got)
+	if got != "LysoPL2" {
+		t.Fatalf("unexpected FASTA header label: %q", got)
 	}
 }
 
@@ -1073,6 +1099,18 @@ func TestHarmonizeAutoIdentifiedBlastLabelsRetainsCompactFunctionalCandidates(t 
 	}
 	if !containsString(candidates1, out[1].LabelName) {
 		t.Fatalf("second harmonized label=%q not in candidates=%v", out[1].LabelName, candidates1)
+	}
+}
+
+func TestHarmonizeAutoIdentifiedBlastLabelsWithLocksKeepsPreexistingLabels(t *testing.T) {
+	items := []blastQueryItem{
+		{LabelName: "HeaderName", QuerySource: &model.QuerySequenceSource{LabelName: "HeaderName", Aliases: "VND6; ANAC101"}},
+		{LabelName: "VND7", QuerySource: &model.QuerySequenceSource{LabelName: "VND7", Aliases: "ANAC030; VND7"}},
+	}
+
+	out := harmonizeAutoIdentifiedBlastLabelsWithLocks(items, []bool{true, false})
+	if out[0].LabelName != "HeaderName" {
+		t.Fatalf("locked label changed to %q, want HeaderName", out[0].LabelName)
 	}
 }
 

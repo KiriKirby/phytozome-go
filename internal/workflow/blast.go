@@ -4619,6 +4619,7 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 		labelCtx := mergeContexts(ctx, taskCtx)
 		phytozomeSource := phytozome.NewClient(w.httpClient)
 		out := cloneBlastQueryItems(items)
+		lockedLabels := blastAutoIdentifyLockedLabels(out)
 		workerCount := maxInt(parallelismFor(len(out), maxParallelQueryJobs), networkParallelismFor(len(out)))
 		type labelResult struct {
 			index  int
@@ -4666,7 +4667,7 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 			}
 		}
 		workers.Wait()
-		out = harmonizeAutoIdentifiedBlastLabels(out)
+		out = harmonizeAutoIdentifiedBlastLabelsWithLocks(out, lockedLabels)
 		return out, nil
 	})
 }
@@ -4756,6 +4757,10 @@ type blastAutoLabelResult struct {
 }
 
 func harmonizeAutoIdentifiedBlastLabels(items []blastQueryItem) []blastQueryItem {
+	return harmonizeAutoIdentifiedBlastLabelsWithLocks(items, nil)
+}
+
+func harmonizeAutoIdentifiedBlastLabelsWithLocks(items []blastQueryItem, lockedLabels []bool) []blastQueryItem {
 	out := cloneBlastQueryItems(items)
 	if len(out) <= 1 {
 		return out
@@ -4776,6 +4781,9 @@ func harmonizeAutoIdentifiedBlastLabels(items []blastQueryItem) []blastQueryItem
 		}
 	}
 	for i := range out {
+		if i < len(lockedLabels) && lockedLabels[i] {
+			continue
+		}
 		best := strings.TrimSpace(out[i].LabelName)
 		bestScore := -1
 		for _, candidate := range candidatesByIndex[i] {
@@ -4791,6 +4799,14 @@ func harmonizeAutoIdentifiedBlastLabels(items []blastQueryItem) []blastQueryItem
 				out[i].QuerySource.LabelName = best
 			}
 		}
+	}
+	return out
+}
+
+func blastAutoIdentifyLockedLabels(items []blastQueryItem) []bool {
+	out := make([]bool, len(items))
+	for i, item := range items {
+		out[i] = strings.TrimSpace(item.LabelName) != ""
 	}
 	return out
 }
@@ -4899,19 +4915,27 @@ func (w *BlastWizard) autoIdentifyBlastLabel(ctx context.Context, phytozomeSourc
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabelResult(ctx context.Context, phytozomeSource source.DataSource, selected model.SpeciesCandidate, item blastQueryItem) blastAutoLabelResult {
-	candidates := make([]string, 0, 6)
+	databaseCandidates := make([]string, 0, 6)
 	aliases := make([]string, 0, 16)
-	candidates = append(candidates, fastaHeaderLabelNameFromInput(item.RawInput))
-	candidates = append(candidates, querySourceAliasLabel(item.QuerySource))
 	aliases = append(aliases, blastAutoLabelCandidates(item)...)
 	for _, labelSpecies := range w.phytozomeKeywordLabelSpeciesForItem(ctx, phytozomeSource, selected, item) {
 		result := w.autoIdentifyBlastLabelResultFromPhytozome(ctx, phytozomeSource, labelSpecies, item)
 		if result.Label != "" {
-			candidates = append(candidates, result.Label)
+			databaseCandidates = append(databaseCandidates, result.Label)
 		}
 		aliases = append(aliases, result.Aliases...)
 	}
-	if label := bestTrustedAutoLabel(candidates...); label != "" {
+	if label := strings.TrimSpace(item.LabelName); label != "" {
+		return blastAutoLabelResult{Label: label, Aliases: uniqueStrings(append(aliases, label))}
+	}
+	if label := fastaHeaderLabelNameFromInput(item.RawInput); label != "" {
+		return blastAutoLabelResult{Label: label, Aliases: uniqueStrings(append(aliases, label))}
+	}
+	if label := fastaQuerySourceLabel(item.QuerySource); label != "" {
+		return blastAutoLabelResult{Label: label, Aliases: uniqueStrings(append(aliases, label))}
+	}
+	databaseCandidates = append(databaseCandidates, querySourceAliasLabel(item.QuerySource))
+	if label := bestTrustedAutoLabel(databaseCandidates...); label != "" {
 		return blastAutoLabelResult{Label: label, Aliases: uniqueStrings(append(aliases, label))}
 	}
 	label := autoIdentifyBlastLabel(item)
@@ -7152,11 +7176,16 @@ func aliasHasInternalDigitPattern(value string) bool {
 }
 
 func autoIdentifyBlastLabel(item blastQueryItem) string {
-	candidates := []string{
-		fastaHeaderLabelNameFromInput(item.RawInput),
-		querySourceAliasLabel(item.QuerySource),
-		strings.TrimSpace(item.LabelName),
+	if label := strings.TrimSpace(item.LabelName); label != "" {
+		return label
 	}
+	if label := fastaHeaderLabelNameFromInput(item.RawInput); label != "" {
+		return label
+	}
+	if label := fastaQuerySourceLabel(item.QuerySource); label != "" {
+		return label
+	}
+	candidates := []string{querySourceAliasLabel(item.QuerySource)}
 	if label := bestTrustedAutoLabel(candidates...); label != "" {
 		return label
 	}
@@ -7208,6 +7237,13 @@ func querySourceAliasLabel(source *model.QuerySequenceSource) string {
 		return strings.TrimSpace(source.AutoDefine)
 	}
 	return ""
+}
+
+func fastaQuerySourceLabel(source *model.QuerySequenceSource) string {
+	if source == nil || !strings.EqualFold(strings.TrimSpace(source.SourceDatabase), "fasta") {
+		return ""
+	}
+	return strings.TrimSpace(source.LabelName)
 }
 
 func bestTrustedAutoLabel(candidates ...string) string {

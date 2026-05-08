@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -701,6 +702,52 @@ func TestFamilyBlastCustomizeModalMouseSelectsRightPaneWithoutSnapBack(t *testin
 	}
 }
 
+func TestFamilyBlastCustomizeModalMouseDownDoesNotSwitchActivePane(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+		},
+		Ungrouped: []string{"X1", "X2", "X3"},
+		AllowBack: true,
+	}, app, &result)
+
+	capture := app.GetInputCapture()
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus after Tab = %T, want right list", app.GetFocus())
+	}
+
+	screen := tcell.NewSimulationScreen("")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(160, 40)
+	modal.root.SetRect(0, 0, 160, 40)
+	modal.root.Draw(screen)
+
+	x, y, _, _ := modal.groupedList.GetInnerRect()
+	mouse := tcell.NewEventMouse(x+1, y+1, tcell.Button1, 0)
+	modal.groupedList.MouseHandler()(tview.MouseLeftDown, mouse, func(p tview.Primitive) {
+		app.SetFocus(p)
+	})
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus after grouped mouse down = %T, want right list until click", app.GetFocus())
+	}
+
+	consumed, _ := modal.groupedList.MouseHandler()(tview.MouseLeftClick, mouse, func(p tview.Primitive) {
+		app.SetFocus(p)
+	})
+	if !consumed {
+		t.Fatal("grouped list should consume mouse click")
+	}
+	if app.GetFocus() != modal.groupedList {
+		t.Fatalf("focus after grouped mouse click = %T, want grouped list", app.GetFocus())
+	}
+}
+
 func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T) {
 	app := newApp()
 	var result FamilyBlastResult
@@ -725,6 +772,79 @@ func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T
 	if got, wantExact := modal.chooseGroupOverlayHeight, 12; got != wantExact {
 		t.Fatalf("choose-group overlay height = %d, want %d for 3 groups with extra padding", got, wantExact)
 	}
+}
+
+func TestFamilyBlastCustomizeModalShowsOnlyActiveListSelection(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title:     "Customize Family BLAST groups",
+		Groups:    []FamilyBlastCustomGroup{{Name: "PAL", Labels: []string{"PAL1", "PAL2"}}},
+		Ungrouped: []string{"X1", "X2"},
+		AllowBack: true,
+	}, app, &result)
+
+	if listSelectedFocusOnly(modal.groupedList) {
+		t.Fatal("active grouped list should show its selected row")
+	}
+	if !listSelectedFocusOnly(modal.rightList) {
+		t.Fatal("inactive right list should hide its selected row")
+	}
+
+	capture := app.GetInputCapture()
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if !listSelectedFocusOnly(modal.groupedList) {
+		t.Fatal("inactive grouped list should hide its selected row after Tab")
+	}
+	if listSelectedFocusOnly(modal.rightList) {
+		t.Fatal("active right list should show its selected row after Tab")
+	}
+}
+
+func TestFamilyBlastCustomizeSubModalRestoresParentSelection(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+			{Name: "CAD", Labels: []string{"CAD1", "CAD2"}},
+		},
+		Ungrouped: []string{"X1", "X2", "X3"},
+		AllowBack: true,
+	}, app, &result)
+
+	capture := app.GetInputCapture()
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	capture(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	if got := modal.rightList.GetCurrentItem(); got != 1 {
+		t.Fatalf("right selection before modal = %d, want 1", got)
+	}
+
+	capture(tcell.NewEventKey(tcell.KeyEnter, 0, 0))
+	capture(tcell.NewEventKey(tcell.KeyDown, 0, 0))
+	capture(tcell.NewEventKey(tcell.KeyEscape, 0, 0))
+
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus after closing submodal = %T, want right list", app.GetFocus())
+	}
+	if got := modal.rightList.GetCurrentItem(); got != 1 {
+		t.Fatalf("right selection after closing submodal = %d, want 1", got)
+	}
+	if listSelectedFocusOnly(modal.rightList) {
+		t.Fatal("right list should remain the single active selected list after closing submodal")
+	}
+	if !listSelectedFocusOnly(modal.groupedList) {
+		t.Fatal("grouped list should remain visually inactive after closing submodal")
+	}
+}
+
+func listSelectedFocusOnly(list *tview.List) bool {
+	value := reflect.ValueOf(list).Elem().FieldByName("selectedFocusOnly")
+	if !value.IsValid() || value.Kind() != reflect.Bool {
+		return false
+	}
+	return value.Bool()
 }
 
 type overflowPrimitive struct {

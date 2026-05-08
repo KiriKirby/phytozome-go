@@ -28,11 +28,12 @@ var ErrTaskCancelled = errors.New("task cancelled")
 type NavAction string
 
 const (
-	NavNone    NavAction = ""
-	NavBack    NavAction = "back"
-	NavHome    NavAction = "home"
-	NavExit    NavAction = "exit"
-	NavRefresh NavAction = "refresh"
+	NavNone            NavAction = ""
+	NavBack            NavAction = "back"
+	NavHome            NavAction = "home"
+	NavExit            NavAction = "exit"
+	NavRefresh         NavAction = "refresh"
+	NavCustomizeGroups NavAction = "customize_groups"
 )
 
 type Choice struct {
@@ -4448,26 +4449,8 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		return captureSettingsWithCustomize(false)
 	}
 	customizeGroups := func() {
-		settingsResult := captureSettingsWithCustomize(true)
-		customPage := FamilyBlastCustomizePage{
-			Breadcrumb:       page.Breadcrumb,
-			Path:             append(append([]string(nil), page.Path...), "Customize groups"),
-			Title:            "Customize Family BLAST groups",
-			Message:          "Review the proposed family groups. Move a member out from the left pane, or add an ungrouped query from the right pane. New groups can be created when the automatic grouping is not right.",
-			Groups:           groupsToCustomGroups(page.Groups),
-			Ungrouped:        append([]string(nil), page.PreviewUngrouped...),
-			UngroupedMembers: compactFamilyBlastMembers(page.PreviewUngroupedMembers, page.PreviewUngrouped),
-			AllowBack:        true,
-			AllowHome:        page.AllowHome,
-			ConfirmText:      page.ConfirmText,
-		}
-		customResult, err := RunFamilyBlastCustomizeModal(customPage)
-		if err != nil || customResult.Nav == NavBack {
-			setFocusAt(focusIndex)
-			return
-		}
-		result.Settings = settingsResult
-		result.CustomGroups = append([]FamilyBlastCustomGroup(nil), customResult.CustomGroups...)
+		result.Settings = captureSettingsWithCustomize(true)
+		result.Nav = NavCustomizeGroups
 		app.Stop()
 	}
 
@@ -4789,9 +4772,27 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	selectedGroupedMemberID := ""
 	selectedUngrouped := 0
 	statusLine := ""
-	subModalOpen := false
-	var subModalCapture inputCaptureFunc
 	groupedRows := make([]groupedListRef, 0, 16)
+
+	type customizeModalState struct {
+		activePane              int
+		groupedCurrent          int
+		rightCurrent            int
+		selectedGroup           int
+		selectedGroupedMemberID string
+		selectedUngrouped       int
+	}
+	type customizeOverlay struct {
+		root    tview.Primitive
+		capture inputCaptureFunc
+		restore func()
+		focus   tview.Primitive
+	}
+	modalStack := make([]customizeOverlay, 0, 2)
+	var refreshGroupedList func()
+	var refreshRightList func()
+	var refreshStatus func()
+	var applyGroupedSelection func(index int)
 
 	groupedList := tview.NewList()
 	groupedList.SetBorder(true).SetTitle(" Grouped items ").SetTitleAlign(tview.AlignCenter)
@@ -4820,6 +4821,8 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		activePane = index
 		setFocusBorder(groupedList.Box, index == 0)
 		setFocusBorder(rightList.Box, index == 1)
+		groupedList.SetSelectedFocusOnly(index != 0)
+		rightList.SetSelectedFocusOnly(index != 1)
 	}
 
 	setPaneFocus := func(index int) {
@@ -4869,8 +4872,96 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		return groupedList
 	}
+	captureMainState := func() customizeModalState {
+		return customizeModalState{
+			activePane:              activePane,
+			groupedCurrent:          groupedList.GetCurrentItem(),
+			rightCurrent:            rightList.GetCurrentItem(),
+			selectedGroup:           selectedGroup,
+			selectedGroupedMemberID: selectedGroupedMemberID,
+			selectedUngrouped:       selectedUngrouped,
+		}
+	}
+	restoreMainState := func(state customizeModalState) {
+		selectedGroup = state.selectedGroup
+		selectedGroupedMemberID = state.selectedGroupedMemberID
+		selectedUngrouped = state.selectedUngrouped
+		refreshGroupedList()
+		refreshRightList()
+		setListSelection(groupedList, state.groupedCurrent)
+		setListSelection(rightList, state.rightCurrent)
+		if state.groupedCurrent >= 0 && state.groupedCurrent < len(groupedRows) {
+			applyGroupedSelection(state.groupedCurrent)
+		}
+		setPaneFocus(state.activePane)
+	}
+	currentRoot := func() tview.Primitive {
+		if len(modalStack) == 0 {
+			return mainRoot
+		}
+		return modalStack[len(modalStack)-1].root
+	}
+	showStackedModal := func(box tview.Primitive, width int, height int, focus tview.Primitive, capture inputCaptureFunc, restore func()) {
+		base := currentRoot()
+		root := overlayRootOn(base, box, width, height)
+		modalStack = append(modalStack, customizeOverlay{
+			root:    root,
+			capture: capture,
+			restore: restore,
+			focus:   focus,
+		})
+		app.SetRoot(root, true)
+		if focus != nil {
+			app.SetFocus(focus)
+		}
+	}
+	closeTopModal := func() {
+		if len(modalStack) == 0 {
+			return
+		}
+		top := modalStack[len(modalStack)-1]
+		modalStack = modalStack[:len(modalStack)-1]
+		app.SetRoot(currentRoot(), true)
+		if top.restore != nil {
+			top.restore()
+		} else if len(modalStack) > 0 && modalStack[len(modalStack)-1].focus != nil {
+			app.SetFocus(modalStack[len(modalStack)-1].focus)
+		} else {
+			setPaneFocus(activePane)
+		}
+	}
+	showSmallStatusModal := func(title string, messageText string) {
+		body := newButtonFlex()
+		body.SetBorder(true)
+		body.SetTitle(" " + trimColon(title) + " ")
+		body.SetTitleAlign(tview.AlignCenter)
+		body.AddItem(textBlock(messageText), 0, 1, false)
+		closeModal := func() {
+			closeTopModal()
+		}
+		addButtonRow(body, modalButtons([]buttonSpec{}, true, ButtonOK, ShortcutApply, func(NavAction) {}, closeModal))
+		capture := func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape, tcell.KeyEnter:
+				closeModal()
+				return nil
+			default:
+				return nil
+			}
+		}
+		showStackedModal(body, 58, 8, body, capture, func() {
+			if len(modalStack) > 0 && modalStack[len(modalStack)-1].focus != nil {
+				app.SetFocus(modalStack[len(modalStack)-1].focus)
+				return
+			}
+			setPaneFocus(activePane)
+		})
+	}
 
-	applyGroupedSelection := func(index int) {
+	applyGroupedSelection = func(index int) {
 		if index < 0 || index >= len(groupedRows) {
 			if len(groups) == 0 {
 				selectedGroup = 0
@@ -4887,9 +4978,6 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		selectedGroupedMemberID = ref.MemberID
 	}
 
-	var refreshGroupedList func()
-	var refreshRightList func()
-	var refreshStatus func()
 	selectedGroupIndex := func() int {
 		if len(groups) == 0 {
 			return -1
@@ -4983,16 +5071,14 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		refreshStatus()
 	}
 	showNameInputModal := func(title string, confirmLabel string, initial string, onConfirm func(string) string) {
+		parentState := captureMainState()
 		input := tview.NewInputField().SetLabel("name ").SetText(strings.TrimSpace(initial)).SetFieldWidth(24)
 		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
 		input.SetLabelColor(tview.Styles.SecondaryTextColor)
 		input.SetFieldBackgroundColor(colorPanel)
 		message := hintView("")
 		closeModal := func() {
-			subModalOpen = false
-			subModalCapture = nil
-			app.SetRoot(mainRoot, true)
-			setPaneFocus(activePane)
+			closeTopModal()
 		}
 		confirmModal := func() {
 			if msg := onConfirm(strings.TrimSpace(input.GetText())); msg != "" {
@@ -5010,8 +5096,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		addButtonRow(box, modalButtons([]buttonSpec{
 			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
 		}, true, confirmLabel, ShortcutApply, func(NavAction) {}, confirmModal))
-		subModalOpen = true
-		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
 				return nil
 			}
@@ -5020,6 +5105,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				closeModal()
 				return nil
 			case tcell.KeyEnter:
+				if event.Modifiers()&tcell.ModCtrl != 0 {
+					return nil
+				}
 				confirmModal()
 				return nil
 			case tcell.KeyTab, tcell.KeyBacktab:
@@ -5031,9 +5119,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			}
 			return nil
 		}
-		overlay := overlayRootOn(mainRoot, box, 40, 7)
-		app.SetRoot(overlay, true)
-		app.SetFocus(input)
+		showStackedModal(box, 40, 7, input, capture, func() {
+			restoreMainState(parentState)
+		})
 	}
 	createGroup := func() {
 		showNameInputModal("New group", "Create", "", func(name string) string {
@@ -5121,10 +5209,12 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			refreshStatus()
 			return
 		}
+		parentState := captureMainState()
 		list := tview.NewList()
 		list.ShowSecondaryText(false)
 		list.SetSelectedTextColor(tcell.ColorBlack)
 		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetSelectedFocusOnly(false)
 		list.SetBorder(true).SetTitle(" Choose target group ").SetTitleAlign(tview.AlignCenter)
 		for _, group := range groups {
 			list.AddItem(fmt.Sprintf("%s (%d)", group.Name, len(group.Members)), "", 0, nil)
@@ -5133,10 +5223,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			list.SetCurrentItem(idx)
 		}
 		closeModal := func() {
-			subModalOpen = false
-			subModalCapture = nil
-			app.SetRoot(mainRoot, true)
-			setPaneFocus(1)
+			closeTopModal()
 		}
 		applyMove := func() {
 			index := list.GetCurrentItem()
@@ -5152,6 +5239,10 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			}
 			moveSelectedUngroupedToGroup(index)
 		}
+		confirmMove := func() {
+			applyMove()
+			closeModal()
+		}
 		box := newButtonFlex()
 		box.SetBorder(true)
 		box.SetTitle(" Add to group ")
@@ -5160,12 +5251,8 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		box.AddItem(list, 0, 1, true)
 		addButtonRow(box, modalButtons([]buttonSpec{
 			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
-		}, true, "Add", ShortcutApply, func(NavAction) {}, func() {
-			applyMove()
-			closeModal()
-		}))
-		subModalOpen = true
-		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+		}, true, "Add", ShortcutApply, func(NavAction) {}, confirmMove))
+		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
 				return nil
 			}
@@ -5174,8 +5261,10 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				closeModal()
 				return nil
 			case tcell.KeyEnter:
-				applyMove()
-				closeModal()
+				if event.Modifiers()&tcell.ModCtrl != 0 {
+					return nil
+				}
+				confirmMove()
 				return nil
 			}
 			if handler := list.InputHandler(); handler != nil {
@@ -5189,9 +5278,10 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		overlayHeight := minInt(36, maxInt(12, len(groups)+8))
 		modal.chooseGroupOverlayHeight = overlayHeight
-		overlay := overlayRootOn(mainRoot, box, 60, overlayHeight)
-		app.SetRoot(overlay, true)
-		app.SetFocus(list)
+		showStackedModal(box, 60, overlayHeight, list, capture, func() {
+			parentState.selectedUngrouped = selectedUngrouped
+			restoreMainState(parentState)
+		})
 	}
 	selectedItemMember := func() (FamilyBlastMember, func(FamilyBlastMember), bool) {
 		if activePane == 0 {
@@ -5226,6 +5316,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			refreshStatus()
 			return
 		}
+		parentState := captureMainState()
 		aliases := compactFamilyBlastGroupLabels(member.Aliases)
 		if len(aliases) == 0 {
 			aliases = []string{member.LabelName}
@@ -5234,15 +5325,13 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		list.ShowSecondaryText(false)
 		list.SetSelectedTextColor(tcell.ColorBlack)
 		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetSelectedFocusOnly(false)
 		list.SetBorder(true).SetTitle(" Alias labelnames ").SetTitleAlign(tview.AlignCenter)
 		for _, alias := range aliases {
 			list.AddItem(alias, "", 0, nil)
 		}
 		closeModal := func() {
-			subModalOpen = false
-			subModalCapture = nil
-			app.SetRoot(mainRoot, true)
-			setPaneFocus(activePane)
+			closeTopModal()
 		}
 		selectedAlias := func() string {
 			if len(aliases) == 0 {
@@ -5264,6 +5353,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			}
 			if err := writeClipboardText(alias); err != nil {
 				statusLine = "Copy failed: " + err.Error()
+				showSmallStatusModal("Copy failed", statusLine)
 			} else {
 				statusLine = "Copied alias labelname."
 			}
@@ -5292,8 +5382,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyAlias, Visible: true},
 			buttonSpec{Label: "Set as labelname", Shortcut: "F2", Action: setAliasAsLabel, Visible: true, Primary: true},
 		))
-		subModalOpen = true
-		subModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
 				return nil
 			}
@@ -5310,6 +5399,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				closeModal()
 				return nil
 			case tcell.KeyEnter:
+				if event.Modifiers()&tcell.ModCtrl != 0 {
+					return nil
+				}
 				setAliasAsLabel()
 				return nil
 			}
@@ -5323,9 +5415,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			return nil
 		}
 		overlayHeight := minInt(36, maxInt(12, len(aliases)+8))
-		overlay := overlayRootOn(mainRoot, box, 68, overlayHeight)
-		app.SetRoot(overlay, true)
-		app.SetFocus(list)
+		showStackedModal(box, 68, overlayHeight, list, capture, func() {
+			restoreMainState(parentState)
+		})
 	}
 	confirm := func() {
 		if len(groups) == 0 {
@@ -5353,6 +5445,46 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			})
 		}
 		app.Stop()
+	}
+	removeOrDeleteSelected := func() {
+		if activePane != 0 {
+			return
+		}
+		index := groupedList.GetCurrentItem()
+		if index < 0 || index >= len(groupedRows) {
+			return
+		}
+		ref := groupedRows[index]
+		if !ref.IsGroup && ref.MemberID != "" {
+			moveMemberOutOfGroup(ref.Group, ref.MemberID)
+			return
+		}
+		if ref.IsGroup && ref.Group >= 0 {
+			deleteGroup(ref.Group)
+		}
+	}
+	addSelectedUngroupedToGroup := func() {
+		if activePane != 1 {
+			return
+		}
+		if member, ok := selectedUngroupedMember(); ok {
+			showChooseGroupModal(member)
+		}
+	}
+	showSelectedAliases := func() {
+		if activePane == 0 {
+			index := groupedList.GetCurrentItem()
+			if index < 0 || index >= len(groupedRows) {
+				return
+			}
+			ref := groupedRows[index]
+			if ref.IsGroup {
+				statusLine = "Select an item to view aliases."
+				refreshStatus()
+				return
+			}
+		}
+		showAliasModal()
 	}
 
 	refreshGroupedList = func() {
@@ -5418,13 +5550,13 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		selectedUngrouped = index
 	})
 	groupedList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		if event != nil && (action == tview.MouseLeftClick || action == tview.MouseLeftDown) {
+		if event != nil && action == tview.MouseLeftClick {
 			setPaneFocus(0)
 		}
 		return action, event
 	})
 	rightList.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
-		if event != nil && (action == tview.MouseLeftClick || action == tview.MouseLeftDown) {
+		if event != nil && action == tview.MouseLeftClick {
 			setPaneFocus(1)
 		}
 		return action, event
@@ -5459,45 +5591,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; app.Stop() }, Visible: page.AllowBack},
 		buttonSpec{Label: "New group", Shortcut: "Ctrl+N", Action: createGroup, Visible: true},
 		buttonSpec{Label: "Rename", Shortcut: "F2", Action: renameSelected, Visible: true},
-		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: func() {
-			if activePane == 0 {
-				index := groupedList.GetCurrentItem()
-				if index < 0 || index >= len(groupedRows) {
-					return
-				}
-				ref := groupedRows[index]
-				if ref.IsGroup {
-					statusLine = "Select an item to view aliases."
-					refreshStatus()
-					return
-				}
-			}
-			showAliasModal()
-		}, Visible: true},
-		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: func() {
-			if activePane != 0 {
-				return
-			}
-			index := groupedList.GetCurrentItem()
-			if index < 0 || index >= len(groupedRows) {
-				return
-			}
-			ref := groupedRows[index]
-			if !ref.IsGroup && ref.MemberID != "" {
-				moveMemberOutOfGroup(ref.Group, ref.MemberID)
-				return
-			}
-			if ref.IsGroup && ref.Group >= 0 {
-				deleteGroup(ref.Group)
-			}
-		}, Visible: true},
-		buttonSpec{Label: "Add to group", Shortcut: "Enter", Action: func() {
-			if activePane == 1 {
-				if member, ok := selectedUngroupedMember(); ok {
-					showChooseGroupModal(member)
-				}
-			}
-		}, Visible: true},
+		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: showSelectedAliases, Visible: true},
+		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: removeOrDeleteSelected, Visible: true},
+		buttonSpec{Label: "Add to group", Shortcut: "Enter", Action: addSelectedUngroupedToGroup, Visible: true},
 		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
@@ -5514,9 +5610,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	modal.rightList = rightList
 
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if subModalOpen {
-			if subModalCapture != nil {
-				return subModalCapture(event)
+		if len(modalStack) > 0 {
+			if capture := modalStack[len(modalStack)-1].capture; capture != nil {
+				return capture(event)
 			}
 			return nil
 		}
@@ -5554,19 +5650,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			moveListSelection(activeList(), 8)
 			return nil
 		case tcell.KeyDelete, tcell.KeyDEL:
-			if activePane != 0 {
-				return event
-			}
-			index := groupedList.GetCurrentItem()
-			if index < 0 || index >= len(groupedRows) {
-				return nil
-			}
-			ref := groupedRows[index]
-			if !ref.IsGroup && ref.MemberID != "" {
-				moveMemberOutOfGroup(ref.Group, ref.MemberID)
-			} else if ref.IsGroup && ref.Group >= 0 {
-				deleteGroup(ref.Group)
-			}
+			removeOrDeleteSelected()
 			return nil
 		case tcell.KeyF2:
 			renameSelected()
@@ -5589,9 +5673,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				return nil
 			}
 			if activePane == 1 {
-				if member, ok := selectedUngroupedMember(); ok {
-					showChooseGroupModal(member)
-				}
+				addSelectedUngroupedToGroup()
 				return nil
 			}
 		}
@@ -5600,7 +5682,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			return nil
 		}
 		if shortcutMatchesEvent("Ctrl+L", event) {
-			showAliasModal()
+			showSelectedAliases()
 			return nil
 		}
 		return event
