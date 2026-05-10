@@ -1,6 +1,9 @@
 package model
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // SpeciesCandidate is the first-step selection unit for the BLAST workflow.
 type SpeciesCandidate struct {
@@ -35,6 +38,7 @@ func (s SpeciesCandidate) DisplayLabel() string {
 
 func (s SpeciesCandidate) SearchText() string {
 	return strings.ToLower(strings.Join([]string{
+		strconv.Itoa(s.ProteomeID),
 		s.JBrowseName,
 		s.GenomeLabel,
 		s.CommonName,

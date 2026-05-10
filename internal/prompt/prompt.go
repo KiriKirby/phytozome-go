@@ -501,6 +501,7 @@ var ErrExitRequested = errors.New("exit requested")
 type KeywordRowSelection struct {
 	Rows         []model.KeywordResultRow
 	GenerateFile bool
+	RunBlast     bool
 }
 
 type BlastRowSelection struct {
@@ -696,6 +697,31 @@ func (p *Prompter) ChooseDatabase() (string, error) {
 		return "", err
 	}
 	if navErr := tuiNavError(result.Nav, ErrBackToDatabaseSelection); navErr != nil {
+		return "", navErr
+	}
+	if result.Value == "" {
+		return "", ErrExitRequested
+	}
+	return result.Value, nil
+}
+
+func (p *Prompter) ChooseBlastTargetDatabase() (string, error) {
+	result, err := tui.RunChoicePage(tui.ChoicePage{
+		Path:        p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "BLAST target database"),
+		Title:       p.t("BLAST target database:"),
+		Description: p.t("Choose the database to BLAST the selected keyword rows against."),
+		Choices: []tui.Choice{
+			{Value: "phytozome", Label: "phytozome", Description: p.t("original Phytozome workflow")},
+			{Value: "lemna", Label: "lemna", Description: p.t("lemna.org download-backed workflow")},
+		},
+		AllowBack:   true,
+		AllowHome:   true,
+		ConfirmText: tui.ButtonSelect,
+	})
+	if err != nil {
+		return "", err
+	}
+	if navErr := tuiNavError(result.Nav, ErrBackToRowSelection); navErr != nil {
 		return "", navErr
 	}
 	if result.Value == "" {
@@ -2538,7 +2564,7 @@ func parseIntDefault(value string, fallback int) int {
 	return parsed
 }
 
-func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, searchFn func(string) []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
+func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, _ func(string) []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
 	choices := make([]tui.Choice, 0, len(candidates))
 	choiceByKey := make(map[string]model.SpeciesCandidate, len(candidates))
 	for i, candidate := range candidates {
@@ -2548,6 +2574,7 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 			Value:       key,
 			Label:       candidate.DisplayLabel(),
 			Description: strings.TrimSpace(candidate.JBrowseName + targetIDLabel(candidate.ProteomeID)),
+			SearchText:  candidate.SearchText(),
 		})
 	}
 	result, err := tui.RunSearchPage(tui.SearchPage{
@@ -2559,23 +2586,6 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 		AllowBack:   true,
 		AllowHome:   true,
 		Hints:       []string{p.t("You can search by abbreviated name, full scientific name, or common name.")},
-		Filter: func(query string, _ []tui.Choice) []tui.Choice {
-			matches := searchFn(query)
-			out := make([]tui.Choice, 0, len(matches))
-			for _, candidate := range matches {
-				for key, original := range choiceByKey {
-					if original.JBrowseName == candidate.JBrowseName && original.GenomeLabel == candidate.GenomeLabel {
-						out = append(out, tui.Choice{
-							Value:       key,
-							Label:       candidate.DisplayLabel(),
-							Description: strings.TrimSpace(candidate.JBrowseName + targetIDLabel(candidate.ProteomeID)),
-						})
-						break
-					}
-				}
-			}
-			return out
-		},
 	})
 	if err != nil {
 		return model.SpeciesCandidate{}, err
@@ -2622,7 +2632,20 @@ func targetIDLabel(targetID int) string {
 	return fmt.Sprintf(" (target id %d)", targetID)
 }
 
-func (p *Prompter) KeywordInput() (string, error) {
+type KeywordInputResult struct {
+	Text       string
+	WideSearch bool
+}
+
+func (p *Prompter) KeywordInput() (KeywordInputResult, error) {
+	altText := ""
+	altShortcut := ""
+	altAction := ""
+	if p.phytozomeContext() {
+		altText = tui.ButtonWideSearch
+		altShortcut = tui.ShortcutWideSearch
+		altAction = "wide_search"
+	}
 	result, err := tui.RunMultiLinePage(tui.MultiLinePage{
 		Path:        p.tuiPath("Startup", "Species", "Keyword input"),
 		Title:       p.t("Keyword input"),
@@ -2631,15 +2654,27 @@ func (p *Prompter) KeywordInput() (string, error) {
 		AllowBack:   true,
 		AllowHome:   true,
 		ConfirmText: tui.ButtonSearch,
+		AltText:     altText,
+		AltShortcut: altShortcut,
+		AltAction:   altAction,
 	})
 	if err != nil {
-		return "", err
+		return KeywordInputResult{}, err
 	}
 	if navErr := tuiNavError(result.Nav, ErrBackToSpeciesSelection); navErr != nil {
-		return "", navErr
+		return KeywordInputResult{}, navErr
 	}
-	return result.Text, nil
+	return KeywordInputResult{Text: result.Text, WideSearch: result.Action == "wide_search"}, nil
 
+}
+
+func (p *Prompter) phytozomeContext() bool {
+	for _, part := range p.sessionPath {
+		if strings.EqualFold(strings.TrimSpace(part), "Phytozome") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (KeywordRowSelection, error) {
@@ -2667,20 +2702,23 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 	}
 	for {
 		result, err := tui.RunRowSelectionPage(tui.RowSelectionPage{
-			Path:         p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "Row selection"),
-			Title:        p.t("Keyword results:"),
-			Description:  p.t("The first result under each search term is selected by default."),
-			Columns:      columns,
-			Rows:         tableRows,
-			Selected:     selected,
-			Sort:         tui.TableSort{Column: -1, Direction: tui.SortAscending},
-			GroupSort:    true,
-			GroupLabels:  groupLabels,
-			AllowBack:    true,
-			AllowHome:    true,
-			ConfirmText:  tui.ButtonView,
-			GenerateText: tui.ButtonExport,
-			State:        p.rowStates[stateKey],
+			Path:          p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "Row selection"),
+			Title:         p.t("Keyword results:"),
+			Description:   p.t("The first result under each search term is selected by default."),
+			Columns:       columns,
+			Rows:          tableRows,
+			Selected:      selected,
+			Sort:          tui.TableSort{Column: -1, Direction: tui.SortAscending},
+			GroupSort:     true,
+			GroupLabels:   groupLabels,
+			AllowBack:     true,
+			AllowHome:     true,
+			ConfirmText:   tui.ButtonView,
+			GenerateText:  tui.ButtonExport,
+			ExtraText:     tui.ButtonRunBLAST,
+			ExtraShortcut: tui.ShortcutBlast,
+			ExtraAction:   "blast",
+			State:         p.rowStates[stateKey],
 		})
 		if err != nil {
 			return KeywordRowSelection{}, err
@@ -2700,6 +2738,9 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 		}
 		if len(chosen) == 0 {
 			return KeywordRowSelection{}, fmt.Errorf("no rows selected")
+		}
+		if result.Action == "blast" {
+			return KeywordRowSelection{Rows: chosen, RunBlast: true}, nil
 		}
 		if result.GenerateFile {
 			return KeywordRowSelection{Rows: chosen, GenerateFile: true}, nil
@@ -3566,6 +3607,14 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 				return row.SearchTerm
 			},
 		},
+		"search_type": {
+			ID:       "search_type",
+			Header:   ColumnCompactHeader("search_type", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return row.SearchType
+			},
+		},
 		"label_name": {
 			ID:       "label_name",
 			Header:   ColumnCompactHeader("label_name", options),
@@ -3596,6 +3645,14 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 			Sortable: true,
 			Value: func(row model.KeywordResultRow) string {
 				return row.Genome
+			},
+		},
+		"alias": {
+			ID:       "alias",
+			Header:   ColumnCompactHeader("alias", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return row.Aliases
 			},
 		},
 	}
@@ -4078,6 +4135,7 @@ func blastLabelName(row model.BlastResultRow) string {
 func keywordRowDetail(row model.KeywordResultRow) string {
 	values := map[string]string{
 		"search_term":           row.SearchTerm,
+		"search_type":           row.SearchType,
 		"label_name":            keywordLabelName(row),
 		"protein_id":            row.ProteinID,
 		"transcript":            row.TranscriptID,

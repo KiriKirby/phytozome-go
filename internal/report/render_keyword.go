@@ -164,6 +164,7 @@ func renderMatching(r *pdfReportRenderer, k KeywordReportData) {
 		rows = append(rows, []string{
 			term.SearchTerm,
 			term.InputType,
+			valueOr(term.SearchType, "not recorded"),
 			fmt.Sprintf("%d", term.QueryOrder),
 			fmt.Sprintf("%d", term.TotalRows),
 			fmt.Sprintf("%d", term.SelectedRows),
@@ -171,7 +172,7 @@ func renderMatching(r *pdfReportRenderer, k KeywordReportData) {
 			term.MatchingNotes,
 		})
 	}
-	r.table([]string{"Search term", "Input type", "Order", "Rows", "Selected", "Label", "Notes"}, rows, []float64{82, 58, 34, 34, 45, 58, 196})
+	r.table([]string{"Search term", "Input type", "Search type", "Order", "Rows", "Selected", "Label", "Notes"}, rows, []float64{70, 48, 62, 28, 30, 38, 48, 183})
 	r.subheading("Matching method log")
 	method := []string{
 		"Input parsing preserved the user's term order and kept each result row traceable to its original search term.",

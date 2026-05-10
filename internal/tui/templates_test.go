@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -30,6 +31,142 @@ func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
 	filterHeight := modalHeightForContent(3+maxInt(31, 46)+3+2, 50, 58)
 	if filterHeight < 52 || filterHeight > 58 {
 		t.Fatalf("filter modal height = %d, want within [52,58]", filterHeight)
+	}
+}
+
+func TestTaskModalHeightForMultipleProgressSlots(t *testing.T) {
+	page := TaskPage{
+		Title:       "Writing BLAST export files",
+		Description: "Writing files and fetching peptide sequences.",
+	}
+	slots := []taskProgressSlot{
+		{Title: "BLAST query 1", Status: "Writing Excel", Current: 2, Total: 5, Active: true},
+		{Title: "BLAST query 2", Status: "Fetching sequences", Current: 3, Total: 5, Active: true},
+		{Title: "BLAST query 3", Status: "Preparing report", Current: 1, Total: 5, Active: false},
+	}
+	height := taskModalHeightForSlots(page, slots)
+	if height < 20 {
+		t.Fatalf("task modal height = %d, want enough room for stacked slots", height)
+	}
+	if height > 34 {
+		t.Fatalf("task modal height = %d, want capped modal height", height)
+	}
+}
+
+func TestTaskModalHeightGrowsWithMoreVisibleSlots(t *testing.T) {
+	page := TaskPage{Title: "Progress", Description: "Running concurrent work."}
+	one := []taskProgressSlot{
+		{Title: "Query 1", Status: "Running", Current: 1, Total: 4, Active: true},
+	}
+	five := []taskProgressSlot{
+		{Title: "Query 1", Status: "Running", Current: 1, Total: 4, Active: true},
+		{Title: "Query 2", Status: "Running", Current: 2, Total: 4, Active: true},
+		{Title: "Query 3", Status: "Running", Current: 3, Total: 4, Active: true},
+		{Title: "Query 4", Status: "Running", Current: 4, Total: 4, Active: true},
+		{Title: "Query 5", Status: "Queued", Current: 0, Total: 4, Active: true},
+	}
+	if gotOne, gotFive := taskModalHeightForSlots(page, one), taskModalHeightForSlots(page, five); gotFive < gotOne {
+		t.Fatalf("five-slot modal height = %d, want >= one-slot height %d", gotFive, gotOne)
+	}
+}
+
+func TestClampTaskProgressSlotsPrefersActiveSlots(t *testing.T) {
+	slots := []taskProgressSlot{
+		{Title: "1", Active: false},
+		{Title: "2", Active: true},
+		{Title: "3", Active: false},
+		{Title: "4", Active: true},
+		{Title: "5", Active: false},
+		{Title: "6", Active: true},
+	}
+	clamped := clampTaskProgressSlots(slots, 4)
+	if len(clamped) != 4 {
+		t.Fatalf("clamped slots = %d, want 4", len(clamped))
+	}
+	activeCount := 0
+	for _, slot := range clamped {
+		if slot.Active {
+			activeCount++
+		}
+	}
+	if activeCount < 3 {
+		t.Fatalf("active slots retained = %d, want all active slots prioritized", activeCount)
+	}
+}
+
+func TestTaskProgressRenderIncludesCountsAndPercent(t *testing.T) {
+	rendered := taskProgressRender(3, 8, 12)
+	for _, want := range []string{"3/8", "38%"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered progress %q missing %q", rendered, want)
+		}
+	}
+}
+
+func TestSharedTaskOverlaySnapshotKeepsCurrentTaskVisible(t *testing.T) {
+	manager := taskOverlayManager{}
+	_, updateA, _ := manager.register(taskProgressSlot{Title: "A", Status: "idle", Active: false})
+	idB, _, _ := manager.register(taskProgressSlot{Title: "B", Status: "active", Active: true})
+	_, _, _ = manager.register(taskProgressSlot{Title: "C", Status: "active", Active: true})
+	_, _, _ = manager.register(taskProgressSlot{Title: "D", Status: "active", Active: true})
+	_, _, _ = manager.register(taskProgressSlot{Title: "E", Status: "active", Active: true})
+	_, _, _ = manager.register(taskProgressSlot{Title: "F", Status: "active", Active: true})
+
+	updateA(taskProgressSlot{Title: "A", Status: "done", Active: false})
+	slots := manager.snapshot(5, idB, taskProgressSlot{Title: "B", Status: "active", Active: true})
+	if len(slots) != 5 {
+		t.Fatalf("snapshot length = %d, want 5", len(slots))
+	}
+	if slots[0].Title != "B" {
+		t.Fatalf("current task = %q, want current task B pinned first", slots[0].Title)
+	}
+}
+
+func TestRenderTaskProgressSlotsShowsMultipleCards(t *testing.T) {
+	rendered := renderTaskProgressSlots("|", []taskProgressSlot{
+		{Title: "Query 1", Status: "Fetching references", Current: 2, Total: 4, Active: true},
+		{Title: "Query 2", Status: "Writing export", Current: 1, Total: 3, Active: false},
+	})
+	for _, want := range []string{"Query 1", "Fetching references", "2/4", "Query 2", "Writing export", "1/3"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered slots %q missing %q", rendered, want)
+		}
+	}
+}
+
+func TestRegisterTaskChildSlotAddsVisibleSharedSlots(t *testing.T) {
+	manager := taskOverlayManager{}
+	previous := sharedTaskOverlay
+	sharedTaskOverlay = manager
+	defer func() { sharedTaskOverlay = previous }()
+
+	parentID, _, removeParent := sharedTaskOverlay.register(taskProgressSlot{Title: "Parent", Status: "Running batch", Current: 1, Total: 4, Active: true})
+	defer removeParent()
+
+	ctx := context.WithValue(context.Background(), taskChildSlotKey{}, TaskChildSlotRegistrar(func(slot taskProgressSlot) (func(taskProgressSlot), func()) {
+		_, update, remove := sharedTaskOverlay.register(slot)
+		return update, remove
+	}))
+	updateChild, removeChild, ok := RegisterTaskChildSlot(ctx, taskProgressSlot{Title: "Query 1", Status: "Submitting", Current: 1, Total: 4, Active: true})
+	if !ok {
+		t.Fatal("RegisterTaskChildSlot returned ok=false")
+	}
+	defer removeChild()
+	updateChild(taskProgressSlot{Title: "Query 1", Status: "Waiting", Current: 3, Total: 4, Active: true})
+
+	slots := sharedTaskOverlay.snapshot(5, parentID, taskProgressSlot{Title: "Parent", Status: "Running batch", Current: 1, Total: 4, Active: true})
+	if len(slots) < 2 {
+		t.Fatalf("snapshot len = %d, want at least 2 slots", len(slots))
+	}
+	foundChild := false
+	for _, slot := range slots {
+		if slot.Title == "Query 1" && strings.Contains(slot.Status, "Waiting") {
+			foundChild = true
+			break
+		}
+	}
+	if !foundChild {
+		t.Fatalf("child slot not visible in snapshot: %#v", slots)
 	}
 }
 
@@ -179,6 +316,37 @@ func TestButtonRowPrimaryLabelUpdatesOnlyPrimaryButtons(t *testing.T) {
 	}
 }
 
+func TestButtonRowPrimaryLabelUpdatesOnlyDynamicPrimaryButton(t *testing.T) {
+	row := buttonRow(
+		buttonSpec{Label: ButtonWideSearch, Shortcut: ShortcutWideSearch, Visible: true, Primary: true},
+		buttonSpec{Label: ButtonSearch, Shortcut: ShortcutApply, Visible: true, Primary: true, Dynamic: true},
+	)
+
+	row.setPrimaryLabel(ButtonAuto)
+
+	if row.buttons[0].Label != ButtonWideSearch {
+		t.Fatalf("wide-search button label changed to %q", row.buttons[0].Label)
+	}
+	if row.buttons[1].Label != ButtonAuto {
+		t.Fatalf("dynamic primary button label = %q, want %q", row.buttons[1].Label, ButtonAuto)
+	}
+}
+
+func TestButtonRowEnterPrefersDynamicPrimaryButton(t *testing.T) {
+	activated := ""
+	row := buttonRow(
+		buttonSpec{Label: ButtonWideSearch, Shortcut: ShortcutWideSearch, Action: func() { activated = "wide" }, Visible: true, Primary: true},
+		buttonSpec{Label: ButtonSearch, Shortcut: ShortcutApply, Action: func() { activated = "search" }, Visible: true, Primary: true, Dynamic: true},
+	)
+
+	handler := row.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyEnter, 0, 0), nil)
+
+	if activated != "search" {
+		t.Fatalf("Enter should activate dynamic primary button, got %q", activated)
+	}
+}
+
 func TestFamilyBlastCustomizeButtonSitsLeftOfApply(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
@@ -267,7 +435,7 @@ func TestButtonFlexUsesDefaultMouseRoutingForButtonRows(t *testing.T) {
 }
 
 func TestResolveInputFileTextKeepsOrdinaryText(t *testing.T) {
-	text, err := resolveInputFileText("LOC_Os03g11614\nOsMADS1")
+	text, err := resolveInputFileText(context.Background(), "LOC_Os03g11614\nOsMADS1")
 	if err != nil {
 		t.Fatalf("ordinary text should be accepted: %v", err)
 	}
@@ -281,8 +449,16 @@ func TestResolveInputFileTextReadsFilePath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("ATPAL1\nATPAL2\n"), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
+	restore := SetInputFileLoader(func(ctx context.Context, gotPath string) (string, error) {
+		if gotPath != filepath.Clean(path) {
+			t.Fatalf("loader path = %q, want %q", gotPath, filepath.Clean(path))
+		}
+		data, err := os.ReadFile(gotPath)
+		return string(data), err
+	})
+	defer restore()
 
-	text, err := resolveInputFileText(`"` + path + `"`)
+	text, err := resolveInputFileText(context.Background(), `"`+path+`"`)
 	if err != nil {
 		t.Fatalf("file path should be read: %v", err)
 	}
@@ -293,7 +469,12 @@ func TestResolveInputFileTextReadsFilePath(t *testing.T) {
 
 func TestResolveInputFileTextRejectsUnreadableFilePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.txt")
-	if text, err := resolveInputFileText(`"` + path + `"`); err == nil || text != "" {
+	restore := SetInputFileLoader(func(ctx context.Context, gotPath string) (string, error) {
+		return "", os.ErrNotExist
+	})
+	defer restore()
+
+	if text, err := resolveInputFileText(context.Background(), `"`+path+`"`); err == nil || text != "" {
 		t.Fatalf("missing file should be rejected, got text=%q err=%v", text, err)
 	}
 }

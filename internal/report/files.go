@@ -1,6 +1,7 @@
-package report
+﻿package report
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -10,10 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 )
 
 func InspectGeneratedFile(path string, fileType string, role string, hashTime time.Time) (GeneratedFile, error) {
-	info, err := os.Stat(path)
+	info, err := phygoboost.RunDiskValue(context.Background(), func(context.Context) (os.FileInfo, error) {
+		return os.Stat(path)
+	})
 	if err != nil {
 		return GeneratedFile{}, fmt.Errorf("stat generated file: %w", err)
 	}
@@ -60,20 +65,30 @@ func PlannedReportFile(path string, generatedAt time.Time) GeneratedFile {
 }
 
 func hashFile(path string) (string, string, string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", "", "", fmt.Errorf("open generated file for hash: %w", err)
+	type fileHashes struct {
+		sha256 string
+		sha1   string
+		md5    string
 	}
-	defer file.Close()
+	hashes, err := phygoboost.RunDiskValue(context.Background(), func(context.Context) (fileHashes, error) {
+		file, err := os.Open(path)
+		if err != nil {
+			return fileHashes{}, fmt.Errorf("open generated file for hash: %w", err)
+		}
+		defer file.Close()
 
-	sha256Hash := sha256.New()
-	sha1Hash := sha1.New()
-	md5Hash := md5.New()
-	if _, err := io.Copy(io.MultiWriter(sha256Hash, sha1Hash, md5Hash), file); err != nil {
-		return "", "", "", fmt.Errorf("hash generated file: %w", err)
-	}
-	return hex.EncodeToString(sha256Hash.Sum(nil)),
-		hex.EncodeToString(sha1Hash.Sum(nil)),
-		hex.EncodeToString(md5Hash.Sum(nil)),
-		nil
+		sha256Hash := sha256.New()
+		sha1Hash := sha1.New()
+		md5Hash := md5.New()
+		if _, err := io.Copy(io.MultiWriter(sha256Hash, sha1Hash, md5Hash), file); err != nil {
+			return fileHashes{}, fmt.Errorf("hash generated file: %w", err)
+		}
+		return fileHashes{
+			sha256: hex.EncodeToString(sha256Hash.Sum(nil)),
+			sha1:   hex.EncodeToString(sha1Hash.Sum(nil)),
+			md5:    hex.EncodeToString(md5Hash.Sum(nil)),
+		}, nil
+	})
+	return hashes.sha256, hashes.sha1, hashes.md5, err
 }
+

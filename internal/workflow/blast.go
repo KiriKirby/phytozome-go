@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,7 +24,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/interpro"
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/phytozome"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
@@ -57,24 +58,39 @@ type BlastWizard struct {
 
 	speciesCandidatesMu    sync.Mutex
 	speciesCandidatesCache map[string][]model.SpeciesCandidate
+	phytozomeTargetMu      sync.RWMutex
+	phytozomeTargetCache   map[string]int
+	phytozomeHelperMu      sync.Mutex
+	phytozomeHelper        *phytozome.Client
 
 	proteinSequenceMu    sync.RWMutex
 	proteinSequenceCache map[string]string
 	proteinSequenceMiss  map[string]error
 	proteinSequenceGroup singleflight.Group
+	uniProtClientMu      sync.Mutex
+	uniProtClient        *uniprot.Client
+	interProClientMu     sync.Mutex
+	interProClient       *interpro.Client
+	uniProtAccessionsMu  sync.RWMutex
+	uniProtAccessions    map[string][]string
+	uniProtAccessionsSF  singleflight.Group
+	interProQueryMu      sync.RWMutex
+	interProQueryCache   map[string]cachedInterProQueryEntry
+	interProQuerySF      singleflight.Group
+}
+
+type cachedInterProQueryEntry struct {
+	entry interpro.Entry
+	ok    bool
 }
 
 type TUIInfo = tui.StartupInfo
 
 const (
 	keywordSearchTimeout    = 30 * time.Second
+	blastAliasLookupTimeout = 8 * time.Second
 	queryResolveTimeout     = 30 * time.Second
 	proteinFetchTimeout     = 30 * time.Second
-	maxParallelKeywordJobs  = 64
-	maxParallelQueryJobs    = 64
-	maxParallelFetchJobs    = 128
-	maxParallelUniProtJobs  = 96
-	maxParallelInterProJobs = 96
 )
 
 var (
@@ -255,6 +271,33 @@ type sequenceFetchResult struct {
 	err      error
 }
 
+type blastExecutionPlanOptions struct {
+	TotalRuns           int
+	IsLocal             bool
+	ReferenceTasks      int
+	QueryReferenceTasks int
+	AccessionTasks      int
+}
+
+type blastExecutionPlan struct {
+	BatchWorkers          int
+	LocalThreadsPerWorker int
+	FinalizeWorkers       int
+	RemoteUseCombined     bool
+	RemoteCombinedWorkers int
+	RemoteSubmitWorkers   int
+	RemoteWaitWorkers     int
+	Reference             blastReferenceExecutionPlan
+}
+
+type blastReferenceExecutionPlan struct {
+	AccessionWorkers int
+	UniProtWorkers   int
+	InterProWorkers  int
+	QueryWorkers     int
+	ChunkSize        int
+}
+
 type uniProtLookupResult struct {
 	entry uniprot.Entry
 	ok    bool
@@ -267,7 +310,109 @@ type interProLookupResult struct {
 	err   error
 }
 
+type batchUniProtAnnotation struct {
+	entry uniprot.Entry
+	ok    bool
+	err   error
+}
+
+type batchInterProAnnotation struct {
+	entry interpro.Entry
+	ok    bool
+	err   error
+}
+
+type referenceLookupTask struct {
+	runIndex   int
+	rowIndex   int
+	key        string
+	row        model.BlastResultRow
+	item       blastQueryItem
+	accessions []string
+}
+
 type contextUpdateKey struct{}
+type contextTaskSlotKey struct{}
+
+type workflowTaskSlot struct {
+	update func(current int, message string)
+	remove func()
+}
+
+var (
+	blastHeavyLocalSpec = phygoboost.ParallelSpec{Level: phygoboost.ExecHeavy}
+)
+
+func blastHeavyCoordinationSpec(description string) phygoboost.ParallelSpec {
+	return phygoboost.ParallelSpec{
+		Level:       phygoboost.ExecHeavy,
+		Description: description,
+	}
+}
+
+func mainNetworkSpecForSource(src source.DataSource, description string) phygoboost.ParallelSpec {
+	return phygoboost.ParallelSpec{
+		Level:       phygoboost.ExecMain,
+		Domain:      workflowDomainForSource(src),
+		Description: description,
+	}
+}
+
+func cappedMainNetworkWorkers(src source.DataSource, total int) int {
+	spec := mainNetworkSpecForSource(src, "")
+	switch {
+	case spec.Domain == "":
+		return phygoboost.CPUWorkers(total)
+	default:
+		return phygoboost.NetworkWorkers(total)
+	}
+}
+
+func cappedHeavyCoordinationWorkers(total int) int {
+	return phygoboost.ProcessWorkers(total)
+}
+
+func cappedHeavyNetworkWorkers(total int) int {
+	return minPositiveWorkerCount(
+		phygoboost.NetworkProcessWorkers(total),
+		phygoboost.ProcessWorkers(total),
+	)
+}
+
+func minPositiveWorkerCount(values ...int) int {
+	best := 0
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if best == 0 || value < best {
+			best = value
+		}
+	}
+	return best
+}
+
+func mainNetworkTaskSpecForSource(src source.DataSource, description string) phygoboost.TaskSpec {
+	return phygoboost.TaskSpec{
+		Level:       phygoboost.ExecMain,
+		Domain:      workflowDomainForSource(src),
+		Description: description,
+	}
+}
+
+func workflowDomainForSource(src source.DataSource) string {
+	if src == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(src.Name())) {
+	case "phytozome":
+		return "phytozome-next.jgi.doe.gov"
+	case "lemna", "lemna.org":
+		return "www.lemna.org"
+	default:
+		return ""
+	}
+}
 
 func contextWithUpdate(ctx context.Context, update func(int, string)) context.Context {
 	if update == nil {
@@ -315,23 +460,63 @@ func safeTaskUpdate(update func(string)) func(string) {
 	}
 }
 
-func mergeContexts(parent context.Context, cancel context.Context) context.Context {
-	if parent == nil {
-		parent = context.Background()
+func contextWithTaskSlot(ctx context.Context, key string, slot workflowTaskSlot) context.Context {
+	if ctx == nil || key == "" || slot.update == nil {
+		return ctx
 	}
-	if cancel == nil {
-		return parent
+	slots := taskSlotsFromContext(ctx)
+	next := make(map[string]workflowTaskSlot, len(slots)+1)
+	for existingKey, existing := range slots {
+		next[existingKey] = existing
 	}
-	ctx, stop := context.WithCancel(parent)
-	go func() {
-		select {
-		case <-parent.Done():
-		case <-cancel.Done():
-			stop()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
+	next[key] = slot
+	return context.WithValue(ctx, contextTaskSlotKey{}, next)
+}
+
+func taskSlotsFromContext(ctx context.Context) map[string]workflowTaskSlot {
+	if ctx == nil {
+		return nil
+	}
+	slots, _ := ctx.Value(contextTaskSlotKey{}).(map[string]workflowTaskSlot)
+	return slots
+}
+
+func registerWorkflowTaskSlot(ctx context.Context, key string, title string, total int, initial string) (workflowTaskSlot, bool) {
+	if ctx == nil || key == "" {
+		return workflowTaskSlot{}, false
+	}
+	update, remove, ok := tui.RegisterTaskChildSlot(ctx, tuiTaskProgressSlot(title, initial, 0, total, true))
+	if !ok || update == nil || remove == nil {
+		return workflowTaskSlot{}, false
+	}
+	return workflowTaskSlot{
+		update: func(current int, message string) {
+			update(tuiTaskProgressSlot(title, message, current, total, true))
+		},
+		remove: func() {
+			update(tuiTaskProgressSlot(title, initial, total, total, false))
+			remove()
+		},
+	}, true
+}
+
+func workflowTaskSlotUpdate(ctx context.Context, key string, current int, message string) bool {
+	slot, ok := taskSlotsFromContext(ctx)[key]
+	if !ok || slot.update == nil {
+		return false
+	}
+	slot.update(current, message)
+	return true
+}
+
+func tuiTaskProgressSlot(title string, status string, current int, total int, active bool) tui.TaskProgressSlot {
+	return tui.TaskProgressSlot{
+		Title:   title,
+		Status:  status,
+		Current: current,
+		Total:   total,
+		Active:  active,
+	}
 }
 
 type blastBatchRunError struct {
@@ -416,14 +601,22 @@ func NewBlastWizard(out io.Writer) *BlastWizard {
 }
 
 func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWizard {
+	tui.SetInputFileLoader(func(ctx context.Context, path string) (string, error) {
+		if loaded, handled, err := readTextFileProcess(ctx, path); handled {
+			return loaded, err
+		}
+		return "", fmt.Errorf("background file loader is unavailable")
+	})
 	return &BlastWizard{
-		httpClient:             perf.HTTPClient(),
+		httpClient:             phygoboost.HTTPClient(),
 		prompt:                 prompt.New(os.Stdin, out),
 		out:                    out,
 		tuiInfo:                tuiInfo,
 		speciesCandidatesCache: make(map[string][]model.SpeciesCandidate),
+		phytozomeTargetCache:   make(map[string]int),
 		proteinSequenceCache:   make(map[string]string),
 		proteinSequenceMiss:    make(map[string]error),
+		uniProtAccessions:      make(map[string][]string),
 	}
 }
 
@@ -614,6 +807,22 @@ databaseLoop:
 	}
 }
 
+var dataSourceForNameHook func(name string, httpClient *http.Client) (source.DataSource, error)
+
+func dataSourceForName(name string, httpClient *http.Client) (source.DataSource, error) {
+	if dataSourceForNameHook != nil {
+		return dataSourceForNameHook(name, httpClient)
+	}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "phytozome":
+		return phytozome.NewClient(httpClient), nil
+	case "lemna":
+		return lemna.NewClient(httpClient), nil
+	default:
+		return nil, fmt.Errorf("unsupported database %q", name)
+	}
+}
+
 func (w *BlastWizard) chooseMode() (QueryMode, error) {
 	for {
 		if w.pendingMode != "" {
@@ -642,14 +851,7 @@ func (w *BlastWizard) chooseDataSource() (source.DataSource, error) {
 		}
 
 		w.pendingMode = QueryMode(choice.Mode)
-		switch choice.Database {
-		case "phytozome":
-			return phytozome.NewClient(w.httpClient), nil
-		case "lemna":
-			return lemna.NewClient(w.httpClient), nil
-		default:
-			return nil, fmt.Errorf("unsupported database %q", choice.Database)
-		}
+		return dataSourceForName(choice.Database, w.httpClient)
 	}
 }
 
@@ -863,8 +1065,15 @@ func (w *BlastWizard) detectLemnaBlastCapabilities(ctx context.Context, lc *lemn
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (lemna.BlastCapability, error) {
 		safeTaskUpdate(update)("Checking online BLAST databases and local FASTA files...")
-		return lc.DetectBlastCapabilities(mergeContexts(ctx, taskCtx), selected)
+		return w.detectLemnaBlastCapabilitiesDirect(phygoboost.MergeContext(ctx, taskCtx), lc, selected)
 	})
+}
+
+func (w *BlastWizard) detectLemnaBlastCapabilitiesDirect(ctx context.Context, lc *lemna.Client, selected model.SpeciesCandidate) (lemna.BlastCapability, error) {
+	if capability, handled, err := detectLemnaBlastCapabilitiesProcess(ctx, selected); handled {
+		return capability, err
+	}
+	return lc.DetectBlastCapabilities(ctx, selected)
 }
 
 func availableBlastProgramsFromCapability(cap lemna.BlastCapability) []string {
@@ -916,7 +1125,11 @@ func (w *BlastWizard) loadSpeciesCandidates(ctx context.Context) ([]model.Specie
 			CancelError: prompt.ErrBackToDatabaseSelection,
 		}, func(taskCtx context.Context, update func(string)) ([]model.SpeciesCandidate, error) {
 			safeTaskUpdate(update)(label)
-			return w.source.FetchSpeciesCandidates(mergeContexts(ctx, taskCtx))
+			loadCtx := phygoboost.MergeContext(ctx, taskCtx)
+			if candidates, handled, err := w.fetchSpeciesCandidatesProcess(loadCtx, w.source); handled {
+				return candidates, err
+			}
+			return w.source.FetchSpeciesCandidates(loadCtx)
 		})
 		if err == nil {
 			w.cacheSpeciesCandidates(w.source.Name(), candidates)
@@ -965,12 +1178,31 @@ func (w *BlastWizard) speciesCandidatesForSource(ctx context.Context, src source
 	}
 	w.speciesCandidatesMu.Unlock()
 
+	if candidates, handled, err := w.fetchSpeciesCandidatesProcess(ctx, src); handled {
+		if err != nil {
+			return nil, err
+		}
+		w.cacheSpeciesCandidates(src.Name(), candidates)
+		return candidates, nil
+	}
 	candidates, err := src.FetchSpeciesCandidates(ctx)
 	if err != nil {
 		return nil, err
 	}
 	w.cacheSpeciesCandidates(src.Name(), candidates)
 	return candidates, nil
+}
+
+func (w *BlastWizard) phytozomeHelperSource() *phytozome.Client {
+	if current, ok := w.source.(*phytozome.Client); ok && current != nil {
+		return current
+	}
+	w.phytozomeHelperMu.Lock()
+	defer w.phytozomeHelperMu.Unlock()
+	if w.phytozomeHelper == nil {
+		w.phytozomeHelper = phytozome.NewClient(w.httpClient)
+	}
+	return w.phytozomeHelper
 }
 
 func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
@@ -1036,7 +1268,7 @@ keywordInputLoop:
 			}
 			w.reuseLastKeywordRows = false
 		} else {
-			keywordInput, inputErr := w.prompt.KeywordInput()
+			keywordInputResult, inputErr := w.prompt.KeywordInput()
 			if inputErr != nil {
 				if errors.Is(inputErr, prompt.ErrBackToSpeciesSelection) || errors.Is(inputErr, prompt.ErrBackToModeSelection) || errors.Is(inputErr, prompt.ErrBackToDatabaseSelection) || errors.Is(inputErr, prompt.ErrExitRequested) {
 					return inputErr
@@ -1051,7 +1283,7 @@ keywordInputLoop:
 				continue
 			}
 			queryStarted := time.Now()
-			keywords := parseKeywordTerms(keywordInput)
+			keywords := parseKeywordTerms(keywordInputResult.Text)
 			if len(keywords) == 0 {
 				if err := w.showInfo("Keyword input", "Keyword input was empty. Please enter a keyword query.", prompt.ErrBackToSpeciesSelection); err != nil {
 					return err
@@ -1082,7 +1314,7 @@ keywordInputLoop:
 			}
 
 			var err error
-			groups, err = w.searchKeywordGroups(ctx, selected, keywords, nil)
+			groups, err = w.searchKeywordGroups(ctx, selected, keywords, nil, keywordInputResult.WideSearch)
 			if err != nil {
 				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
 					return err
@@ -1181,6 +1413,18 @@ keywordInputLoop:
 				}
 				continue keywordRowLoop
 			}
+			if selection.RunBlast {
+				if err := w.runKeywordBlastMode(ctx, selected, groups, selection.Rows, reportCtx); err != nil {
+					if errors.Is(err, prompt.ErrBackToRowSelection) {
+						continue keywordRowLoop
+					}
+					if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+						return err
+					}
+					return err
+				}
+				continue keywordRowLoop
+			}
 			w.warmKeywordSequenceCache(ctx, groups)
 			w.postRunBackTarget = prompt.ErrBackToRowSelection
 			if !selection.GenerateFile {
@@ -1196,6 +1440,207 @@ keywordInputLoop:
 			continue keywordRowLoop
 		}
 	}
+}
+
+func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, rows []model.KeywordResultRow, reportCtx *keywordReportRunContext) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	databaseName, err := w.prompt.ChooseBlastTargetDatabase()
+	if err != nil {
+		return err
+	}
+	prepared, err := w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return nil
+	}
+	targetSource, err := dataSourceForName(databaseName, w.httpClient)
+	if err != nil {
+		return err
+	}
+	previousSource := w.source
+	previousPromptDB := databaseDisplayName(previousSource.Name())
+	previousBlastContext := w.blastProgramPath
+	defer func() {
+		w.source = previousSource
+		w.prompt.SetDatabaseContext(previousPromptDB)
+		w.setBlastProgramContext(previousBlastContext)
+	}()
+	w.source = targetSource
+	w.prompt.SetDatabaseContext(databaseDisplayName(targetSource.Name()))
+	w.setBlastProgramContext("")
+
+	candidates, err := w.loadSpeciesCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	targetSpecies, err := w.selectSpecies(candidates)
+	if err != nil {
+		return err
+	}
+	if err := w.executePreparedBlast(ctx, targetSpecies, prepared, blastRequestConfig{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *BlastWizard) resolveKeywordRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow) ([]blastQueryItem, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	results, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("Keyword", "BLAST", "Resolving selected rows"),
+		Title:       "Resolving keyword rows for BLAST",
+		Description: "Fetching peptide sequences for selected keyword rows using the current keyword result metadata and cache.",
+		Initial:     "Resolving keyword rows for BLAST...",
+		Total:       len(rows),
+		CancelError: prompt.ErrBackToRowSelection,
+	}, func(taskCtx context.Context, update func(int, string)) (map[string]sequenceFetchResult, error) {
+		return w.prefetchKeywordSequences(phygoboost.MergeContext(ctx, taskCtx), rows, update), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keywordRowsToBlastItems(selected, rows, results), nil
+}
+
+func keywordRowsToBlastItems(selected model.SpeciesCandidate, rows []model.KeywordResultRow, sequences map[string]sequenceFetchResult) []blastQueryItem {
+	out := make([]blastQueryItem, 0, len(rows))
+	for _, row := range rows {
+		sequenceID := strings.TrimSpace(row.SequenceID)
+		if sequenceID == "" {
+			continue
+		}
+		sequence := ""
+		if fetched, ok := sequences[sequenceID]; ok && fetched.err == nil {
+			sequence = strings.TrimSpace(fetched.sequence)
+		}
+		if sequence == "" {
+			continue
+		}
+		source := &model.QuerySequenceSource{
+			Sequence:          sequence,
+			SourceDatabase:    strings.TrimSpace(row.SourceDatabase),
+			SourceProteomeID:  selected.ProteomeID,
+			SourceJBrowseName: selected.JBrowseName,
+			SourceGenomeLabel: selected.GenomeLabel,
+			LabelName:         strings.TrimSpace(row.LabelName),
+			Aliases:           strings.TrimSpace(row.Aliases),
+			AutoDefine:        strings.TrimSpace(row.AutoDefine),
+			GeneID:            strings.TrimSpace(row.GeneIdentifier),
+			TranscriptID:      strings.TrimSpace(row.TranscriptID),
+			ProteinID:         firstNonEmpty(row.ProteinID, row.TranscriptID, sequenceID),
+			OrganismShort:     strings.TrimSpace(row.SequenceHeaderLabel),
+			Annotation:        strings.TrimSpace(row.Genome),
+		}
+		out = append(out, blastQueryItem{
+			RawInput:    sequenceID,
+			LabelName:   firstNonEmpty(row.LabelName, row.GeneIdentifier, row.TranscriptID, row.ProteinID),
+			QuerySource: source,
+			Sequence:    sequence,
+		})
+	}
+	return out
+}
+
+func (w *BlastWizard) runPreparedBlastMode(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem) error {
+	if len(prepared) == 0 {
+		return nil
+	}
+	var requestConfig blastRequestConfig
+	var err error
+	var autoIdentifyLabels bool
+	if len(prepared) > 1 && !allLabelsPresent(prepared) {
+		prepared, autoIdentifyLabels, err = w.collectBlastLabelsBeforeResolve(prepared)
+		if err != nil {
+			return err
+		}
+	}
+	if autoIdentifyLabels {
+		prepared, err = w.autoIdentifyBlastLabelsWithProgress(ctx, selected, prepared)
+		if err != nil {
+			return err
+		}
+	}
+	prepared, err = w.resolveBlastQueryItems(ctx, prepared, []model.SpeciesCandidate{selected})
+	if err != nil {
+		return err
+	}
+	if !autoIdentifyLabels && allLabelsPresent(prepared) {
+		prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
+		if err != nil {
+			return err
+		}
+	}
+	if len(prepared) == 0 {
+		return nil
+	}
+	if cfg, cfgErr := w.configureBlastRequestBeforeInput(ctx, selected); cfgErr == nil {
+		requestConfig = cfg
+	} else if !errors.Is(cfgErr, prompt.ErrBackToQueryInput) && !errors.Is(cfgErr, prompt.ErrBackToBlastProgram) {
+		return cfgErr
+	}
+	references, err := w.collectExternalReferenceConfig()
+	if err != nil {
+		return err
+	}
+	familyPlan, err := w.collectFamilyBlastPlan(prepared, references)
+	if err != nil {
+		return err
+	}
+	w.lastBlastItems = cloneBlastQueryItems(prepared)
+	if requestConfig.Ready {
+		return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, requestConfig.Request, references, familyPlan)
+	}
+	baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
+	configuredRequest, err := w.configureBlastRequest(ctx, selected, baseRequest)
+	if err != nil {
+		return err
+	}
+	return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, configuredRequest, references, familyPlan)
+}
+
+func (w *BlastWizard) executePreparedBlast(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, requestConfig blastRequestConfig) error {
+	if len(prepared) == 0 {
+		return nil
+	}
+	var err error
+	if !allLabelsPresent(prepared) {
+		prepared, err = w.collectBlastLabels(ctx, selected, prepared)
+		if err != nil {
+			return err
+		}
+	}
+	if allLabelsPresent(prepared) {
+		prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
+		if err != nil {
+			return err
+		}
+	}
+	baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
+	configuredRequest := baseRequest
+	if requestConfig.Ready {
+		configuredRequest = requestConfig.Request
+		configuredRequest.Sequence = baseRequest.Sequence
+	} else {
+		configuredRequest, err = w.configureBlastRequest(ctx, selected, baseRequest)
+		if err != nil {
+			return err
+		}
+	}
+	references, err := w.collectExternalReferenceConfig()
+	if err != nil {
+		return err
+	}
+	familyPlan, err := w.collectFamilyBlastPlan(prepared, references)
+	if err != nil {
+		return err
+	}
+	w.lastBlastItems = cloneBlastQueryItems(prepared)
+	return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, configuredRequest, references, familyPlan)
 }
 
 func (w *BlastWizard) runBlastMode(ctx context.Context, selected model.SpeciesCandidate, candidates []model.SpeciesCandidate) error {
@@ -1221,6 +1666,7 @@ blastInputLoop:
 	for {
 		var prepared []blastQueryItem
 		var requestConfig blastRequestConfig
+		var err error
 		w.consumeBlastInputRewind()
 		if w.reuseLastBlastInput && len(w.lastBlastItems) > 0 {
 			prepared = cloneBlastQueryItems(w.lastBlastItems)
@@ -1244,7 +1690,6 @@ blastInputLoop:
 				continue
 			}
 			requestConfig = cfg
-
 			items, collectErr := w.collectBlastQueryItems()
 			if collectErr != nil {
 				if errors.Is(collectErr, prompt.ErrBackToQueryInput) {
@@ -1268,57 +1713,18 @@ blastInputLoop:
 				}
 				continue
 			}
-
-			var autoIdentifyLabels bool
 			prepared = items
+			var autoIdentifyLabels bool
 			if len(items) > 1 {
-				var labelErr error
-				prepared, autoIdentifyLabels, labelErr = w.collectBlastLabelsBeforeResolve(items)
-				if labelErr != nil {
-					if errors.Is(labelErr, prompt.ErrBackToQueryInput) {
-						continue blastInputLoop
-					}
-					if errors.Is(labelErr, prompt.ErrBackToSpeciesSelection) || errors.Is(labelErr, prompt.ErrBackToModeSelection) || errors.Is(labelErr, prompt.ErrBackToDatabaseSelection) || errors.Is(labelErr, prompt.ErrExitRequested) {
-						return labelErr
-					}
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read label names: %v", labelErr), prompt.ErrBackToQueryInput)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return labelErr
-					}
-					continue
-				}
-			}
-
-			var err error
-			prepared, err = w.resolveBlastQueryItems(ctx, prepared, candidates)
-			if err != nil {
-				var resolveErr *blastBatchResolveError
-				if errors.As(err, &resolveErr) {
-					action, actionErr := w.prompt.FetchErrorAction(resolveErr.Error(), prompt.ErrBackToQueryInput)
-					if actionErr != nil {
-						return actionErr
-					}
-					switch action {
-					case "retry", "close":
-						continue blastInputLoop
-					case "skip":
-						prepared = resolveErr.Prepared
-					case "exit":
-						return prompt.ErrExitRequested
-					default:
-						continue blastInputLoop
-					}
-				} else {
+				prepared, autoIdentifyLabels, err = w.collectBlastLabelsBeforeResolve(items)
+				if err != nil {
 					if errors.Is(err, prompt.ErrBackToQueryInput) {
-						continue
+						continue blastInputLoop
 					}
 					if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
 						return err
 					}
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("resolve BLAST input: %v", err), prompt.ErrBackToSpeciesSelection)
+					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read label names: %v", err), prompt.ErrBackToQueryInput)
 					if navErr != nil {
 						return navErr
 					}
@@ -1327,143 +1733,27 @@ blastInputLoop:
 					}
 					continue
 				}
+			}
+			prepared, err = w.resolveBlastQueryItems(ctx, prepared, candidates)
+			if err != nil {
+				return err
 			}
 			if autoIdentifyLabels {
 				prepared, err = w.autoIdentifyBlastLabelsWithProgress(ctx, selected, prepared)
 				if err != nil {
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("auto identify BLAST label names: %v", err), prompt.ErrBackToQueryInput)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return err
-					}
-					continue blastInputLoop
-				}
-				if !allLabelsPresent(prepared) {
-					action, actionErr := w.prompt.FetchErrorAction("auto identify BLAST label names: one or more query labels could not be identified", prompt.ErrBackToQueryInput)
-					if actionErr != nil {
-						return actionErr
-					}
-					switch action {
-					case "skip":
-						prepared = keepBlastItemsWithLabels(prepared)
-					case "retry", "close":
-						continue blastInputLoop
-					case "exit":
-						return prompt.ErrExitRequested
-					default:
-						continue blastInputLoop
-					}
+					return err
 				}
 			} else if len(prepared) == 1 {
-				var labelErr error
-				prepared, labelErr = w.collectBlastLabels(ctx, selected, prepared)
-				if labelErr != nil {
-					if errors.Is(labelErr, prompt.ErrBackToQueryInput) {
-						continue blastInputLoop
-					}
-					if errors.Is(labelErr, prompt.ErrBackToSpeciesSelection) || errors.Is(labelErr, prompt.ErrBackToModeSelection) || errors.Is(labelErr, prompt.ErrBackToDatabaseSelection) || errors.Is(labelErr, prompt.ErrExitRequested) {
-						return labelErr
-					}
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read label names: %v", labelErr), prompt.ErrBackToQueryInput)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return labelErr
-					}
-					continue
-				}
-			}
-			if !autoIdentifyLabels && allLabelsPresent(prepared) {
-				prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
+				prepared, err = w.collectBlastLabels(ctx, selected, prepared)
 				if err != nil {
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read BLAST alias label names: %v", err), prompt.ErrBackToQueryInput)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return err
-					}
-					continue blastInputLoop
+					return err
 				}
 			}
 		}
 		if len(prepared) == 0 {
 			return nil
 		}
-
-	batchConfigLoop:
-		for {
-			baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
-			configuredRequest := baseRequest
-			if requestConfig.Ready {
-				configuredRequest = requestConfig.Request
-				configuredRequest.Sequence = baseRequest.Sequence
-			} else {
-				var err error
-				configuredRequest, err = w.configureBlastRequest(ctx, selected, baseRequest)
-				if err != nil {
-					if errors.Is(err, prompt.ErrBackToQueryInput) {
-						continue blastInputLoop
-					}
-					if errors.Is(err, prompt.ErrBackToBlastProgram) {
-						continue batchConfigLoop
-					}
-					if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
-						return err
-					}
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure BLAST request: %v", err), prompt.ErrBackToSpeciesSelection)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return err
-					}
-					continue
-				}
-			}
-
-			references, refErr := w.collectExternalReferenceConfig()
-			if refErr != nil {
-				if errors.Is(refErr, prompt.ErrBackToQueryInput) {
-					continue blastInputLoop
-				}
-				if errors.Is(refErr, prompt.ErrBackToSpeciesSelection) || errors.Is(refErr, prompt.ErrBackToModeSelection) || errors.Is(refErr, prompt.ErrBackToDatabaseSelection) || errors.Is(refErr, prompt.ErrExitRequested) {
-					return refErr
-				}
-				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure external references: %v", refErr), prompt.ErrBackToQueryInput)
-				if navErr != nil {
-					return navErr
-				}
-				if !retry {
-					return refErr
-				}
-				continue
-			}
-
-			familyPlan, familyErr := w.collectFamilyBlastPlan(prepared, references)
-			if familyErr != nil {
-				if errors.Is(familyErr, prompt.ErrBackToQueryInput) {
-					continue blastInputLoop
-				}
-				if errors.Is(familyErr, prompt.ErrBackToSpeciesSelection) || errors.Is(familyErr, prompt.ErrBackToModeSelection) || errors.Is(familyErr, prompt.ErrBackToDatabaseSelection) || errors.Is(familyErr, prompt.ErrExitRequested) {
-					return familyErr
-				}
-				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure Family BLAST: %v", familyErr), prompt.ErrBackToQueryInput)
-				if navErr != nil {
-					return navErr
-				}
-				if !retry {
-					return familyErr
-				}
-				continue
-			}
-
-			w.lastBlastItems = cloneBlastQueryItems(prepared)
-			return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, configuredRequest, references, familyPlan)
-		}
+		return w.executePreparedBlast(ctx, selected, prepared, requestConfig)
 	}
 }
 
@@ -1775,78 +2065,73 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		defer func() {
 			w.suppressTaskModals = previousSuppress
 		}()
-		runOne := func(ctx context.Context, i int, item blastQueryItem) (blastQueryRun, error) {
-			if err := ctx.Err(); err != nil {
-				return blastQueryRun{}, err
+		if batchMode && isLocalBlastRequest(configuredRequest) && len(prepared) > 0 && !w.canUseDirectLocalBlastBatchRunner() {
+			warmupRequest := configuredRequest
+			warmupRequest.Sequence = prepared[0].Sequence
+			if prepared[0].QuerySource != nil {
+				warmupRequest.Sequence = prepared[0].QuerySource.Sequence
 			}
+			progress(0, "Preparing local BLAST database...")
+			if err := w.prepareLocalBlastForBatch(lemna.WithLocalBlastThreads(runCtx, 1), warmupRequest); err != nil {
+				return nil, &blastBatchRunError{Stage: "prepare local BLAST database", Index: 1, Total: len(prepared), Label: oneLinePreview(reportQueryLabel(prepared[0])), Err: err}
+			}
+			progress(1, "Local BLAST database ready.")
+		}
+		prepareRun := func(i int, item blastQueryItem) blastQueryRun {
 			request := configuredRequest
 			request.Sequence = item.Sequence
 			if item.QuerySource != nil {
 				request.Sequence = item.QuerySource.Sequence
 			}
-			progressBase := i * 2
+			return blastQueryRun{Index: i + 1, Item: item, Request: request}
+		}
+		finalizeRun := func(ctx context.Context, run blastQueryRun) (blastQueryRun, error) {
+			if err := ctx.Err(); err != nil {
+				return blastQueryRun{}, err
+			}
+			run.Results.Rows = annotateBlastRows(run.Results.Rows, w.source.Name(), run.Request.Program)
+			if len(run.Results.Rows) == 0 {
+				if !batchMode {
+					if err := w.showBlastResults(run.Results); err != nil {
+						return blastQueryRun{}, err
+					}
+				}
+				return run, nil
+			}
+			run.Results.Rows = fillBlastQueryLength(run.Results.Rows, run.Request.Sequence)
+			run.Results.Rows = applyBlastLabelToRows(run.Results.Rows, run.Item.LabelName)
+			run.Results.Rows = annotateBlastRows(run.Results.Rows, w.source.Name(), run.Request.Program)
+			run.Results.Rows = annotateBlastRowsForTargetSpecies(run.Results.Rows, run.Request.Species)
+			for i := range run.Results.Rows {
+				run.Results.Rows[i].UniProtReferenceEnabled = references.UseUniProt
+				run.Results.Rows[i].InterProReferenceEnabled = references.UseInterPro
+			}
+			run.Results.Rows = annotateBlastRowsForQueryContext(run.Results.Rows, run.Item)
+			return run, nil
+		}
+		runOne := func(ctx context.Context, i int, item blastQueryItem) (blastQueryRun, error) {
+			run := prepareRun(i, item)
 			label := oneLinePreview(reportQueryLabel(item))
 			actionLabel := "Submitting"
-			if isLocalBlastRequest(request) {
+			if isLocalBlastRequest(run.Request) {
 				actionLabel = "Running local"
 			}
-			progress(progressBase, fmt.Sprintf("%s BLAST query %d/%d (%s)...", actionLabel, i+1, len(prepared), label))
-
-			for {
-				job, err := w.submitBlastWithRetry(ctx, request)
-				if errors.Is(err, prompt.ErrBackToBlastProgram) || errors.Is(err, prompt.ErrExitRequested) {
-					return blastQueryRun{}, err
-				}
-				if err != nil {
-					return blastQueryRun{}, &blastBatchRunError{Stage: "submit BLAST job", Index: i + 1, Total: len(prepared), Label: label, Err: err}
-				}
-				if isLocalBlastRequest(request) {
-					progress(progressBase+1, fmt.Sprintf("Loading local BLAST results for query %d/%d (%s)...", i+1, len(prepared), label))
-				} else {
-					progress(progressBase+1, fmt.Sprintf("Waiting for BLAST query %d/%d (%s)...", i+1, len(prepared), label))
-				}
-				results, err := w.waitForBlastResultsWithRetry(ctx, job.JobID)
-				if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
-					return blastQueryRun{}, err
-				}
-				if err != nil {
-					return blastQueryRun{}, &blastBatchRunError{Stage: "wait for results", Index: i + 1, Total: len(prepared), Label: label, Err: err}
-				}
-				results.Rows = annotateBlastRows(results.Rows, w.source.Name(), request.Program)
-				if len(results.Rows) == 0 {
-					if !batchMode {
-						if err := w.showBlastResults(results); err != nil {
-							return blastQueryRun{}, err
-						}
-					}
-					progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
-					return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
-				}
-				results.Rows = fillBlastQueryLength(results.Rows, request.Sequence)
-				results.Rows = applyBlastLabelToRows(results.Rows, item.LabelName)
-				results.Rows = annotateBlastRows(results.Rows, w.source.Name(), request.Program)
-				if references.UseUniProt {
-					enriched, enrichErr := w.enrichBlastRowsWithUniProt(ctx, results.Rows)
-					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
-						return blastQueryRun{}, enrichErr
-					}
-					if enrichErr == nil {
-						results.Rows = enriched
-					}
-				}
-				if references.UseInterPro {
-					enriched, enrichErr := w.enrichBlastRowsWithInterPro(ctx, item, results.Rows, references.InterProSettings)
-					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
-						return blastQueryRun{}, enrichErr
-					}
-					if enrichErr == nil {
-						results.Rows = enriched
-					}
-				}
-				results.Rows = annotateBlastRowsForQueryContext(results.Rows, item)
-				progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
-				return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
+			progress(0, fmt.Sprintf("%s BLAST query %d/%d (%s)...", actionLabel, i+1, len(prepared), label))
+			ran, err := w.executeBlastRunJob(ctx, run, len(prepared), shouldUseCombinedRemoteBlastExecution(w.source, len(prepared), run.Request), progress)
+			if err != nil {
+				return blastQueryRun{}, err
 			}
+			ran, err = finalizeRun(ctx, ran)
+			if err != nil {
+				return blastQueryRun{}, &blastBatchRunError{Stage: "annotate results", Index: i + 1, Total: len(prepared), Label: label, Err: err}
+			}
+			singleRuns := []blastQueryRun{ran}
+			if err := w.enrichBlastRunBatch(ctx, singleRuns, references, nil); err != nil {
+				return blastQueryRun{}, &blastBatchRunError{Stage: "annotate results", Index: i + 1, Total: len(prepared), Label: label, Err: err}
+			}
+			ran = singleRuns[0]
+			progress(2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+			return ran, nil
 		}
 		if !batchMode {
 			run, err := runOne(runCtx, 0, prepared[0])
@@ -1856,97 +2141,37 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 			return []blastQueryRun{run}, nil
 		}
 
-		type runOutcome struct {
-			index int
-			run   blastQueryRun
-			err   error
-			ok    bool
-		}
-		outcomes := make(chan runOutcome, len(prepared))
-		jobs := make(chan int)
-		workerCount := batchBlastWorkerCount(len(prepared), configuredRequest)
 		batchCtx := runCtx
+		workerCount := batchBlastWorkerCount(len(prepared), configuredRequest)
 		if isLocalBlastRequest(configuredRequest) {
 			batchCtx = lemna.WithLocalBlastThreads(runCtx, localBlastThreadsPerWorker(workerCount))
 		}
+		slotClosers := make([]func(), 0, len(prepared))
+		for i, item := range prepared {
+			label := oneLinePreview(reportQueryLabel(item))
+			slotKey := fmt.Sprintf("blast-batch-run-%d", i)
+			if slot, ok := registerWorkflowTaskSlot(batchCtx, slotKey, fmt.Sprintf("BLAST query %d/%d", i+1, len(prepared)), 4, fmt.Sprintf("Queued (%s)", label)); ok {
+				batchCtx = contextWithTaskSlot(batchCtx, slotKey, slot)
+				slotClosers = append(slotClosers, slot.remove)
+			}
+		}
+		defer func() {
+			for _, closeSlot := range slotClosers {
+				if closeSlot != nil {
+					closeSlot()
+				}
+			}
+		}()
 		batchCtx, cancelBatch := context.WithCancel(batchCtx)
 		defer cancelBatch()
-		var workers sync.WaitGroup
-		for range workerCount {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for i := range jobs {
-					if err := batchCtx.Err(); err != nil {
-						return
-					}
-					run, err := runOne(batchCtx, i, prepared[i])
-					select {
-					case <-batchCtx.Done():
-						return
-					case outcomes <- runOutcome{index: i, run: run, err: err, ok: true}:
-					}
-					if err != nil {
-						cancelBatch()
-					}
-				}
-			}()
+		runs := make([]blastQueryRun, len(prepared))
+		for i, item := range prepared {
+			runs[i] = prepareRun(i, item)
 		}
-		go func() {
-			defer close(jobs)
-			for i := range prepared {
-				select {
-				case <-batchCtx.Done():
-					return
-				case jobs <- i:
-				}
-			}
-		}()
-		go func() {
-			workers.Wait()
-			close(outcomes)
-		}()
-
-		results := make([]runOutcome, len(prepared))
-		firstErrIndex := -1
-		var firstErr error
-		for outcome := range outcomes {
-			results[outcome.index] = outcome
-			if outcome.err != nil && firstErr == nil {
-				firstErrIndex = outcome.index
-				firstErr = outcome.err
-				cancelBatch()
-			}
+		if err := w.executeBlastRunPipeline(batchCtx, runs, configuredRequest, references, finalizeRun, progress, cancelBatch); err != nil {
+			return completedBlastRuns(runs), err
 		}
-		queryRuns := make([]blastQueryRun, 0, len(prepared))
-		for i, outcome := range results {
-			if outcome.err != nil {
-				if isCancellationLikeError(outcome.err) {
-					return queryRuns, outcome.err
-				}
-				if firstErrIndex == i {
-					return queryRuns, outcome.err
-				}
-				return queryRuns, parallelBlastBatchResumeError(i, prepared, firstErrIndex, firstErr)
-			}
-			if !outcome.ok {
-				if firstErr != nil {
-					if isCancellationLikeError(firstErr) {
-						return queryRuns, firstErr
-					}
-					return queryRuns, parallelBlastBatchResumeError(i, prepared, firstErrIndex, firstErr)
-				}
-				if err := batchCtx.Err(); err != nil {
-					return queryRuns, err
-				}
-				return queryRuns, &blastBatchRunError{Stage: "run BLAST query", Index: i + 1, Total: len(prepared), Label: oneLinePreview(reportQueryLabel(prepared[i])), Err: fmt.Errorf("query did not complete")}
-			}
-			if outcome.run.Index == 0 {
-				return queryRuns, &blastBatchRunError{Stage: "run BLAST query", Index: i + 1, Total: len(prepared), Label: oneLinePreview(reportQueryLabel(prepared[i])), Err: fmt.Errorf("query did not complete")}
-			}
-			queryRuns = append(queryRuns, outcome.run)
-		}
-		return queryRuns, nil
+		return runs, nil
 	}
 	if len(prepared) <= 1 {
 		return run(nil)
@@ -1959,10 +2184,10 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		Title:       "Running BLAST batch",
 		Description: batchBlastDescription(configuredRequest),
 		Initial:     "Starting BLAST batch...",
-		Total:       len(prepared) * 2,
+		Total:       batchBlastProgressTotal(len(prepared), configuredRequest, references),
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]blastQueryRun, error) {
-		return run(updateWithContext(mergeContexts(ctx, taskCtx), update))
+		return run(updateWithContext(phygoboost.MergeContext(ctx, taskCtx), update))
 	})
 }
 
@@ -1999,11 +2224,966 @@ func parallelBlastBatchResumeError(resumeIndex int, prepared []blastQueryItem, f
 	}
 }
 
+type blastRunFinalizeFunc func(context.Context, blastQueryRun) (blastQueryRun, error)
+
+type blastPipelineOutcome struct {
+	err error
+	ok  bool
+}
+
+type blastBatchProgress struct {
+	totalRuns         int
+	hasReferencePhase bool
+	hasLocalPrepare   bool
+	update            func(int, string)
+	ctx               context.Context
+}
+
+func newBlastBatchProgress(total int, request model.BlastRequest, references externalReferenceConfig, update func(int, string)) *blastBatchProgress {
+	return &blastBatchProgress{
+		totalRuns:         total,
+		hasReferencePhase: references.UseUniProt || references.UseInterPro,
+		hasLocalPrepare:   isLocalBlastRequest(request),
+		update:            safeProgress(update),
+	}
+}
+
+func (p *blastBatchProgress) withContext(ctx context.Context) *blastBatchProgress {
+	if p == nil {
+		return nil
+	}
+	clone := *p
+	clone.ctx = ctx
+	return &clone
+}
+
+func (p *blastBatchProgress) updateRunSlot(index int, current int, total int, message string) {
+	if p == nil || p.ctx == nil {
+		return
+	}
+	_ = workflowTaskSlotUpdate(p.ctx, fmt.Sprintf("blast-batch-run-%d", index), current, message)
+}
+
+func (p *blastBatchProgress) baseOffset() int {
+	if p == nil || !p.hasLocalPrepare {
+		return 0
+	}
+	return 1
+}
+
+func (p *blastBatchProgress) runPhaseOffset() int {
+	return p.baseOffset()
+}
+
+func (p *blastBatchProgress) runPhaseSpan() int {
+	if p == nil {
+		return 0
+	}
+	return p.totalRuns * 2
+}
+
+func (p *blastBatchProgress) finalizePhaseOffset() int {
+	return p.runPhaseOffset() + p.runPhaseSpan()
+}
+
+func (p *blastBatchProgress) finalizePhaseSpan() int {
+	if p == nil {
+		return 0
+	}
+	return p.totalRuns
+}
+
+func (p *blastBatchProgress) referencePhaseOffset() int {
+	return p.finalizePhaseOffset() + p.finalizePhaseSpan()
+}
+
+func (p *blastBatchProgress) referencePhaseSpan() int {
+	if p == nil {
+		return 0
+	}
+	return maxInt(1, p.totalRuns)
+}
+
+func (p *blastBatchProgress) finishOffset() int {
+	if p == nil {
+		return 0
+	}
+	return p.referencePhaseOffset() + p.referencePhaseSpan()
+}
+
+func (p *blastBatchProgress) referenceTaskIndex(phaseStart int, phaseSpan int, completed int, total int) int {
+	if p == nil {
+		return 0
+	}
+	if phaseSpan < 1 {
+		phaseSpan = 1
+	}
+	if total < 1 {
+		total = 1
+	}
+	if completed < 1 {
+		completed = 1
+	}
+	step := int(math.Ceil(float64(completed) * float64(phaseSpan) / float64(total)))
+	if step < 1 {
+		step = 1
+	}
+	if step > phaseSpan {
+		step = phaseSpan
+	}
+	return phaseStart + step
+}
+
+func (p *blastBatchProgress) startLocalPrepare(message string) {
+	if p != nil {
+		p.update(0, message)
+	}
+}
+
+func (p *blastBatchProgress) finishLocalPrepare(message string) {
+	if p != nil {
+		p.update(1, message)
+	}
+}
+
+func (p *blastBatchProgress) submitting(index int, label string) {
+	if p != nil {
+		p.updateRunSlot(index, 1, 4, fmt.Sprintf("Submitting (%s)", label))
+		p.update(p.runPhaseOffset()+index, fmt.Sprintf("Submitting BLAST query %d/%d (%s)...", index+1, p.totalRuns, label))
+	}
+}
+
+func (p *blastBatchProgress) submitted(index int, label string) {
+	if p != nil {
+		p.updateRunSlot(index, 2, 4, fmt.Sprintf("Submitted (%s)", label))
+		p.update(p.runPhaseOffset()+index+1, fmt.Sprintf("Submitted BLAST query %d/%d (%s).", index+1, p.totalRuns, label))
+	}
+}
+
+func (p *blastBatchProgress) waiting(index int, label string) {
+	if p != nil {
+		p.updateRunSlot(index, 3, 4, fmt.Sprintf("Waiting for results (%s)", label))
+		p.update(p.runPhaseOffset()+p.totalRuns+index, fmt.Sprintf("Waiting for BLAST query %d/%d (%s)...", index+1, p.totalRuns, label))
+	}
+}
+
+func (p *blastBatchProgress) running(index int, local bool, label string) {
+	if p == nil {
+		return
+	}
+	action := "Running remote"
+	if local {
+		action = "Running local"
+	}
+	p.updateRunSlot(index, 2, 4, fmt.Sprintf("%s (%s)", action, label))
+	p.update(p.runPhaseOffset()+index, fmt.Sprintf("%s BLAST query %d/%d (%s)...", action, index+1, p.totalRuns, label))
+}
+
+func (p *blastBatchProgress) finishedRun(index int, local bool, label string) {
+	if p == nil {
+		return
+	}
+	if p.hasReferencePhase {
+		p.updateRunSlot(index, 4, 4, fmt.Sprintf("BLAST finished, annotating next (%s)", label))
+	} else {
+		p.updateRunSlot(index, 4, 4, fmt.Sprintf("Finished (%s)", label))
+	}
+	if p.hasReferencePhase {
+		p.update(p.runPhaseOffset()+p.totalRuns+index+1, fmt.Sprintf("Finished BLAST query %d/%d (%s).", index+1, p.totalRuns, label))
+		return
+	}
+	if local {
+		p.update(p.runPhaseOffset()+p.totalRuns+index+1, fmt.Sprintf("Loaded local BLAST results for query %d/%d (%s).", index+1, p.totalRuns, label))
+		return
+	}
+	p.update(p.runPhaseOffset()+2*p.totalRuns+index+1, fmt.Sprintf("Finished BLAST query %d/%d (%s).", index+1, p.totalRuns, label))
+}
+
+func (p *blastBatchProgress) annotating(index int, label string) {
+	if p != nil {
+		p.updateRunSlot(index, 4, 4, fmt.Sprintf("Annotating references (%s)", label))
+		p.update(p.finalizePhaseOffset()+index, fmt.Sprintf("Annotating BLAST query %d/%d (%s)...", index+1, p.totalRuns, label))
+	}
+}
+
+func (p *blastBatchProgress) annotated(index int, label string) {
+	if p != nil {
+		p.updateRunSlot(index, 4, 4, fmt.Sprintf("Annotated (%s)", label))
+		p.update(p.finalizePhaseOffset()+index+1, fmt.Sprintf("Annotated BLAST query %d/%d (%s).", index+1, p.totalRuns, label))
+	}
+}
+
+func (w *BlastWizard) executeBlastRunPipeline(ctx context.Context, runs []blastQueryRun, configuredRequest model.BlastRequest, references externalReferenceConfig, finalize blastRunFinalizeFunc, progress func(int, string), cancel func()) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cancel == nil {
+		cancel = func() {}
+	}
+	outcomes := make([]blastPipelineOutcome, len(runs))
+	remember := func(index int, err error) error {
+		outcomes[index] = blastPipelineOutcome{err: err, ok: true}
+		if err != nil {
+			cancel()
+		}
+		return err
+	}
+	stageProgress := newBlastBatchProgress(len(runs), configuredRequest, references, progress).withContext(ctx)
+	if isLocalBlastRequest(configuredRequest) {
+		w.executeLocalBlastPipeline(ctx, runs, stageProgress, remember)
+	} else if shouldUseCombinedRemoteBlastExecution(w.source, len(runs), configuredRequest) {
+		w.executeCombinedRemoteBlastPipeline(ctx, runs, stageProgress, remember)
+	} else {
+		w.executeSplitRemoteBlastPipeline(ctx, runs, stageProgress, remember)
+	}
+	if err := firstBlastPipelineError(runs, outcomes, ctx); err != nil {
+		return err
+	}
+	return w.finalizeBlastRunPipeline(ctx, runs, references, finalize, stageProgress, cancel)
+}
+
+func (w *BlastWizard) finalizeBlastRunPipeline(ctx context.Context, runs []blastQueryRun, references externalReferenceConfig, finalize blastRunFinalizeFunc, progress *blastBatchProgress, cancel func()) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	finalizeCtx, finalizeCancel := context.WithCancel(ctx)
+	defer finalizeCancel()
+	if cancel == nil {
+		cancel = func() {}
+	}
+	workers := finalizeBlastWorkerCount(len(runs), runs[0].Request)
+	workers = maxInt(1, minPositiveWorkerCount(workers, cappedMainNetworkWorkers(w.source, len(runs))))
+	var (
+		firstErr      error
+		firstErrIndex = -1
+		errMu         sync.Mutex
+	)
+	spec := mainNetworkSpecForSource(w.source, "finalize blast runs")
+	spec.Workers = workers
+	if err := phygoboost.ParallelForSpec(finalizeCtx, spec, len(runs), func(ctx context.Context, i int) error {
+		label := oneLinePreview(reportQueryLabel(runs[i].Item))
+		progress.annotating(i, label)
+		run, err := finalize(ctx, runs[i])
+		if err != nil {
+			wrapped := &blastBatchRunError{Stage: "annotate results", Index: i + 1, Total: len(runs), Label: label, Err: err}
+			errMu.Lock()
+			if firstErr == nil {
+				firstErr = wrapped
+				firstErrIndex = i
+			}
+			errMu.Unlock()
+			cancel()
+			finalizeCancel()
+			return wrapped
+		}
+		runs[i] = run
+		progress.annotated(i, label)
+		return nil
+	}); err != nil {
+		errMu.Lock()
+		defer errMu.Unlock()
+		if firstErr != nil {
+			return parallelBlastBatchResumeError(firstErrIndex, blastItemsFromRuns(runs), firstErrIndex, firstErr)
+		}
+		return err
+	}
+	return w.enrichBlastRunBatch(ctx, runs, references, progress)
+}
+
+func (w *BlastWizard) enrichBlastRunBatch(ctx context.Context, runs []blastQueryRun, references externalReferenceConfig, progress *blastBatchProgress) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	referenceTasks, accessionTasks, queryTasks := blastReferenceTaskShape(runs)
+	plan := planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns:           len(runs),
+		IsLocal:             isLocalBlastRequest(runs[0].Request),
+		ReferenceTasks:      referenceTasks,
+		QueryReferenceTasks: queryTasks,
+		AccessionTasks:      accessionTasks,
+	})
+	phaseStart := progress.referencePhaseOffset()
+	phaseSpan := progress.referencePhaseSpan()
+	uniProtStart := phaseStart
+	uniProtSpan := phaseSpan
+	interProStart := phaseStart
+	interProSpan := phaseSpan
+	if references.UseUniProt && references.UseInterPro {
+		uniProtSpan = maxInt(1, phaseSpan/2)
+		interProStart = phaseStart + uniProtSpan
+		interProSpan = maxInt(1, phaseSpan-uniProtSpan)
+	}
+	if references.UseUniProt || references.UseInterPro {
+		if err := w.primeBlastReferenceInputs(ctx, runs, plan.Reference); err != nil {
+			return err
+		}
+	}
+	if references.UseUniProt {
+		if err := w.enrichBlastRunsWithUniProtBatch(ctx, runs, plan.Reference, progress, uniProtStart, uniProtSpan); err != nil {
+			return err
+		}
+	}
+	if references.UseInterPro {
+		if err := w.enrichBlastRunsWithInterProBatch(ctx, runs, references.InterProSettings, plan.Reference, progress, interProStart, interProSpan); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func blastReferenceTaskShape(runs []blastQueryRun) (referenceTasks int, accessionTasks int, queryTasks int) {
+	rowKeys := make(map[string]struct{})
+	accessionKeys := make(map[string]struct{})
+	queryKeys := make(map[string]struct{})
+	for runIndex := range runs {
+		if key := interProQueryCacheKey(runs[runIndex].Item); key != "" {
+			queryKeys[key] = struct{}{}
+		}
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := runs[runIndex].Results.Rows[rowIndex]
+			rowKeys[blastRowLookupIdentity(row)] = struct{}{}
+			if key := blastRowAccessionLookupIdentity(row); key != "" {
+				accessionKeys[key] = struct{}{}
+			}
+		}
+	}
+	return len(rowKeys), len(accessionKeys), len(queryKeys)
+}
+
+func (w *BlastWizard) primeBlastReferenceInputs(ctx context.Context, runs []blastQueryRun, referencePlan blastReferenceExecutionPlan) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	accessionTasks := collectBlastAccessionTasks(runs)
+	if len(accessionTasks) > 0 {
+		workers := maxInt(1, referencePlan.AccessionWorkers)
+		workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyCoordinationWorkers(len(accessionTasks))))
+		chunkSize := referencePlan.ChunkSize
+		if chunkSize < 1 {
+			chunkSize = referenceChunkSize(len(accessionTasks), workers)
+		}
+		chunks := (len(accessionTasks) + chunkSize - 1) / chunkSize
+		rowsByTask := collectBlastAccessionRowsByTask(accessionTasks)
+		spec := blastHeavyLocalSpec
+		spec.Workers = workers
+		spec.Description = "prime blast accession inputs"
+		if err := phygoboost.ParallelForSpec(ctx, spec, chunks, func(ctx context.Context, chunkIndex int) error {
+			start := chunkIndex * chunkSize
+			end := minInt(len(accessionTasks), start+chunkSize)
+			for i := start; i < end; i++ {
+				for _, row := range rowsByTask[i] {
+					_ = w.uniprotAccessionsForBlastRow(ctx, row)
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+			}
+			return ctx.Err()
+		}); err != nil {
+			return err
+		}
+	}
+	queryItems := collectBlastInterProQueryItems(runs)
+	if len(queryItems) > 0 {
+		workers := maxInt(1, referencePlan.QueryWorkers)
+		workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyCoordinationWorkers(len(queryItems))))
+		client := w.interproReferenceClient()
+		chunkSize := referencePlan.ChunkSize
+		if chunkSize < 1 {
+			chunkSize = referenceChunkSize(len(queryItems), workers)
+		}
+		chunks := (len(queryItems) + chunkSize - 1) / chunkSize
+		spec := blastHeavyLocalSpec
+		spec.Workers = workers
+		spec.Description = "prime blast interpro query inputs"
+		if err := phygoboost.ParallelForSpec(ctx, spec, chunks, func(ctx context.Context, chunkIndex int) error {
+			start := chunkIndex * chunkSize
+			end := minInt(len(queryItems), start+chunkSize)
+			for i := start; i < end; i++ {
+				_, _ = w.lookupInterProQueryEntry(ctx, client, queryItems[i])
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+			}
+			return ctx.Err()
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func collectBlastAccessionTasks(runs []blastQueryRun) []referenceLookupTask {
+	seen := make(map[string]struct{})
+	tasks := make([]referenceLookupTask, 0)
+	for runIndex := range runs {
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := runs[runIndex].Results.Rows[rowIndex]
+			key := blastRowAccessionLookupIdentity(row)
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			tasks = append(tasks, referenceLookupTask{runIndex: runIndex, rowIndex: rowIndex, key: key, row: row})
+		}
+	}
+	return tasks
+}
+
+func collectBlastAccessionRowsByTask(tasks []referenceLookupTask) [][]model.BlastResultRow {
+	if len(tasks) == 0 {
+		return nil
+	}
+	rowsByTask := make([][]model.BlastResultRow, len(tasks))
+	for i := range tasks {
+		rowsByTask[i] = []model.BlastResultRow{tasks[i].row}
+	}
+	return rowsByTask
+}
+
+func accessionSignature(values []string) string {
+	values = uniqueStrings(values)
+	if len(values) == 0 {
+		return ""
+	}
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		normalized = append(normalized, value)
+	}
+	if len(normalized) == 0 {
+		return ""
+	}
+	sort.Strings(normalized)
+	return strings.Join(normalized, "\x00")
+}
+
+func collectBlastInterProQueryItems(runs []blastQueryRun) []blastQueryItem {
+	seen := make(map[string]struct{})
+	items := make([]blastQueryItem, 0)
+	for runIndex := range runs {
+		key := interProQueryCacheKey(runs[runIndex].Item)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		items = append(items, runs[runIndex].Item)
+	}
+	return items
+}
+
+func (w *BlastWizard) enrichBlastRunsWithUniProtBatch(ctx context.Context, runs []blastQueryRun, referencePlan blastReferenceExecutionPlan, progress *blastBatchProgress, phaseStart int, phaseSpan int) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	type uniProtTask struct {
+		key        string
+		row        model.BlastResultRow
+		accessions []string
+		rows       []referenceLookupTask
+	}
+	seenRows := make(map[string]struct{})
+	taskBySignature := make(map[string]int)
+	tasks := make([]uniProtTask, 0)
+	for runIndex := range runs {
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := runs[runIndex].Results.Rows[rowIndex]
+			if !row.UniProtReferenceEnabled {
+				row.UniProtReferenceEnabled = true
+			}
+			rowKey := blastRowLookupIdentity(row)
+			if _, ok := seenRows[rowKey]; ok {
+				continue
+			}
+			seenRows[rowKey] = struct{}{}
+			accessions := w.uniprotAccessionsForBlastRow(ctx, row)
+			if strings.TrimSpace(row.UniProtAccession) != "" {
+				accessions = append([]string{row.UniProtAccession}, accessions...)
+			}
+			signature := accessionSignature(accessions)
+			task := referenceLookupTask{runIndex: runIndex, rowIndex: rowIndex, key: rowKey, row: row, accessions: append([]string(nil), accessions...)}
+			if signature != "" {
+				if existingIndex, ok := taskBySignature[signature]; ok {
+					tasks[existingIndex].rows = append(tasks[existingIndex].rows, task)
+					continue
+				}
+				taskBySignature[signature] = len(tasks)
+			}
+			tasks = append(tasks, uniProtTask{key: rowKey, row: row, accessions: append([]string(nil), accessions...), rows: []referenceLookupTask{task}})
+		}
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	workers := maxInt(1, referencePlan.UniProtWorkers)
+	workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyNetworkWorkers(len(tasks))))
+	chunkSize := referencePlan.ChunkSize
+	if chunkSize < 1 {
+		chunkSize = referenceChunkSize(len(tasks), workers)
+	}
+	chunks := (len(tasks) + chunkSize - 1) / chunkSize
+	if progress != nil {
+		progress.update(phaseStart, fmt.Sprintf("Fetching UniProt annotations for %d unique BLAST hits...", len(tasks)))
+	}
+	client := w.uniprotReferenceClient()
+	results := make(map[string]batchUniProtAnnotation, len(tasks))
+	groupKeys := make(map[string][]string, len(tasks))
+	var resultMu sync.Mutex
+	var completedMu sync.Mutex
+	completed := 0
+	lookupTasks := make([]referenceLookupTask, len(tasks))
+	for i := range tasks {
+		lookupTasks[i] = referenceLookupTask{key: tasks[i].key, row: tasks[i].row, accessions: append([]string(nil), tasks[i].accessions...)}
+		memberKeys := make([]string, 0, len(tasks[i].rows))
+		for _, grouped := range tasks[i].rows {
+			memberKeys = append(memberKeys, grouped.key)
+		}
+		groupKeys[tasks[i].key] = memberKeys
+	}
+	if err := w.runUniProtBatchLookup(ctx, lookupTasks, workers, chunks, chunkSize, client, func(done int, total int, t referenceLookupTask, entry uniprot.Entry, ok bool, err error) error {
+		resultMu.Lock()
+		result := batchUniProtAnnotation{entry: entry, ok: ok, err: err}
+		for _, key := range groupKeys[t.key] {
+			results[key] = result
+		}
+		resultMu.Unlock()
+		completedMu.Lock()
+		completed++
+		done = completed
+		completedMu.Unlock()
+		if progress != nil {
+			progress.update(progress.referenceTaskIndex(phaseStart, phaseSpan, done, total), fmt.Sprintf("Fetching UniProt annotations for %d/%d unique BLAST hits...", done, total))
+		}
+		if err != nil && isCancellationLikeError(err) {
+			return err
+		}
+		return ctx.Err()
+	}); err != nil {
+		return err
+	}
+	for runIndex := range runs {
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := &runs[runIndex].Results.Rows[rowIndex]
+			row.UniProtReferenceEnabled = true
+			key := blastRowLookupIdentity(*row)
+			result, ok := results[key]
+			if !ok || result.err != nil || !result.ok {
+				continue
+			}
+			applyUniProtEntry(row, result.entry)
+		}
+	}
+	return nil
+}
+
+func (w *BlastWizard) enrichBlastRunsWithInterProBatch(ctx context.Context, runs []blastQueryRun, settings model.InterProConservedRegionSettings, referencePlan blastReferenceExecutionPlan, progress *blastBatchProgress, phaseStart int, phaseSpan int) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	type interProTask struct {
+		key        string
+		row        model.BlastResultRow
+		accessions []string
+		rows       []referenceLookupTask
+	}
+	seenRows := make(map[string]struct{})
+	taskBySignature := make(map[string]int)
+	tasks := make([]interProTask, 0)
+	for runIndex := range runs {
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := runs[runIndex].Results.Rows[rowIndex]
+			rowKey := interProLookupKey(row)
+			if _, ok := seenRows[rowKey]; ok {
+				continue
+			}
+			seenRows[rowKey] = struct{}{}
+			accessions := w.uniprotAccessionsForBlastRow(ctx, row)
+			if strings.TrimSpace(row.UniProtAccession) != "" {
+				accessions = append([]string{row.UniProtAccession}, accessions...)
+			}
+			signature := accessionSignature(accessions)
+			task := referenceLookupTask{runIndex: runIndex, rowIndex: rowIndex, key: rowKey, row: row, accessions: append([]string(nil), accessions...)}
+			if signature != "" {
+				if existingIndex, ok := taskBySignature[signature]; ok {
+					tasks[existingIndex].rows = append(tasks[existingIndex].rows, task)
+					continue
+				}
+				taskBySignature[signature] = len(tasks)
+			}
+			tasks = append(tasks, interProTask{key: rowKey, row: row, accessions: append([]string(nil), accessions...), rows: []referenceLookupTask{task}})
+		}
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	workers := maxInt(1, referencePlan.InterProWorkers)
+	workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyNetworkWorkers(len(tasks))))
+	chunkSize := referencePlan.ChunkSize
+	if chunkSize < 1 {
+		chunkSize = referenceChunkSize(len(tasks), workers)
+	}
+	chunks := (len(tasks) + chunkSize - 1) / chunkSize
+	if progress != nil {
+		progress.update(phaseStart, fmt.Sprintf("Fetching InterPro annotations for %d unique BLAST hits...", len(tasks)))
+	}
+	client := w.interproReferenceClient()
+	results := make(map[string]batchInterProAnnotation, len(tasks))
+	groupKeys := make(map[string][]string, len(tasks))
+	var resultMu sync.Mutex
+	var completedMu sync.Mutex
+	completed := 0
+	lookupTasks := make([]referenceLookupTask, len(tasks))
+	for i := range tasks {
+		lookupTasks[i] = referenceLookupTask{key: tasks[i].key, row: tasks[i].row, accessions: append([]string(nil), tasks[i].accessions...)}
+		memberKeys := make([]string, 0, len(tasks[i].rows))
+		for _, grouped := range tasks[i].rows {
+			memberKeys = append(memberKeys, grouped.key)
+		}
+		groupKeys[tasks[i].key] = memberKeys
+	}
+	if err := w.runInterProBatchLookup(ctx, lookupTasks, workers, chunks, chunkSize, client, func(done int, total int, t referenceLookupTask, entry interpro.Entry, ok bool, err error) error {
+		resultMu.Lock()
+		result := batchInterProAnnotation{entry: entry, ok: ok, err: err}
+		for _, key := range groupKeys[t.key] {
+			results[key] = result
+		}
+		resultMu.Unlock()
+		completedMu.Lock()
+		completed++
+		done = completed
+		completedMu.Unlock()
+		if progress != nil {
+			progress.update(progress.referenceTaskIndex(phaseStart, phaseSpan, done, total), fmt.Sprintf("Fetching InterPro annotations for %d/%d unique BLAST hits...", done, total))
+		}
+		if err != nil && isCancellationLikeError(err) {
+			return err
+		}
+		return ctx.Err()
+	}); err != nil {
+		return err
+	}
+	queryEntries := make(map[string]cachedInterProQueryEntry, len(runs))
+	for runIndex := range runs {
+		key := interProQueryCacheKey(runs[runIndex].Item)
+		if _, ok := queryEntries[key]; ok {
+			continue
+		}
+		entry, queryOK := w.lookupInterProQueryEntry(ctx, client, runs[runIndex].Item)
+		queryEntries[key] = cachedInterProQueryEntry{entry: entry, ok: queryOK}
+	}
+	for runIndex := range runs {
+		queryResult := queryEntries[interProQueryCacheKey(runs[runIndex].Item)]
+		normalizedSettings := normalizeInterProConservedRegionSettings(settings)
+		for rowIndex := range runs[runIndex].Results.Rows {
+			row := &runs[runIndex].Results.Rows[rowIndex]
+			row.InterProReferenceEnabled = true
+			key := interProLookupKey(*row)
+			result, ok := results[key]
+			if !ok || result.err != nil || !result.ok {
+				continue
+			}
+			applyInterProEntry(row, result.entry)
+			row.InterProConservedRegionStatus = interProConservedRegionStatus(queryResult.entry, queryResult.ok, result.entry, normalizedSettings)
+		}
+	}
+	return nil
+}
+
+func (w *BlastWizard) executeLocalBlastPipeline(ctx context.Context, runs []blastQueryRun, progress *blastBatchProgress, remember func(int, error) error) {
+	workers := batchBlastWorkerCount(len(runs), runs[0].Request)
+	if workers < 1 {
+		workers = 1
+	}
+	progress.startLocalPrepare("Preparing shared local BLAST resources...")
+	runner, runnerOK, runnerErr := w.newLocalBlastBatchRunner(ctx, runs[0].Request)
+	if runnerErr != nil {
+		label := oneLinePreview(reportQueryLabel(runs[0].Item))
+		_ = remember(0, &blastBatchRunError{Stage: "prepare local BLAST database", Index: 1, Total: len(runs), Label: label, Err: runnerErr})
+		return
+	}
+	if runnerOK {
+		progress.finishLocalPrepare("Shared local BLAST resources ready.")
+	}
+	workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyCoordinationWorkers(len(runs))))
+	spec := blastHeavyLocalSpec
+	spec.Workers = workers
+	spec.Description = "execute local blast pipeline"
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(runs), func(ctx context.Context, i int) error {
+		run := runs[i]
+		label := oneLinePreview(reportQueryLabel(run.Item))
+		progress.running(i, true, label)
+		ran, err := w.executeLocalBlastBatchRun(ctx, run, len(runs), runner, runnerOK, progress.update)
+		if err == nil {
+			runs[i] = ran
+			progress.finishedRun(i, true, label)
+		}
+		return remember(i, wrapBlastRunStageError(err, "run BLAST query", i, len(runs), label))
+	})
+}
+
+func (w *BlastWizard) canUseDirectLocalBlastBatchRunner() bool {
+	if phygoboost.InWorker() {
+		return false
+	}
+	_, ok := w.source.(*lemna.Client)
+	return ok
+}
+
+func (w *BlastWizard) newLocalBlastBatchRunner(ctx context.Context, request model.BlastRequest) (*lemna.LocalBlastRunner, bool, error) {
+	lc, ok := w.source.(*lemna.Client)
+	if !ok || phygoboost.InWorker() {
+		return nil, false, nil
+	}
+	runner, err := lemna.NewLocalBlastRunner(ctx, lc, request)
+	if err != nil {
+		return nil, false, err
+	}
+	return runner, true, nil
+}
+
+func (w *BlastWizard) executeLocalBlastBatchRun(ctx context.Context, run blastQueryRun, total int, runner *lemna.LocalBlastRunner, runnerOK bool, progress func(int, string)) (blastQueryRun, error) {
+	if runnerOK && runner != nil {
+		job, err := runner.Run(ctx, run.Request)
+		if err != nil {
+			return blastQueryRun{}, &blastBatchRunError{Stage: "run local BLAST job", Index: run.Index, Total: total, Label: oneLinePreview(reportQueryLabel(run.Item)), Err: err}
+		}
+		results, handled, err := w.waitBlastResultsProcess(ctx, job.JobID, 3*time.Second, 5*time.Minute)
+		if !handled {
+			results, err = w.source.WaitForBlastResults(ctx, job.JobID, 3*time.Second, 5*time.Minute)
+		}
+		if err != nil {
+			return blastQueryRun{}, &blastBatchRunError{Stage: "load local BLAST results", Index: run.Index, Total: total, Label: oneLinePreview(reportQueryLabel(run.Item)), Err: err}
+		}
+		run.Results = results
+		return run, nil
+	}
+	return w.executeBlastRunJob(ctx, run, total, false, progress)
+}
+
+func (w *BlastWizard) executeCombinedRemoteBlastPipeline(ctx context.Context, runs []blastQueryRun, progress *blastBatchProgress, remember func(int, error) error) {
+	workers := combinedRemoteBlastWorkerCount(len(runs), runs[0].Request)
+	workers = maxInt(1, minPositiveWorkerCount(workers, cappedMainNetworkWorkers(w.source, len(runs))))
+	spec := mainNetworkSpecForSource(w.source, "execute combined remote blast pipeline")
+	spec.Workers = workers
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(runs), func(ctx context.Context, i int) error {
+		run := runs[i]
+		label := oneLinePreview(reportQueryLabel(run.Item))
+		progress.running(i, false, label)
+		ran, err := w.executeBlastRunJob(ctx, run, len(runs), true, progress.update)
+		if err == nil {
+			runs[i] = ran
+			progress.finishedRun(i, false, label)
+		}
+		return remember(i, wrapBlastRunStageError(err, "run BLAST query", i, len(runs), label))
+	})
+}
+
+func (w *BlastWizard) executeSplitRemoteBlastPipeline(ctx context.Context, runs []blastQueryRun, progress *blastBatchProgress, remember func(int, error) error) {
+	type jobOutcome struct {
+		job model.BlastJob
+		err error
+		ok  bool
+	}
+	jobs := make([]jobOutcome, len(runs))
+	submitWorkers := remoteBlastSubmitWorkerCount(len(runs), runs[0].Request)
+	submitWorkers = maxInt(1, minPositiveWorkerCount(submitWorkers, cappedMainNetworkWorkers(w.source, len(runs))))
+	spec := mainNetworkSpecForSource(w.source, "submit remote blast jobs")
+	spec.Workers = submitWorkers
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(runs), func(ctx context.Context, i int) error {
+		label := oneLinePreview(reportQueryLabel(runs[i].Item))
+		progress.submitting(i, label)
+		job, err := w.submitBlastWithRetry(ctx, runs[i].Request)
+		if errors.Is(err, prompt.ErrBackToBlastProgram) || errors.Is(err, prompt.ErrExitRequested) {
+			jobs[i] = jobOutcome{err: err, ok: true}
+			return remember(i, err)
+		}
+		if err != nil {
+			err = &blastBatchRunError{Stage: "submit BLAST job", Index: i + 1, Total: len(runs), Label: label, Err: err}
+		}
+		jobs[i] = jobOutcome{job: job, err: err, ok: true}
+		if err == nil {
+			progress.submitted(i, label)
+		}
+		return remember(i, err)
+	})
+	for i := range jobs {
+		if !jobs[i].ok || jobs[i].err != nil {
+			return
+		}
+	}
+	waitWorkers := remoteBlastWaitWorkerCount(len(runs), runs[0].Request)
+	waitWorkers = maxInt(1, minPositiveWorkerCount(waitWorkers, cappedMainNetworkWorkers(w.source, len(runs))))
+	waitSpec := mainNetworkSpecForSource(w.source, "wait remote blast jobs")
+	waitSpec.Workers = waitWorkers
+	_ = phygoboost.ParallelForSpec(ctx, waitSpec, len(runs), func(ctx context.Context, i int) error {
+		label := oneLinePreview(reportQueryLabel(runs[i].Item))
+		progress.waiting(i, label)
+		results, err := w.waitForBlastResultsWithRetry(ctx, jobs[i].job.JobID)
+		if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+			return remember(i, err)
+		}
+		if err != nil {
+			return remember(i, &blastBatchRunError{Stage: "wait for results", Index: i + 1, Total: len(runs), Label: label, Err: err})
+		}
+		runs[i].Results = results
+		progress.finishedRun(i, false, label)
+		return remember(i, nil)
+	})
+}
+
+func (w *BlastWizard) executeBlastRunJob(ctx context.Context, run blastQueryRun, total int, combinedRemote bool, progress func(int, string)) (blastQueryRun, error) {
+	label := oneLinePreview(reportQueryLabel(run.Item))
+	if combinedRemote {
+		_, results, handled, err := w.runBlastProcess(ctx, run.Request, 3*time.Second, 5*time.Minute)
+		if handled {
+			if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+				return blastQueryRun{}, err
+			}
+			if err != nil {
+				return blastQueryRun{}, &blastBatchRunError{Stage: "run BLAST job", Index: run.Index, Total: total, Label: label, Err: err}
+			}
+			run.Results = results
+			return run, nil
+		}
+	}
+	job, err := w.submitBlastWithRetry(ctx, run.Request)
+	if errors.Is(err, prompt.ErrBackToBlastProgram) || errors.Is(err, prompt.ErrExitRequested) {
+		return blastQueryRun{}, err
+	}
+	if err != nil {
+		return blastQueryRun{}, &blastBatchRunError{Stage: "submit BLAST job", Index: run.Index, Total: total, Label: label, Err: err}
+	}
+	if isLocalBlastRequest(run.Request) {
+		progress(run.Index, fmt.Sprintf("Loading local BLAST results for query %d/%d (%s)...", run.Index, total, label))
+	} else {
+		progress(run.Index, fmt.Sprintf("Waiting for BLAST query %d/%d (%s)...", run.Index, total, label))
+	}
+	results, err := w.waitForBlastResultsWithRetry(ctx, job.JobID)
+	if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+		return blastQueryRun{}, err
+	}
+	if err != nil {
+		return blastQueryRun{}, &blastBatchRunError{Stage: "wait for results", Index: run.Index, Total: total, Label: label, Err: err}
+	}
+	run.Results = results
+	return run, nil
+}
+
+func wrapBlastRunStageError(err error, stage string, index int, total int, label string) error {
+	if err == nil {
+		return nil
+	}
+	var batchErr *blastBatchRunError
+	if errors.As(err, &batchErr) {
+		return err
+	}
+	if isCancellationLikeError(err) {
+		return err
+	}
+	return &blastBatchRunError{Stage: stage, Index: index + 1, Total: total, Label: label, Err: err}
+}
+
+func firstBlastPipelineError(runs []blastQueryRun, outcomes []blastPipelineOutcome, ctx context.Context) error {
+	firstErrIndex := -1
+	var firstErr error
+	resumeIndex := -1
+	for i, outcome := range outcomes {
+		if !outcome.ok && resumeIndex < 0 {
+			resumeIndex = i
+		}
+		if outcome.err != nil && firstErr == nil {
+			firstErrIndex = i
+			firstErr = outcome.err
+		}
+	}
+	if firstErr == nil && resumeIndex >= 0 {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+				return err
+			}
+		}
+		firstErrIndex = resumeIndex
+		firstErr = &blastBatchRunError{Stage: "run BLAST query", Index: resumeIndex + 1, Total: len(runs), Label: oneLinePreview(reportQueryLabel(runs[resumeIndex].Item)), Err: fmt.Errorf("query did not complete")}
+	}
+	if resumeIndex < 0 {
+		resumeIndex = firstErrIndex
+	}
+	if firstErr == nil {
+		return nil
+	}
+	if isCancellationLikeError(firstErr) {
+		return firstErr
+	}
+	return parallelBlastBatchResumeError(resumeIndex, blastItemsFromRuns(runs), firstErrIndex, firstErr)
+}
+
+func completedBlastRuns(runs []blastQueryRun) []blastQueryRun {
+	out := make([]blastQueryRun, 0, len(runs))
+	for _, run := range runs {
+		if run.Index > 0 && (len(run.Results.Rows) > 0 || strings.TrimSpace(run.Results.JobID) != "" || strings.TrimSpace(run.Results.Message) != "") {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
+func blastItemsFromRuns(runs []blastQueryRun) []blastQueryItem {
+	items := make([]blastQueryItem, len(runs))
+	for i := range runs {
+		items[i] = runs[i].Item
+	}
+	return items
+}
+
+func (w *BlastWizard) prepareLocalBlastForBatch(ctx context.Context, request model.BlastRequest) error {
+	if handled, err := w.prepareLocalBlastProcess(ctx, request); handled {
+		return err
+	}
+	lc, ok := w.source.(*lemna.Client)
+	if !ok {
+		name := "selected source"
+		if w.source != nil {
+			name = w.source.Name()
+		}
+		return fmt.Errorf("%s does not support local BLAST preparation", name)
+	}
+	return lemna.PrepareLocalBlast(ctx, lc, request)
+}
+
 func batchBlastDescription(request model.BlastRequest) string {
 	if isLocalBlastRequest(request) {
 		return "Running local BLAST+ queries and loading cached result tables."
 	}
 	return "Submitting BLAST queries and collecting results."
+}
+
+func batchBlastProgressTotal(total int, request model.BlastRequest, references externalReferenceConfig) int {
+	if total <= 0 {
+		return 0
+	}
+	base := total * 3
+	if references.UseUniProt || references.UseInterPro {
+		base += total
+	}
+	if isLocalBlastRequest(request) {
+		return 1 + base
+	}
+	return base
 }
 
 func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext blastRowContext) error {
@@ -2274,11 +3454,21 @@ func (w *BlastWizard) warmBlastSequenceCache(ctx context.Context, rows []model.B
 	if len(rows) == 0 {
 		return
 	}
-	go func() {
-		warmCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
-		defer cancel()
-		w.prefetchBlastSequences(warmCtx, rows, nil)
-	}()
+	limit := phygoboost.BackgroundPrefetchWorkers(len(rows))
+	if limit <= 0 {
+		return
+	}
+	if len(rows) > limit {
+		rows = append([]model.BlastResultRow(nil), rows[:limit]...)
+	} else {
+		rows = append([]model.BlastResultRow(nil), rows...)
+	}
+	phygoboost.GoTask(ctx, mainNetworkTaskSpecForSource(w.source, "background blast sequence prefetch"), func(runCtx context.Context) {
+		_ = phygoboost.RunWithTimeout(runCtx, proteinFetchTimeout, func(warmCtx context.Context) error {
+			w.prefetchBlastSequences(warmCtx, rows, nil)
+			return nil
+		})
+	})
 }
 
 func (w *BlastWizard) warmKeywordSequenceCache(ctx context.Context, groups []model.KeywordSearchGroup) {
@@ -2286,11 +3476,21 @@ func (w *BlastWizard) warmKeywordSequenceCache(ctx context.Context, groups []mod
 	if len(rows) == 0 {
 		return
 	}
-	go func() {
-		warmCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
-		defer cancel()
-		w.prefetchKeywordSequences(warmCtx, rows, nil)
-	}()
+	limit := phygoboost.BackgroundPrefetchWorkers(len(rows))
+	if limit <= 0 {
+		return
+	}
+	if len(rows) > limit {
+		rows = append([]model.KeywordResultRow(nil), rows[:limit]...)
+	} else {
+		rows = append([]model.KeywordResultRow(nil), rows...)
+	}
+	phygoboost.GoTask(ctx, mainNetworkTaskSpecForSource(w.source, "background keyword sequence prefetch"), func(runCtx context.Context) {
+		_ = phygoboost.RunWithTimeout(runCtx, proteinFetchTimeout, func(warmCtx context.Context) error {
+			w.prefetchKeywordSequences(warmCtx, rows, nil)
+			return nil
+		})
+	})
 }
 
 func (w *BlastWizard) exportSingleBlastRun(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, run blastQueryRun, rows []model.BlastResultRow, allRows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, configuredRequest model.BlastRequest, batch bool, selection prompt.BlastRowSelection) error {
@@ -2474,7 +3674,7 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 			defer exportUpdateMu.Unlock()
 			baseExportUpdate(current, message)
 		}
-		exportCtx := contextWithUpdate(mergeContexts(ctx, taskCtx), exportUpdate)
+		exportCtx := contextWithUpdate(phygoboost.MergeContext(ctx, taskCtx), exportUpdate)
 		usedNames := make(map[string]int, len(runs))
 		jobs := make([]blastExportJob, 0, exportable)
 		for runPosition, run := range runs {
@@ -2527,57 +3727,48 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 			err   error
 			ok    bool
 		}
-		outcomes := make(chan exportOutcome, len(jobs))
-		exportWorkerCount := diskParallelismFor(len(jobs))
-		jobQueue := make(chan blastExportJob)
 		batchCtx, cancelBatch := context.WithCancel(exportCtx)
 		defer cancelBatch()
-		var workers sync.WaitGroup
-		for range exportWorkerCount {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for job := range jobQueue {
-					if err := batchCtx.Err(); err != nil {
-						return
-					}
-					exportUpdate(job.exportIndex, fmt.Sprintf("Exporting BLAST query %d/%d (%s)...", job.exportIndex+1, exportable, oneLinePreview(job.displayName)))
-					files, err := w.exportFamilyBlastSelectionsToDir(batchCtx, job.rows, job.run.Results.Rows, job.rowNumbers, job.filterFlags, exportItemFamilySources(job.run.Item), job.displayName, job.txtHeaderLabel, job.filePrefix, settings.OutputDir, settings, job.run.Item.FamilySettings, false)
-					exported := job.run
-					exported.Item = job.run.Item
-					exported.SelectedRows = job.rows
-					exported.ExcelPath = files.ExcelPath
-					exported.TextPath = files.TextPath
-					select {
-					case <-batchCtx.Done():
-						return
-					case outcomes <- exportOutcome{job: job, run: exported, files: files, err: err, ok: true}:
-					}
-					if err != nil {
-						cancelBatch()
-					}
-				}
-			}()
+		slotClosers := make([]func(), 0, len(jobs))
+		for i := range jobs {
+			slotKey := fmt.Sprintf("blast-export-run-%d", i)
+			title := fmt.Sprintf("Export %d/%d", i+1, len(jobs))
+			initial := fmt.Sprintf("Queued (%s)", oneLinePreview(jobs[i].displayName))
+			if slot, ok := registerWorkflowTaskSlot(batchCtx, slotKey, title, 2, initial); ok {
+				batchCtx = contextWithTaskSlot(batchCtx, slotKey, slot)
+				slotClosers = append(slotClosers, slot.remove)
+			}
 		}
-		go func() {
-			defer close(jobQueue)
-			for _, job := range jobs {
-				select {
-				case <-batchCtx.Done():
-					return
-				case jobQueue <- job:
+		defer func() {
+			for _, closeSlot := range slotClosers {
+				if closeSlot != nil {
+					closeSlot()
 				}
 			}
-		}()
-		go func() {
-			workers.Wait()
-			close(outcomes)
 		}()
 		results := make([]exportOutcome, len(jobs))
 		completed := 0
 		firstErrIndex := -1
 		var firstErr error
-		for outcome := range outcomes {
+		var resultMu sync.Mutex
+		spec := blastHeavyLocalSpec
+		spec.Workers = cappedHeavyCoordinationWorkers(len(jobs))
+		spec.Description = "batch blast export"
+		exportErr := phygoboost.ParallelForSpec(batchCtx, spec, len(jobs), func(ctx context.Context, i int) error {
+			job := jobs[i]
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("blast-export-run-%d", i), 0, fmt.Sprintf("Exporting %s", oneLinePreview(job.displayName)))
+			exportUpdate(job.exportIndex, fmt.Sprintf("Exporting BLAST query %d/%d (%s)...", job.exportIndex+1, exportable, oneLinePreview(job.displayName)))
+			files, err := w.exportFamilyBlastSelectionsToDir(ctx, job.rows, job.run.Results.Rows, job.rowNumbers, job.filterFlags, exportItemFamilySources(job.run.Item), job.displayName, job.txtHeaderLabel, job.filePrefix, settings.OutputDir, settings, job.run.Item.FamilySettings, false)
+			exported := job.run
+			exported.Item = job.run.Item
+			exported.SelectedRows = job.rows
+			exported.ExcelPath = files.ExcelPath
+			exported.TextPath = files.TextPath
+			outcome := exportOutcome{job: job, run: exported, files: files, err: err, ok: true}
+			resultMu.Lock()
 			results[outcome.job.exportIndex] = outcome
 			if outcome.err != nil && firstErr == nil {
 				firstErrIndex = outcome.job.exportIndex
@@ -2586,8 +3777,17 @@ func (w *BlastWizard) exportAllBlastRunsWithProgress(ctx context.Context, select
 			}
 			if outcome.err == nil {
 				completed++
+				_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("blast-export-run-%d", i), 2, fmt.Sprintf("Exported %s", oneLinePreview(outcome.job.displayName)))
 				exportUpdate(completed, fmt.Sprintf("Exported BLAST query %d/%d (%s).", completed, exportable, oneLinePreview(outcome.job.displayName)))
+			} else {
+				_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("blast-export-run-%d", i), 1, fmt.Sprintf("Failed (%s)", oneLinePreview(outcome.job.displayName)))
 			}
+			resultMu.Unlock()
+			return err
+		})
+		if exportErr != nil && firstErr == nil {
+			firstErr = exportErr
+			firstErrIndex = 0
 		}
 		exportedRuns := make([]blastQueryRun, 0, len(jobs))
 		exportedFiles := make([]exportFileResult, 0, len(jobs))
@@ -2709,7 +3909,6 @@ func (w *BlastWizard) prefetchBlastExportBatchSequences(ctx context.Context, job
 	progress := safeProgress(update)
 	progress(0, "Preloading peptide sequences for all BLAST export files...")
 	w.prefetchBlastSequences(ctx, rows, func(current int, message string) {
-		_ = current
 		progress(0, message)
 	})
 }
@@ -2901,11 +4100,36 @@ func annotateBlastRows(rows []model.BlastResultRow, sourceName string, program s
 	return out
 }
 
+func annotateBlastRowsForTargetSpecies(rows []model.BlastResultRow, species model.SpeciesCandidate) []model.BlastResultRow {
+	if len(rows) == 0 {
+		return rows
+	}
+	out := append([]model.BlastResultRow(nil), rows...)
+	targetID := species.ProteomeID
+	jbrowse := strings.TrimSpace(species.JBrowseName)
+	speciesLabel := strings.TrimSpace(species.DisplayLabel())
+	for i := range out {
+		if out[i].TargetID == 0 && targetID > 0 {
+			out[i].TargetID = targetID
+		}
+		if strings.TrimSpace(out[i].JBrowseName) == "" && jbrowse != "" {
+			out[i].JBrowseName = jbrowse
+		}
+		if strings.TrimSpace(out[i].Species) == "" && speciesLabel != "" {
+			out[i].Species = speciesLabel
+		}
+		if strings.TrimSpace(out[i].GeneReportURL) == "" && jbrowse != "" && strings.TrimSpace(out[i].Protein) != "" {
+			out[i].GeneReportURL = fmt.Sprintf("https://phytozome-next.jgi.doe.gov/report/protein/%s/%s", jbrowse, strings.TrimSpace(out[i].Protein))
+		}
+	}
+	return out
+}
+
 func (w *BlastWizard) enrichBlastRowsWithUniProt(ctx context.Context, rows []model.BlastResultRow) ([]model.BlastResultRow, error) {
 	if len(rows) == 0 {
 		return rows, nil
 	}
-	client := uniprot.NewClient(w.httpClient)
+	client := w.uniprotReferenceClient()
 	out := append([]model.BlastResultRow(nil), rows...)
 	if inheritedUpdate := updateFromContext(ctx); inheritedUpdate != nil {
 		return w.enrichBlastRowsWithUniProtProgress(ctx, client, out, inheritedUpdate)
@@ -2921,7 +4145,7 @@ func (w *BlastWizard) enrichBlastRowsWithUniProt(ctx context.Context, rows []mod
 		Total:       uniProtLookupGroupCount(out),
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.BlastResultRow, error) {
-		return w.enrichBlastRowsWithUniProtProgress(mergeContexts(ctx, taskCtx), client, out, update)
+		return w.enrichBlastRowsWithUniProtProgress(phygoboost.MergeContext(ctx, taskCtx), client, out, update)
 	})
 }
 
@@ -2933,36 +4157,50 @@ func (w *BlastWizard) enrichBlastRowsWithUniProtProgress(ctx context.Context, cl
 	groups := uniProtLookupGroups(rows)
 	results := make(map[string]uniProtLookupResult, len(groups))
 	var resultMu sync.Mutex
-	jobs := make(chan int)
-	workerCount := maxInt(parallelismFor(len(groups), maxParallelUniProtJobs), networkParallelismFor(len(groups)))
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for groupIndex := range jobs {
-				group := groups[groupIndex]
-				entry, ok := w.lookupUniProtEntry(ctx, client, rows[group.Rows[0]])
-				resultMu.Lock()
-				results[group.Key] = uniProtLookupResult{entry: entry, ok: ok}
-				done := len(results)
-				resultMu.Unlock()
-				progress(done, fmt.Sprintf("Checked UniProt reference %d/%d", done, len(groups)))
-			}
-		}()
+	spec := mainNetworkSpecForSource(w.source, "enrich blast rows with uniprot")
+	spec.Domain = "rest.uniprot.org"
+	spec.Workers = phygoboost.NetworkWorkers(len(groups))
+	slotClosers := make([]func(), 0, len(groups))
+	for idx := range groups {
+		slotKey := fmt.Sprintf("uniprot-row-group-%d", idx)
+		label := oneLinePreview(firstNonEmpty(rows[groups[idx].Rows[0]].Protein, rows[groups[idx].Rows[0]].SubjectID, groups[idx].Key))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, fmt.Sprintf("UniProt %d/%d", idx+1, len(groups)), 2, fmt.Sprintf("Queued (%s)", label)); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
+		}
 	}
-	go func() {
-		defer close(jobs)
-		for i := range groups {
-			select {
-			case <-ctx.Done():
-				return
-			case jobs <- i:
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
 			}
 		}
 	}()
-	workers.Wait()
-	if err := ctx.Err(); err != nil {
+	if err := phygoboost.ParallelForSpec(ctx, spec, len(groups), func(ctx context.Context, groupIndex int) error {
+		group := groups[groupIndex]
+		slotKey := fmt.Sprintf("uniprot-row-group-%d", groupIndex)
+		label := oneLinePreview(firstNonEmpty(rows[group.Rows[0]].Protein, rows[group.Rows[0]].SubjectID, group.Key))
+		_ = workflowTaskSlotUpdate(ctx, slotKey, 0, fmt.Sprintf("Looking up %s", label))
+		accessions := w.uniprotAccessionsForBlastRow(ctx, rows[group.Rows[0]])
+		entry, ok, handled, lookupErr := w.lookupUniProtEntryProcess(ctx, rows[group.Rows[0]], accessions)
+		if !handled {
+			entry, ok = w.lookupUniProtEntryWithAccessions(ctx, client, rows[group.Rows[0]], accessions)
+		}
+		resultMu.Lock()
+		results[group.Key] = uniProtLookupResult{entry: entry, ok: ok, err: lookupErr}
+		done := len(results)
+		resultMu.Unlock()
+		progress(done, fmt.Sprintf("Checked UniProt reference %d/%d", done, len(groups)))
+		if lookupErr == nil {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 2, fmt.Sprintf("Checked %s", label))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 1, fmt.Sprintf("Failed (%s)", label))
+		}
+		if lookupErr != nil && isCancellationLikeError(lookupErr) {
+			return lookupErr
+		}
+		return ctx.Err()
+	}); err != nil {
 		return nil, err
 	}
 	for _, group := range groups {
@@ -3022,7 +4260,17 @@ func uniProtLookupKey(row model.BlastResultRow) string {
 }
 
 func (w *BlastWizard) lookupUniProtEntry(ctx context.Context, client *uniprot.Client, row model.BlastResultRow) (uniprot.Entry, bool) {
-	accessions := w.uniprotAccessionsForBlastRow(ctx, row)
+	return w.lookupUniProtEntryWithAccessions(ctx, client, row, nil)
+}
+
+func (w *BlastWizard) lookupUniProtEntryWithAccessions(ctx context.Context, client *uniprot.Client, row model.BlastResultRow, preloaded []string) (uniprot.Entry, bool) {
+	if client == nil {
+		client = w.uniprotReferenceClient()
+	}
+	accessions := preloaded
+	if len(accessions) == 0 {
+		accessions = w.uniprotAccessionsForBlastRow(ctx, row)
+	}
 	if strings.TrimSpace(row.UniProtAccession) != "" {
 		accessions = append([]string{row.UniProtAccession}, accessions...)
 	}
@@ -3058,10 +4306,71 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
+func blastRowLookupIdentity(row model.BlastResultRow) string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strconv.Itoa(row.TargetID),
+		strings.ToLower(strings.TrimSpace(row.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(row.GeneReportURL)),
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID))),
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func blastRowAccessionLookupIdentity(row model.BlastResultRow) string {
+	proteinID := strings.ToLower(strings.TrimSpace(firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID)))
+	if proteinID == "" {
+		return ""
+	}
+	targetID := row.TargetID
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strconv.Itoa(targetID),
+		strings.ToLower(strings.TrimSpace(row.JBrowseName)),
+		proteinID,
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func (w *BlastWizard) cachedUniProtAccessions(key string) ([]string, bool) {
+	if key == "" {
+		return nil, false
+	}
+	w.uniProtAccessionsMu.RLock()
+	cached, ok := w.uniProtAccessions[key]
+	w.uniProtAccessionsMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), cached...), true
+}
+
+func (w *BlastWizard) storeUniProtAccessions(key string, accessions []string) []string {
+	accessions = uniqueStrings(accessions)
+	if key == "" {
+		return accessions
+	}
+	copyValues := append([]string(nil), accessions...)
+	w.uniProtAccessionsMu.Lock()
+	if w.uniProtAccessions == nil {
+		w.uniProtAccessions = make(map[string][]string)
+	}
+	w.uniProtAccessions[key] = copyValues
+	w.uniProtAccessionsMu.Unlock()
+	return copyValues
+}
+
 func (w *BlastWizard) uniprotAccessionsForBlastRow(ctx context.Context, row model.BlastResultRow) []string {
 	resolver, ok := w.source.(source.UniProtResolver)
 	if !ok {
 		return nil
+	}
+	cacheKey := blastRowAccessionLookupIdentity(row)
+	if cacheKey == "" {
+		cacheKey = blastRowLookupIdentity(row)
+	}
+	if cached, ok := w.cachedUniProtAccessions(cacheKey); ok {
+		return cached
 	}
 	proteinID := firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID)
 	if proteinID == "" {
@@ -3074,13 +4383,33 @@ func (w *BlastWizard) uniprotAccessionsForBlastRow(ctx context.Context, row mode
 	if targetID == 0 {
 		return nil
 	}
-	fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	accessions, err := resolver.FetchUniProtAccessions(fetchCtx, targetID, proteinID)
+	value, err, _ := w.uniProtAccessionsSF.Do(cacheKey, func() (any, error) {
+		if cached, ok := w.cachedUniProtAccessions(cacheKey); ok {
+			return cached, nil
+		}
+		if accessions, err := phygoboost.RunWithTimeoutValue(ctx, 15*time.Second, func(fetchCtx context.Context) ([]string, error) {
+			if processAccessions, handled, processErr := w.fetchUniProtAccessionsProcess(fetchCtx, targetID, proteinID); handled {
+				if processErr != nil {
+					return []string(nil), processErr
+				}
+				return w.storeUniProtAccessions(cacheKey, processAccessions), nil
+			}
+			accessions, err := resolver.FetchUniProtAccessions(fetchCtx, targetID, proteinID)
+			if err != nil {
+				return []string(nil), err
+			}
+			return w.storeUniProtAccessions(cacheKey, accessions), nil
+		}); err == nil {
+			return accessions, nil
+		} else {
+			return nil, err
+		}
+	})
 	if err != nil {
 		return nil
 	}
-	return accessions
+	accessions, _ := value.([]string)
+	return append([]string(nil), accessions...)
 }
 
 func (w *BlastWizard) phytozomeTargetIDForRow(ctx context.Context, row model.BlastResultRow) int {
@@ -3096,21 +4425,40 @@ func (w *BlastWizard) phytozomeTargetIDForRow(ctx context.Context, row model.Bla
 	if jbrowseName == "" {
 		return 0
 	}
+	cacheKey := strings.ToLower(jbrowseName)
+	w.phytozomeTargetMu.RLock()
+	if targetID, ok := w.phytozomeTargetCache[cacheKey]; ok {
+		w.phytozomeTargetMu.RUnlock()
+		return targetID
+	}
+	w.phytozomeTargetMu.RUnlock()
 	candidates, err := w.speciesCandidatesForSource(ctx, w.source, nil)
 	if err == nil {
 		if species, ok := findSpeciesCandidateByJBrowseName(candidates, jbrowseName); ok {
+			w.phytozomeTargetMu.Lock()
+			if w.phytozomeTargetCache == nil {
+				w.phytozomeTargetCache = make(map[string]int)
+			}
+			w.phytozomeTargetCache[cacheKey] = species.ProteomeID
+			w.phytozomeTargetMu.Unlock()
 			return species.ProteomeID
 		}
 	}
 	if _, ok := w.source.(*phytozome.Client); ok {
 		return 0
 	}
-	phytozomeSource := phytozome.NewClient(w.httpClient)
+	phytozomeSource := w.phytozomeHelperSource()
 	candidates, err = w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
 	if err != nil {
 		return 0
 	}
 	if species, ok := findSpeciesCandidateByJBrowseName(candidates, jbrowseName); ok {
+		w.phytozomeTargetMu.Lock()
+		if w.phytozomeTargetCache == nil {
+			w.phytozomeTargetCache = make(map[string]int)
+		}
+		w.phytozomeTargetCache[cacheKey] = species.ProteomeID
+		w.phytozomeTargetMu.Unlock()
 		return species.ProteomeID
 	}
 	return 0
@@ -3159,7 +4507,7 @@ func (w *BlastWizard) enrichBlastRowsWithInterPro(ctx context.Context, item blas
 		return rows, nil
 	}
 	settings = normalizeInterProConservedRegionSettings(settings)
-	client := interpro.NewClient(w.httpClient)
+	client := w.interproReferenceClient()
 	out := append([]model.BlastResultRow(nil), rows...)
 	if inheritedUpdate := updateFromContext(ctx); inheritedUpdate != nil {
 		return w.enrichBlastRowsWithInterProProgress(ctx, client, item, out, settings, inheritedUpdate)
@@ -3175,7 +4523,7 @@ func (w *BlastWizard) enrichBlastRowsWithInterPro(ctx context.Context, item blas
 		Total:       interProLookupGroupCount(out) + 1,
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.BlastResultRow, error) {
-		return w.enrichBlastRowsWithInterProProgress(mergeContexts(ctx, taskCtx), client, item, out, settings, update)
+		return w.enrichBlastRowsWithInterProProgress(phygoboost.MergeContext(ctx, taskCtx), client, item, out, settings, update)
 	})
 }
 
@@ -3184,41 +4532,61 @@ func (w *BlastWizard) enrichBlastRowsWithInterProProgress(ctx context.Context, c
 	for i := range rows {
 		rows[i].InterProReferenceEnabled = true
 	}
+	if slot, ok := registerWorkflowTaskSlot(ctx, "interpro-query-entry", "InterPro query", 2, "Queued query reference"); ok {
+		ctx = contextWithTaskSlot(ctx, "interpro-query-entry", slot)
+		defer slot.remove()
+	}
+	_ = workflowTaskSlotUpdate(ctx, "interpro-query-entry", 0, "Checking query reference")
 	queryEntry, queryOK := w.lookupInterProQueryEntry(ctx, client, item)
+	_ = workflowTaskSlotUpdate(ctx, "interpro-query-entry", 2, "Checked query reference")
 	progress(1, "Checked InterPro query reference")
 	groups := interProLookupGroups(rows)
 	results := make(map[string]interProLookupResult, len(groups))
 	var resultMu sync.Mutex
-	jobs := make(chan int)
-	workerCount := maxInt(parallelismFor(len(groups), maxParallelInterProJobs), networkParallelismFor(len(groups)))
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for groupIndex := range jobs {
-				group := groups[groupIndex]
-				entry, ok, err := w.lookupInterProEntry(ctx, client, rows[group.Rows[0]])
-				resultMu.Lock()
-				results[group.Key] = interProLookupResult{entry: entry, ok: ok, err: err}
-				done := len(results) + 1
-				resultMu.Unlock()
-				progress(done, fmt.Sprintf("Checked InterPro reference %d/%d", len(results), len(groups)))
-			}
-		}()
+	spec := mainNetworkSpecForSource(w.source, "enrich blast rows with interpro")
+	spec.Domain = "www.ebi.ac.uk"
+	spec.Workers = phygoboost.NetworkWorkers(len(groups))
+	slotClosers := make([]func(), 0, len(groups))
+	for idx := range groups {
+		slotKey := fmt.Sprintf("interpro-row-group-%d", idx)
+		label := oneLinePreview(firstNonEmpty(rows[groups[idx].Rows[0]].Protein, rows[groups[idx].Rows[0]].SubjectID, groups[idx].Key))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, fmt.Sprintf("InterPro %d/%d", idx+1, len(groups)), 2, fmt.Sprintf("Queued (%s)", label)); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
+		}
 	}
-	go func() {
-		defer close(jobs)
-		for i := range groups {
-			select {
-			case <-ctx.Done():
-				return
-			case jobs <- i:
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
 			}
 		}
 	}()
-	workers.Wait()
-	if err := ctx.Err(); err != nil {
+	if err := phygoboost.ParallelForSpec(ctx, spec, len(groups), func(ctx context.Context, groupIndex int) error {
+		group := groups[groupIndex]
+		slotKey := fmt.Sprintf("interpro-row-group-%d", groupIndex)
+		label := oneLinePreview(firstNonEmpty(rows[group.Rows[0]].Protein, rows[group.Rows[0]].SubjectID, group.Key))
+		_ = workflowTaskSlotUpdate(ctx, slotKey, 0, fmt.Sprintf("Looking up %s", label))
+		accessions := w.uniprotAccessionsForBlastRow(ctx, rows[group.Rows[0]])
+		entry, ok, handled, err := w.lookupInterProEntryProcess(ctx, rows[group.Rows[0]], accessions)
+		if !handled {
+			entry, ok, err = w.lookupInterProEntryWithAccessions(ctx, client, rows[group.Rows[0]], accessions)
+		}
+		resultMu.Lock()
+		results[group.Key] = interProLookupResult{entry: entry, ok: ok, err: err}
+		done := len(results) + 1
+		resultMu.Unlock()
+		progress(done, fmt.Sprintf("Checked InterPro reference %d/%d", len(results), len(groups)))
+		if err == nil {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 2, fmt.Sprintf("Checked %s", label))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 1, fmt.Sprintf("Failed (%s)", label))
+		}
+		if err != nil && isCancellationLikeError(err) {
+			return err
+		}
+		return ctx.Err()
+	}); err != nil {
 		return nil, err
 	}
 	for _, group := range groups {
@@ -3238,9 +4606,67 @@ func (w *BlastWizard) lookupInterProQueryEntry(ctx context.Context, client *inte
 	if item.QuerySource == nil {
 		return interpro.Entry{}, false
 	}
-	row := w.interProQueryLookupRow(item, ctx)
-	entry, ok, _ := w.lookupInterProEntry(ctx, client, row)
-	return entry, ok
+	cacheKey := interProQueryCacheKey(item)
+	w.interProQueryMu.RLock()
+	if cached, ok := w.interProQueryCache[cacheKey]; ok {
+		w.interProQueryMu.RUnlock()
+		return cached.entry, cached.ok
+	}
+	w.interProQueryMu.RUnlock()
+	value, err, _ := w.interProQuerySF.Do(cacheKey, func() (any, error) {
+		w.interProQueryMu.RLock()
+		if cached, ok := w.interProQueryCache[cacheKey]; ok {
+			w.interProQueryMu.RUnlock()
+			return cached, nil
+		}
+		w.interProQueryMu.RUnlock()
+		row := w.interProQueryLookupRow(item, ctx)
+		accessions := uniqueStrings([]string{row.UniProtAccession})
+		if entry, ok, handled, err := w.lookupInterProEntryProcess(ctx, row, accessions); handled {
+			if err != nil {
+				return cachedInterProQueryEntry{}, nil
+			}
+			cached := cachedInterProQueryEntry{entry: entry, ok: ok}
+			w.storeInterProQueryEntry(cacheKey, cached)
+			return cached, nil
+		}
+		entry, ok, _ := w.lookupInterProEntryWithAccessions(ctx, client, row, accessions)
+		cached := cachedInterProQueryEntry{entry: entry, ok: ok}
+		w.storeInterProQueryEntry(cacheKey, cached)
+		return cached, nil
+	})
+	if err != nil {
+		return interpro.Entry{}, false
+	}
+	cached, _ := value.(cachedInterProQueryEntry)
+	return cached.entry, cached.ok
+}
+
+func (w *BlastWizard) storeInterProQueryEntry(key string, cached cachedInterProQueryEntry) {
+	if key == "" {
+		return
+	}
+	w.interProQueryMu.Lock()
+	if w.interProQueryCache == nil {
+		w.interProQueryCache = make(map[string]cachedInterProQueryEntry)
+	}
+	w.interProQueryCache[key] = cached
+	w.interProQueryMu.Unlock()
+}
+
+func interProQueryCacheKey(item blastQueryItem) string {
+	if item.QuerySource == nil {
+		return ""
+	}
+	source := item.QuerySource
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(source.SourceDatabase)),
+		strconv.Itoa(source.SourceProteomeID),
+		strings.ToLower(strings.TrimSpace(source.SourceJBrowseName)),
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID, source.Sequence))),
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(source.NormalizedURL, source.OriginalInputURL))),
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, ctx context.Context) model.BlastResultRow {
@@ -3259,15 +4685,20 @@ func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, ctx context.Co
 		TargetID:      source.SourceProteomeID,
 		Defline:       source.Annotation,
 	}
-	if resolver, ok := resolverForQuerySource(source, w.httpClient); ok {
+	if strings.EqualFold(strings.TrimSpace(source.SourceDatabase), "phytozome") {
+		resolver := w.phytozomeHelperSource()
 		proteinID := firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID)
 		if proteinID != "" && source.SourceProteomeID > 0 {
 			if ctx == nil {
 				ctx = context.Background()
 			}
-			fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			if accessions, err := resolver.FetchUniProtAccessions(fetchCtx, source.SourceProteomeID, proteinID); err == nil && len(accessions) > 0 {
+			accessions, err := phygoboost.RunWithTimeoutValue(ctx, 15*time.Second, func(fetchCtx context.Context) ([]string, error) {
+				if processAccessions, handled, processErr := fetchUniProtAccessionsForDatabaseProcess(fetchCtx, "phytozome", source.SourceProteomeID, proteinID); handled {
+					return processAccessions, processErr
+				}
+				return resolver.FetchUniProtAccessions(fetchCtx, source.SourceProteomeID, proteinID)
+			})
+			if err == nil && len(accessions) > 0 {
 				row.UniProtAccession = strings.TrimSpace(accessions[0])
 			}
 		}
@@ -3275,20 +4706,18 @@ func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, ctx context.Co
 	return row
 }
 
-func resolverForQuerySource(source *model.QuerySequenceSource, httpClient *http.Client) (source.UniProtResolver, bool) {
-	if source == nil {
-		return nil, false
-	}
-	switch strings.ToLower(strings.TrimSpace(source.SourceDatabase)) {
-	case "phytozome":
-		return phytozome.NewClient(httpClient), true
-	default:
-		return nil, false
-	}
+func (w *BlastWizard) lookupInterProEntry(ctx context.Context, client *interpro.Client, row model.BlastResultRow) (interpro.Entry, bool, error) {
+	return w.lookupInterProEntryWithAccessions(ctx, client, row, nil)
 }
 
-func (w *BlastWizard) lookupInterProEntry(ctx context.Context, client *interpro.Client, row model.BlastResultRow) (interpro.Entry, bool, error) {
-	accessions := w.uniprotAccessionsForBlastRow(ctx, row)
+func (w *BlastWizard) lookupInterProEntryWithAccessions(ctx context.Context, client *interpro.Client, row model.BlastResultRow, preloaded []string) (interpro.Entry, bool, error) {
+	if client == nil {
+		client = w.interproReferenceClient()
+	}
+	accessions := preloaded
+	if len(accessions) == 0 {
+		accessions = w.uniprotAccessionsForBlastRow(ctx, row)
+	}
 	if strings.TrimSpace(row.UniProtAccession) != "" {
 		accessions = append([]string{row.UniProtAccession}, accessions...)
 	}
@@ -3303,6 +4732,144 @@ func (w *BlastWizard) lookupInterProEntry(ctx context.Context, client *interpro.
 		}
 	}
 	return interpro.Entry{}, false, nil
+}
+
+func resolverForQuerySource(source *model.QuerySequenceSource, httpClient *http.Client) (source.UniProtResolver, string, bool) {
+	if source == nil {
+		return nil, "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(source.SourceDatabase)) {
+	case "phytozome":
+		return phytozome.NewClient(httpClient), "phytozome", true
+	default:
+		return nil, "", false
+	}
+}
+
+func (w *BlastWizard) uniprotReferenceClient() *uniprot.Client {
+	w.uniProtClientMu.Lock()
+	defer w.uniProtClientMu.Unlock()
+	if w.uniProtClient == nil {
+		w.uniProtClient = uniprot.NewClient(w.httpClient)
+	}
+	return w.uniProtClient
+}
+
+func (w *BlastWizard) interproReferenceClient() *interpro.Client {
+	w.interProClientMu.Lock()
+	defer w.interProClientMu.Unlock()
+	if w.interProClient == nil {
+		w.interProClient = interpro.NewClient(w.httpClient)
+	}
+	return w.interProClient
+}
+
+func (w *BlastWizard) runUniProtBatchLookup(ctx context.Context, tasks []referenceLookupTask, workers int, chunks int, chunkSize int, client *uniprot.Client, onResult func(done int, total int, task referenceLookupTask, entry uniprot.Entry, ok bool, err error) error) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	if onResult == nil {
+		return nil
+	}
+	var doneMu sync.Mutex
+	done := 0
+	spec := blastHeavyCoordinationSpec("run uniprot batch lookup")
+	spec.Workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyNetworkWorkers(len(tasks)), chunks))
+	return phygoboost.ParallelForSpec(ctx, spec, chunks, func(ctx context.Context, chunkIndex int) error {
+		start := chunkIndex * chunkSize
+		end := minInt(len(tasks), start+chunkSize)
+		chunk := tasks[start:end]
+		rows := make([]model.BlastResultRow, len(chunk))
+		accessions := make([][]string, len(chunk))
+		for i := range chunk {
+			rows[i] = chunk[i].row
+			accessions[i] = append([]string(nil), chunk[i].accessions...)
+		}
+		if outputs, handled, err := w.lookupUniProtEntriesProcess(ctx, rows, accessions); handled {
+			if err != nil {
+				return err
+			}
+			for i := range chunk {
+				doneMu.Lock()
+				done++
+				current := done
+				doneMu.Unlock()
+				output := lookupUniProtEntryOutput{}
+				if i < len(outputs) {
+					output = outputs[i]
+				}
+				if err := onResult(current, len(tasks), chunk[i], output.Entry, output.OK, nil); err != nil {
+					return err
+				}
+			}
+			return ctx.Err()
+		}
+		for _, task := range chunk {
+			entry, ok := w.lookupUniProtEntryWithAccessions(ctx, client, task.row, task.accessions)
+			doneMu.Lock()
+			done++
+			current := done
+			doneMu.Unlock()
+			if err := onResult(current, len(tasks), task, entry, ok, nil); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	})
+}
+
+func (w *BlastWizard) runInterProBatchLookup(ctx context.Context, tasks []referenceLookupTask, workers int, chunks int, chunkSize int, client *interpro.Client, onResult func(done int, total int, task referenceLookupTask, entry interpro.Entry, ok bool, err error) error) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	if onResult == nil {
+		return nil
+	}
+	var doneMu sync.Mutex
+	done := 0
+	spec := blastHeavyCoordinationSpec("run interpro batch lookup")
+	spec.Workers = maxInt(1, minPositiveWorkerCount(workers, cappedHeavyNetworkWorkers(len(tasks)), chunks))
+	return phygoboost.ParallelForSpec(ctx, spec, chunks, func(ctx context.Context, chunkIndex int) error {
+		start := chunkIndex * chunkSize
+		end := minInt(len(tasks), start+chunkSize)
+		chunk := tasks[start:end]
+		rows := make([]model.BlastResultRow, len(chunk))
+		accessions := make([][]string, len(chunk))
+		for i := range chunk {
+			rows[i] = chunk[i].row
+			accessions[i] = append([]string(nil), chunk[i].accessions...)
+		}
+		if outputs, handled, err := w.lookupInterProEntriesProcess(ctx, rows, accessions); handled {
+			if err != nil {
+				return err
+			}
+			for i := range chunk {
+				doneMu.Lock()
+				done++
+				current := done
+				doneMu.Unlock()
+				output := lookupInterProEntryOutput{}
+				if i < len(outputs) {
+					output = outputs[i]
+				}
+				if err := onResult(current, len(tasks), chunk[i], output.Entry, output.OK, nil); err != nil {
+					return err
+				}
+			}
+			return ctx.Err()
+		}
+		for _, task := range chunk {
+			entry, ok, err := w.lookupInterProEntryWithAccessions(ctx, client, task.row, task.accessions)
+			doneMu.Lock()
+			done++
+			current := done
+			doneMu.Unlock()
+			if err := onResult(current, len(tasks), task, entry, ok, err); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	})
 }
 
 type interProLookupGroup struct {
@@ -3853,7 +5420,7 @@ func familyBlastCanonicalLabel(label string, settings model.FamilyBlastSettings)
 }
 
 func normalizeFamilyPunctuation(label string) string {
-	replacer := strings.NewReplacer("’", "'", ".", ".", "-", "-", "_", "_", "/", "-", ":", "-", " ", "")
+	replacer := strings.NewReplacer(".", "", "_", "", "/", "-", ":", "-", " ", "")
 	return replacer.Replace(label)
 }
 
@@ -4616,57 +6183,46 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) ([]blastQueryItem, error) {
 		taskUpdate := safeTaskUpdate(update)
-		labelCtx := mergeContexts(ctx, taskCtx)
-		phytozomeSource := phytozome.NewClient(w.httpClient)
+		labelCtx := phygoboost.MergeContext(ctx, taskCtx)
+		phytozomeSource := w.phytozomeHelperSource()
 		out := cloneBlastQueryItems(items)
 		lockedLabels := blastAutoIdentifyLockedLabels(out)
-		workerCount := maxInt(parallelismFor(len(out), maxParallelQueryJobs), networkParallelismFor(len(out)))
 		type labelResult struct {
 			index  int
 			result blastAutoLabelResult
 		}
-		jobs := make(chan int)
-		results := make(chan labelResult, len(out))
-		var workers sync.WaitGroup
-		for range workerCount {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for idx := range jobs {
-					results <- labelResult{
-						index:  idx,
-						result: w.autoIdentifyBlastLabelResult(labelCtx, phytozomeSource, selected, out[idx]),
-					}
-				}
-			}()
-		}
-		go func() {
-			for i := range out {
-				select {
-				case <-labelCtx.Done():
-					close(jobs)
-					return
-				case jobs <- i:
-				}
-			}
-			close(jobs)
-		}()
+		results := make([]labelResult, len(out))
 		completed := 0
-		for completed < len(out) {
-			select {
-			case <-labelCtx.Done():
-				workers.Wait()
-				return nil, labelCtx.Err()
-			case result := <-results:
-				if result.index >= 0 && result.index < len(out) {
-					setBlastQueryItemLabel(&out[result.index], result.result.Label)
-					mergeBlastQueryItemAliases(&out[result.index], result.result.Aliases)
-				}
-				completed++
-				taskUpdate(fmt.Sprintf("Searching labels... %d/%d", completed, len(out)))
+		var resultMu sync.Mutex
+		spec := blastHeavyCoordinationSpec("auto identify blast labels")
+		spec.Workers = cappedHeavyCoordinationWorkers(len(out))
+		if err := phygoboost.ParallelForSpec(labelCtx, spec, len(out), func(ctx context.Context, idx int) error {
+			lookupResult, handled, lookupErr := autoIdentifyBlastLabelProcess(ctx, selected, out[idx])
+			if !handled {
+				lookupResult = w.autoIdentifyBlastLabelResult(ctx, phytozomeSource, selected, out[idx])
+			}
+			result := labelResult{
+				index:  idx,
+				result: lookupResult,
+			}
+			resultMu.Lock()
+			results[idx] = result
+			completed++
+			taskUpdate(fmt.Sprintf("Searching labels... %d/%d", completed, len(out)))
+			resultMu.Unlock()
+			if lookupErr != nil && isCancellationLikeError(lookupErr) {
+				return lookupErr
+			}
+			return ctx.Err()
+		}); err != nil {
+			return nil, err
+		}
+		for _, result := range results {
+			if result.index >= 0 && result.index < len(out) {
+				setBlastQueryItemLabel(&out[result.index], result.result.Label)
+				mergeBlastQueryItemAliases(&out[result.index], result.result.Aliases)
 			}
 		}
-		workers.Wait()
 		out = harmonizeAutoIdentifiedBlastLabelsWithLocks(out, lockedLabels)
 		return out, nil
 	})
@@ -4676,14 +6232,13 @@ func (w *BlastWizard) supplementBlastAliasesWithProgress(ctx context.Context, se
 	if len(items) == 0 {
 		return items, nil
 	}
-	hasResolvable := false
+	lookupCount := 0
 	for _, item := range items {
-		if len(blastLabelSearchTerms(item)) > 0 {
-			hasResolvable = true
-			break
+		if shouldLookupBlastAliases(item) {
+			lookupCount++
 		}
 	}
-	if !hasResolvable {
+	if lookupCount == 0 {
 		return items, nil
 	}
 	return tui.RunTaskValueContext(tui.TaskPage{
@@ -4693,62 +6248,81 @@ func (w *BlastWizard) supplementBlastAliasesWithProgress(ctx context.Context, se
 		Initial:     "Reading BLAST alias label names...",
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) ([]blastQueryItem, error) {
-		return w.supplementBlastAliases(ctx, taskCtx, phytozome.NewClient(w.httpClient), selected, items, safeTaskUpdate(update))
+		return w.supplementBlastAliases(ctx, taskCtx, w.phytozomeHelperSource(), selected, items, safeTaskUpdate(update))
 	})
 }
 
 func (w *BlastWizard) supplementBlastAliases(ctx context.Context, taskCtx context.Context, phytozomeSource source.DataSource, selected model.SpeciesCandidate, items []blastQueryItem, update func(string)) ([]blastQueryItem, error) {
-	labelCtx := mergeContexts(ctx, taskCtx)
+	labelCtx := phygoboost.MergeContext(ctx, taskCtx)
 	out := cloneBlastQueryItems(items)
-	workerCount := maxInt(parallelismFor(len(out), maxParallelQueryJobs), networkParallelismFor(len(out)))
+	lookupIndexes := make([]int, 0, len(out))
+	for idx, item := range out {
+		if shouldLookupBlastAliases(item) {
+			lookupIndexes = append(lookupIndexes, idx)
+		}
+	}
+	if len(lookupIndexes) == 0 {
+		return out, nil
+	}
 	type aliasResult struct {
 		index  int
 		result blastAutoLabelResult
 	}
-	jobs := make(chan int)
-	results := make(chan aliasResult, len(out))
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for idx := range jobs {
-				results <- aliasResult{
-					index:  idx,
-					result: w.autoIdentifyBlastLabelResult(labelCtx, phytozomeSource, selected, out[idx]),
-				}
-			}
-		}()
-	}
-	go func() {
-		for i := range out {
-			select {
-			case <-labelCtx.Done():
-				close(jobs)
-				return
-			case jobs <- i:
-			}
-		}
-		close(jobs)
-	}()
+	results := make([]aliasResult, len(lookupIndexes))
 	completed := 0
-	for completed < len(out) {
-		select {
-		case <-labelCtx.Done():
-			workers.Wait()
-			return nil, labelCtx.Err()
-		case result := <-results:
-			if result.index >= 0 && result.index < len(out) {
-				mergeBlastQueryItemAliases(&out[result.index], result.result.Aliases)
+	var resultMu sync.Mutex
+	if update != nil {
+		update(fmt.Sprintf("Reading aliases... 0/%d", len(lookupIndexes)))
+	}
+	spec := blastHeavyCoordinationSpec("supplement blast aliases")
+	spec.Workers = cappedHeavyCoordinationWorkers(len(lookupIndexes))
+	if err := phygoboost.ParallelForSpec(labelCtx, spec, len(lookupIndexes), func(ctx context.Context, idx int) error {
+		itemIndex := lookupIndexes[idx]
+		lookupResult, lookupErr := phygoboost.RunWithTimeoutValue(ctx, blastAliasLookupTimeout, func(lookupCtx context.Context) (blastAutoLabelResult, error) {
+			lookupResult, handled, lookupErr := autoIdentifyBlastLabelProcess(lookupCtx, selected, out[itemIndex])
+			if !handled {
+				lookupResult = w.autoIdentifyBlastLabelResult(lookupCtx, phytozomeSource, selected, out[itemIndex])
 			}
-			completed++
-			if update != nil {
-				update(fmt.Sprintf("Reading aliases... %d/%d", completed, len(out)))
-			}
+			return lookupResult, lookupErr
+		})
+		result := aliasResult{
+			index:  itemIndex,
+			result: lookupResult,
+		}
+		resultMu.Lock()
+		results[idx] = result
+		completed++
+		if update != nil {
+			update(fmt.Sprintf("Reading aliases... %d/%d", completed, len(lookupIndexes)))
+		}
+		resultMu.Unlock()
+		if lookupErr != nil && isCancellationLikeError(lookupErr) {
+			return lookupErr
+		}
+		return ctx.Err()
+	}); err != nil {
+		return nil, err
+	}
+	for _, result := range results {
+		if result.index >= 0 && result.index < len(out) {
+			mergeBlastQueryItemAliases(&out[result.index], result.result.Aliases)
 		}
 	}
-	workers.Wait()
 	return out, nil
+}
+
+func shouldLookupBlastAliases(item blastQueryItem) bool {
+	if len(blastLabelSearchTerms(item)) == 0 {
+		return false
+	}
+	source := item.QuerySource
+	if source == nil {
+		return true
+	}
+	if strings.TrimSpace(source.Aliases) != "" || strings.TrimSpace(source.AutoDefine) != "" {
+		return false
+	}
+	return strings.TrimSpace(source.LabelName) == "" && strings.TrimSpace(item.LabelName) == ""
 }
 
 type blastAutoLabelResult struct {
@@ -4895,7 +6469,10 @@ func (w *BlastWizard) autoIdentifyBlastLabelResultFromPhytozome(ctx context.Cont
 	candidates := make([]string, 0, 8)
 	aliases := make([]string, 0, 16)
 	for _, term := range blastLabelSearchTerms(item) {
-		rows, err := phytozomeSource.SearchKeywordRows(ctx, species, term)
+		rows, handled, err := searchKeywordRowsForSourceProcess(ctx, phytozomeSource, species, term, false, false)
+		if !handled {
+			rows, err = phytozomeSource.SearchKeywordRows(ctx, species, term)
+		}
 		if err != nil {
 			continue
 		}
@@ -5040,7 +6617,7 @@ func fastaHeaderKeywordSearchTerm(header string) string {
 
 func (w *BlastWizard) phytozomeKeywordLabelSpecies(ctx context.Context, selected model.SpeciesCandidate) (model.SpeciesCandidate, bool) {
 	if _, ok := w.source.(*lemna.Client); ok {
-		phytozomeSource := phytozome.NewClient(w.httpClient)
+		phytozomeSource := w.phytozomeHelperSource()
 		phytozomeCandidates, err := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
 		if err != nil {
 			return model.SpeciesCandidate{}, false
@@ -5147,8 +6724,14 @@ func (w *BlastWizard) loadBlastInputFile(rawInput string) (string, bool, error) 
 		return "", false, err
 	}
 	path := filepath.Join(appDir, filename)
-	data, err := withSpinnerValue(w.out, "Loading BLAST input file...", prompt.ErrBackToQueryInput, func(context.Context) ([]byte, error) {
-		return os.ReadFile(path)
+	data, err := withSpinnerValue(w.out, "Loading BLAST input file...", prompt.ErrBackToQueryInput, func(taskCtx context.Context) ([]byte, error) {
+		if loaded, handled, err := readTextFileProcess(taskCtx, path); handled {
+			if err != nil {
+				return nil, err
+			}
+			return []byte(loaded), nil
+		}
+		return nil, fmt.Errorf("background file loader is unavailable")
 	})
 	if err != nil {
 		return "", false, fmt.Errorf("load BLAST input file %q: %w", filename, err)
@@ -5427,7 +7010,7 @@ func (w *BlastWizard) resolveBlastQueryItems(ctx context.Context, items []blastQ
 		Total:       len(items),
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]blastQueryItem, error) {
-		return w.resolveBlastQueryItemsWithProgress(mergeContexts(ctx, taskCtx), items, candidates, update)
+		return w.resolveBlastQueryItemsWithProgress(phygoboost.MergeContext(ctx, taskCtx), items, candidates, update)
 	})
 }
 
@@ -5444,66 +7027,57 @@ func (w *BlastWizard) resolveBlastQueryItemsWithProgress(ctx context.Context, it
 	progress(0, "Resolving BLAST query inputs...")
 
 	results := make([]queryResolveResult, len(items))
-	jobs := make(chan int)
-	outcomes := make(chan queryResolveResult, len(items))
-	workerCount := maxInt(parallelismFor(len(items), maxParallelQueryJobs), networkParallelismFor(len(items)))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for idx := range jobs {
-				if items[idx].QuerySource != nil && strings.TrimSpace(items[idx].QuerySource.Sequence) != "" {
-					outcomes <- queryResolveResult{index: idx, querySource: items[idx].QuerySource, ok: true}
-					continue
-				}
-				if strings.TrimSpace(items[idx].Sequence) != "" {
-					outcomes <- queryResolveResult{index: idx, querySource: &model.QuerySequenceSource{
-						Sequence:       items[idx].Sequence,
-						LabelName:      strings.TrimSpace(items[idx].LabelName),
-						SourceDatabase: w.source.Name(),
-					}, ok: true}
-					continue
-				}
-				querySource, ok, err := w.resolveQuerySequenceInputBatchWithTimeout(ctx, candidates, items[idx].RawInput)
-				outcomes <- queryResolveResult{index: idx, querySource: querySource, ok: ok, err: err}
-			}
-		}()
-	}
-
-	go func() {
-		for i := range items {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				workers.Wait()
-				close(outcomes)
-				return
-			case jobs <- i:
-			}
-		}
-		close(jobs)
-		workers.Wait()
-		close(outcomes)
-	}()
-
 	doneCount := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return prepared, ctx.Err()
-		case result, ok := <-outcomes:
-			if !ok {
-				goto queryResolveDone
-			}
-			results[result.index] = result
-			doneCount++
-			progress(doneCount, fmt.Sprintf("Resolving BLAST query inputs... %d/%d", doneCount, len(items)))
+	var resultMu sync.Mutex
+	spec := mainNetworkSpecForSource(w.source, "resolve blast query items")
+	spec.Workers = cappedMainNetworkWorkers(w.source, len(items))
+	slotClosers := make([]func(), 0, len(items))
+	for idx := range items {
+		slotKey := fmt.Sprintf("resolve-blast-item-%d", idx)
+		label := oneLinePreview(reportQueryLabel(items[idx]))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, fmt.Sprintf("Resolve %d/%d", idx+1, len(items)), 2, fmt.Sprintf("Queued (%s)", label)); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
 		}
 	}
-
-queryResolveDone:
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
+			}
+		}
+	}()
+	if err := phygoboost.ParallelForSpec(ctx, spec, len(items), func(ctx context.Context, idx int) error {
+		slotKey := fmt.Sprintf("resolve-blast-item-%d", idx)
+		_ = workflowTaskSlotUpdate(ctx, slotKey, 0, fmt.Sprintf("Resolving %s", oneLinePreview(reportQueryLabel(items[idx]))))
+		var result queryResolveResult
+		switch {
+		case items[idx].QuerySource != nil && strings.TrimSpace(items[idx].QuerySource.Sequence) != "":
+			result = queryResolveResult{index: idx, querySource: items[idx].QuerySource, ok: true}
+		case strings.TrimSpace(items[idx].Sequence) != "":
+			result = queryResolveResult{index: idx, querySource: &model.QuerySequenceSource{
+				Sequence:       items[idx].Sequence,
+				LabelName:      strings.TrimSpace(items[idx].LabelName),
+				SourceDatabase: w.source.Name(),
+			}, ok: true}
+		default:
+			querySource, ok, err := w.resolveQuerySequenceInputBatchWithTimeout(ctx, candidates, items[idx].RawInput)
+			result = queryResolveResult{index: idx, querySource: querySource, ok: ok, err: err}
+		}
+		resultMu.Lock()
+		results[result.index] = result
+		doneCount++
+		progress(doneCount, fmt.Sprintf("Resolving BLAST query inputs... %d/%d", doneCount, len(items)))
+		if result.err == nil {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 2, fmt.Sprintf("Resolved (%s)", oneLinePreview(reportQueryLabel(items[idx]))))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 1, fmt.Sprintf("Failed (%s)", oneLinePreview(reportQueryLabel(items[idx]))))
+		}
+		resultMu.Unlock()
+		return ctx.Err()
+	}); err != nil {
+		return prepared, err
+	}
 	failures := make([]blastBatchResolveFailure, 0)
 	for i, item := range items {
 		querySource := results[i].querySource
@@ -5548,9 +7122,15 @@ queryResolveDone:
 }
 
 func (w *BlastWizard) resolveQuerySequenceInputBatchWithTimeout(ctx context.Context, candidates []model.SpeciesCandidate, input string) (*model.QuerySequenceSource, bool, error) {
-	resolveCtx, cancel := context.WithTimeout(ctx, queryResolveTimeout)
-	defer cancel()
-	return w.resolveQuerySequenceInputBatch(resolveCtx, candidates, input)
+	type batchResolveResult struct {
+		source *model.QuerySequenceSource
+		ok     bool
+	}
+	result, err := phygoboost.RunWithTimeoutValue(ctx, queryResolveTimeout, func(resolveCtx context.Context) (batchResolveResult, error) {
+		source, ok, err := w.resolveQuerySequenceInputBatch(resolveCtx, candidates, input)
+		return batchResolveResult{source: source, ok: ok}, err
+	})
+	return result.source, result.ok, err
 }
 
 func oneLinePreview(value string) string {
@@ -5561,52 +7141,215 @@ func oneLinePreview(value string) string {
 	return value
 }
 
-func parallelismFor(total int, maxWorkers int) int {
-	return perf.DynamicWorkers(total, maxWorkers)
-}
-
-func networkParallelismFor(total int) int {
-	return perf.NetworkWorkers(total)
-}
-
-func diskParallelismFor(total int) int {
-	return perf.DiskWorkers(total)
-}
-
 func batchBlastWorkerCount(total int, request model.BlastRequest) int {
-	if !isLocalBlastRequest(request) {
-		return networkParallelismFor(total)
-	}
-	if total <= 0 {
-		return 0
-	}
-	cpu := perf.Current().CPU
-	if cpu < 1 {
-		cpu = 1
-	}
-	workers := cpu / 2
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > total {
-		workers = total
-	}
-	return workers
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).BatchWorkers
+}
+
+func finalizeBlastWorkerCount(total int, request model.BlastRequest) int {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).FinalizeWorkers
+}
+
+func shouldUseCombinedRemoteBlastWorker(total int, request model.BlastRequest) bool {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).RemoteUseCombined
+}
+
+func combinedRemoteBlastWorkerCount(total int, request model.BlastRequest) int {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).RemoteCombinedWorkers
+}
+
+func remoteBlastSubmitWorkerCount(total int, request model.BlastRequest) int {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).RemoteSubmitWorkers
+}
+
+func remoteBlastWaitWorkerCount(total int, request model.BlastRequest) int {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns: total,
+		IsLocal:   isLocalBlastRequest(request),
+	}).RemoteWaitWorkers
+}
+
+func referenceEnrichWorkerCount(total int, request model.BlastRequest) int {
+	return planBlastExecution(blastExecutionPlanOptions{
+		TotalRuns:      total,
+		IsLocal:        isLocalBlastRequest(request),
+		ReferenceTasks: total,
+	}).Reference.UniProtWorkers
 }
 
 func localBlastThreadsPerWorker(workerCount int) int {
-	cpu := perf.Current().CPU
+	budget := phygoboost.Budgets()
+	cpu := budget.LocalMain
 	if cpu < 1 {
 		return 1
 	}
 	if workerCount < 1 {
 		workerCount = 1
 	}
-	threads := cpu / workerCount
-	if threads < 1 {
+	if workerCount >= cpu/2 {
 		return 1
 	}
-	return threads
+	threads := int(math.Floor(float64(cpu) / float64(workerCount)))
+	return maxInt(1, threads)
+}
+
+func planBlastExecution(opts blastExecutionPlanOptions) blastExecutionPlan {
+	totalRuns := maxInt(0, opts.TotalRuns)
+	referenceTasks := maxInt(opts.ReferenceTasks, maxInt(opts.QueryReferenceTasks, opts.AccessionTasks))
+	batchWorkers := batchWorkersForPlan(totalRuns, opts.IsLocal)
+	finalizeWorkers := finalizeWorkersForPlan(totalRuns, opts.IsLocal, batchWorkers)
+	combined := useCombinedRemoteForPlan(totalRuns, opts.IsLocal)
+	combinedWorkers := combinedRemoteWorkersForPlan(totalRuns, opts.IsLocal, batchWorkers)
+	submitWorkers := remoteSubmitWorkersForPlan(totalRuns, opts.IsLocal, batchWorkers)
+	waitWorkers := remoteWaitWorkersForPlan(totalRuns, opts.IsLocal, batchWorkers)
+	reference := planBlastReferenceWorkers(referenceTasks, opts.QueryReferenceTasks, opts.AccessionTasks, opts.IsLocal)
+	return blastExecutionPlan{
+		BatchWorkers:          batchWorkers,
+		LocalThreadsPerWorker: localBlastThreadsPerWorker(batchWorkers),
+		FinalizeWorkers:       finalizeWorkers,
+		RemoteUseCombined:     combined,
+		RemoteCombinedWorkers: combinedWorkers,
+		RemoteSubmitWorkers:   submitWorkers,
+		RemoteWaitWorkers:     waitWorkers,
+		Reference:             reference,
+	}
+}
+
+func batchWorkersForPlan(total int, isLocal bool) int {
+	if total <= 0 {
+		return 0
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		return maxInt(1, minInt(total, budget.LocalHeavy))
+	}
+	return maxInt(1, minInt(total, budget.NetworkMain))
+}
+
+func finalizeWorkersForPlan(total int, isLocal bool, batchWorkers int) int {
+	if total <= 0 {
+		return 0
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		return maxInt(1, batchWorkers)
+	}
+	return maxInt(1, minInt(total, budget.LocalHeavy))
+}
+
+func useCombinedRemoteForPlan(total int, isLocal bool) bool {
+	if isLocal || total <= 0 {
+		return false
+	}
+	if total <= 2 {
+		return true
+	}
+	if total >= 8 {
+		return false
+	}
+	return minInt(total, phygoboost.Budgets().NetworkMain) <= 2
+}
+
+func combinedRemoteWorkersForPlan(total int, isLocal bool, batchWorkers int) int {
+	if total <= 0 {
+		return 0
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		return maxInt(1, batchWorkers)
+	}
+	return maxInt(1, minInt(minInt(total, budget.NetworkMain), minInt(total, budget.LocalHeavy)))
+}
+
+func remoteSubmitWorkersForPlan(total int, isLocal bool, batchWorkers int) int {
+	if total <= 0 {
+		return 0
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		return maxInt(1, batchWorkers)
+	}
+	return maxInt(1, minInt(total, budget.NetworkMain))
+}
+
+func remoteWaitWorkersForPlan(total int, isLocal bool, batchWorkers int) int {
+	if total <= 0 {
+		return 0
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		return maxInt(1, batchWorkers)
+	}
+	return maxInt(1, minInt(total, budget.LocalHeavy))
+}
+
+func planBlastReferenceWorkers(referenceTasks int, queryTasks int, accessionTasks int, isLocal bool) blastReferenceExecutionPlan {
+	total := maxInt(referenceTasks, maxInt(queryTasks, accessionTasks))
+	if total <= 0 {
+		return blastReferenceExecutionPlan{}
+	}
+	budget := phygoboost.Budgets()
+	if isLocal {
+		workers := maxInt(1, minInt(total, budget.LocalHeavy))
+		return blastReferenceExecutionPlan{
+			AccessionWorkers: workers,
+			UniProtWorkers:   workers,
+			InterProWorkers:  workers,
+			QueryWorkers:     maxInt(1, minInt(queryTasks, workers)),
+			ChunkSize:        referenceChunkSize(total, workers),
+		}
+	}
+	requestWorkers := maxInt(1, minInt(total, budget.NetworkMain))
+	processWorkers := maxInt(1, minInt(total, budget.LocalHeavy))
+	annotationWorkers := maxInt(1, minInt(requestWorkers, maxInt(1, processWorkers)))
+	accessionWorkers := maxInt(1, minInt(requestWorkers, maxInt(annotationWorkers, processWorkers)))
+	queryWorkers := maxInt(1, minInt(requestWorkers, processWorkers))
+	return blastReferenceExecutionPlan{
+		AccessionWorkers: accessionWorkers,
+		UniProtWorkers:   annotationWorkers,
+		InterProWorkers:  annotationWorkers,
+		QueryWorkers:     queryWorkers,
+		ChunkSize:        referenceChunkSize(total, maxInt(annotationWorkers, accessionWorkers)),
+	}
+}
+
+func referenceChunkSize(total int, workers int) int {
+	if total <= 0 {
+		return 0
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	targetChunks := maxInt(1, workers*2)
+	size := int(math.Ceil(float64(total) / float64(targetChunks)))
+	return clampInt(size, 4, 32)
+}
+
+func clampInt(value int, minValue int, maxValue int) int {
+	if maxValue < minValue {
+		maxValue = minValue
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRows []model.BlastResultRow, allRows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, querySource *model.QuerySequenceSource, displayName string, txtHeaderLabel string, fileBaseName string, outputDir string, settings exportSettings, showComplete bool) (exportFileResult, error) {
@@ -5628,7 +7371,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 			files.Steps = append(files.Steps, keywordReportStep("Write selected BLAST Excel and fetch peptide sequences", stepStart, time.Now(), "ok", fmt.Sprintf("%d selected rows written; %d peptide records available", len(selectedRows), len(records))))
 		} else {
 			writeExcel := func() error {
-				return export.WriteBlastResultsExcelWithMetadata(excelPath, selectedRows, exportMetadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
+				return export.WriteBlastResultsExcelWithMetadataProcess(ctx, excelPath, selectedRows, exportMetadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
 			}
 			var err error
 			if w.suppressTaskModals {
@@ -5648,7 +7391,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 		rawPath := filepath.Join(outputDir, fileBaseName+"_raw.xlsx")
 		stepStart := time.Now()
 		writeRawExcel := func() error {
-			return export.WriteBlastResultsExcelWithMetadata(rawPath, allRows, buildExportMetadata(displayName, querySource), &export.BlastExcelExportOptions{FilterFlags: filterFlags})
+			return export.WriteBlastResultsExcelWithMetadataProcess(ctx, rawPath, allRows, buildExportMetadata(displayName, querySource), &export.BlastExcelExportOptions{FilterFlags: filterFlags})
 		}
 		var err error
 		if w.suppressTaskModals {
@@ -5679,7 +7422,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 		files.Steps = append(files.Steps, keywordReportStep("Prepend query sequence record to raw text", prependStart, time.Now(), "ok", blastQueryPrependStepDetails(querySource, rawRecords, hitRecords)))
 		writeStart := time.Now()
 		writeRawText := func() error {
-			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+			return export.WriteProteinSequencesTextProcess(ctx, rawTextPath, rawRecords)
 		}
 		if w.suppressTaskModals {
 			err = writeRawText()
@@ -5712,7 +7455,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 		records = prependQuerySequenceRecord(records, querySource, txtHeaderLabel)
 		files.Steps = append(files.Steps, keywordReportStep("Prepend query sequence record", prependStart, time.Now(), "ok", blastQueryPrependStepDetails(querySource, records, hitRecords)))
 		writeText := func() error {
-			return export.WriteProteinSequencesText(textPath, records)
+			return export.WriteProteinSequencesTextProcess(ctx, textPath, records)
 		}
 		var err error
 		stepStart := time.Now()
@@ -5761,7 +7504,7 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 			files.Steps = append(files.Steps, keywordReportStep("Write selected Family BLAST Excel and fetch peptide sequences", stepStart, time.Now(), "ok", fmt.Sprintf("%d selected rows written; %d peptide records available", len(selectedRows), len(records))))
 		} else {
 			writeExcel := func() error {
-				return export.WriteBlastResultsExcelWithMetadata(excelPath, selectedRows, nil, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
+				return export.WriteBlastResultsExcelWithMetadataProcess(ctx, excelPath, selectedRows, nil, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
 			}
 			var err error
 			if w.suppressTaskModals {
@@ -5781,7 +7524,7 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		rawPath := filepath.Join(outputDir, fileBaseName+"_raw.xlsx")
 		stepStart := time.Now()
 		writeRawExcel := func() error {
-			return export.WriteBlastResultsExcelWithMetadata(rawPath, allRows, nil, &export.BlastExcelExportOptions{FilterFlags: filterFlags})
+			return export.WriteBlastResultsExcelWithMetadataProcess(ctx, rawPath, allRows, nil, &export.BlastExcelExportOptions{FilterFlags: filterFlags})
 		}
 		var err error
 		if w.suppressTaskModals {
@@ -5812,7 +7555,7 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		files.Steps = append(files.Steps, keywordReportStep("Prepend Family BLAST query sequence records to raw text", prependStart, time.Now(), "ok", familyQueryPrependStepDetails(prependedQueries, len(querySources), familySettings.PrependOnlyFirstQuery, len(hitRecords))))
 		writeStart := time.Now()
 		writeRawText := func() error {
-			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+			return export.WriteProteinSequencesTextProcess(ctx, rawTextPath, rawRecords)
 		}
 		var writeErr error
 		if w.suppressTaskModals {
@@ -5846,7 +7589,7 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		records, prependedQueries = prependFamilyQuerySequenceRecords(records, querySources, txtHeaderLabel, familySettings)
 		files.Steps = append(files.Steps, keywordReportStep("Prepend Family BLAST query sequence records", prependStart, time.Now(), "ok", familyQueryPrependStepDetails(prependedQueries, len(querySources), familySettings.PrependOnlyFirstQuery, len(hitRecords))))
 		writeText := func() error {
-			return export.WriteProteinSequencesText(textPath, records)
+			return export.WriteProteinSequencesTextProcess(ctx, textPath, records)
 		}
 		var writeErr error
 		stepStart := time.Now()
@@ -5946,42 +7689,46 @@ func (w *BlastWizard) exportBlastExcelAndFetchRecords(ctx context.Context, rows 
 		Total:       len(rows) + 1,
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
-		exportCtx := mergeContexts(ctx, taskCtx)
+		exportCtx := phygoboost.MergeContext(ctx, taskCtx)
 		progress := safeProgress(update)
-		type excelResult struct {
-			err error
-		}
-		excelDone := make(chan excelResult, 1)
-		go func() {
-			excelDone <- excelResult{err: export.WriteBlastResultsExcelWithMetadata(excelPath, rows, metadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})}
-		}()
+		excelDone := phygoboost.StartAsyncResult(exportCtx, func(runCtx context.Context) (struct{}, error) {
+			return struct{}{}, export.WriteBlastResultsExcelWithMetadataProcess(runCtx, excelPath, rows, metadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
+		})
 		records, fetchErr := w.fetchProteinSequenceRecordsWithProgress(exportCtx, rows, func(current int, message string) {
 			progress(current, message)
 		})
-		excel := <-excelDone
-		if excel.err != nil {
-			return nil, excel.err
+		var excelErr error
+		select {
+		case result := <-excelDone:
+			excelErr = result.Err
+		case <-exportCtx.Done():
+			excelErr = exportCtx.Err()
 		}
-		progress(len(rows)+1, "Wrote Excel file and fetched peptide sequences.")
+		if excelErr != nil {
+			return nil, excelErr
+		}
 		if fetchErr != nil {
 			return nil, fetchErr
 		}
+		progress(len(rows)+1, "Wrote Excel file and fetched peptide sequences.")
 		return records, nil
 	})
 }
 
 func (w *BlastWizard) exportBlastExcelAndFetchRecordsSilent(ctx context.Context, rows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, excelPath string, metadata *model.ExportMetadata) ([]model.ProteinSequenceRecord, error) {
-	type excelResult struct {
-		err error
-	}
-	excelDone := make(chan excelResult, 1)
-	go func() {
-		excelDone <- excelResult{err: export.WriteBlastResultsExcelWithMetadata(excelPath, rows, metadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})}
-	}()
+	excelDone := phygoboost.StartAsyncResult(ctx, func(runCtx context.Context) (struct{}, error) {
+		return struct{}{}, export.WriteBlastResultsExcelWithMetadataProcess(runCtx, excelPath, rows, metadata, &export.BlastExcelExportOptions{RowNumbers: rowNumbers, FilterFlags: filterFlags})
+	})
 	records, fetchErr := w.fetchProteinSequenceRecordsWithProgress(ctx, rows, nil)
-	excel := <-excelDone
-	if excel.err != nil {
-		return nil, excel.err
+	var excelErr error
+	select {
+	case result := <-excelDone:
+		excelErr = result.Err
+	case <-ctx.Done():
+		excelErr = ctx.Err()
+	}
+	if excelErr != nil {
+		return nil, excelErr
 	}
 	if fetchErr != nil {
 		return nil, fetchErr
@@ -6002,7 +7749,7 @@ func (w *BlastWizard) fetchBlastRecordsForExport(ctx context.Context, rows []mod
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
 		_ = metadata
-		return w.fetchProteinSequenceRecordsWithProgress(mergeContexts(ctx, taskCtx), rows, func(current int, message string) {
+		return w.fetchProteinSequenceRecordsWithProgress(phygoboost.MergeContext(ctx, taskCtx), rows, func(current int, message string) {
 			update(current, message)
 		})
 	})
@@ -6093,7 +7840,7 @@ func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.Bl
 		if errors.As(err, &missingTools) {
 			return model.BlastJob{}, err
 		}
-		if !isLocalBlastRequest(request) {
+		if !isLocalBlastRequest(request) && shouldAutoFallbackToLocalBlast(err, request, w.source) {
 			localOK, localErr := w.canRunLocalBlastFallback(ctx, request)
 			if localErr != nil {
 				err = fmt.Errorf("%w; local fallback check failed: %v", err, localErr)
@@ -6125,15 +7872,26 @@ func (w *BlastWizard) promptInstallBlastPlus(ctx context.Context, description st
 	if action != "install" {
 		return false, nil
 	}
-	if _, installErr := tui.RunTaskValueContext(tui.TaskPage{
+	if _, installErr := tui.RunProgressTaskValueContext(tui.TaskPage{
 		Path:        w.tuiPath("BLAST", "Install BLAST+"),
 		Title:       "Installing BLAST+",
 		Description: "Downloading and preparing managed NCBI BLAST+ tools for local BLAST.",
 		Initial:     "Installing BLAST+...",
+		Total:       100,
 		CancelError: cancelTarget,
-	}, func(taskCtx context.Context, update func(string)) (string, error) {
-		safeTaskUpdate(update)("Downloading and extracting BLAST+...")
-		return blastplus.InstallManaged(mergeContexts(ctx, taskCtx), w.httpClient)
+	}, func(taskCtx context.Context, update func(int, string)) (string, error) {
+		progress := safeProgress(update)
+		progress(0, "Downloading and extracting BLAST+...")
+		runCtx := phygoboost.MergeContext(ctx, taskCtx)
+		if binDir, handled, err := installManagedBlastProcess(runCtx); handled {
+			if err != nil {
+				return "", err
+			}
+			blastplus.AddToolsDirToPath(binDir)
+			progress(100, "BLAST+ installation complete.")
+			return binDir, nil
+		}
+		return blastplus.InstallManagedWithProgress(runCtx, w.httpClient, progress)
 	}); installErr != nil {
 		return false, fmt.Errorf("install BLAST+: %w", installErr)
 	}
@@ -6142,6 +7900,9 @@ func (w *BlastWizard) promptInstallBlastPlus(ctx context.Context, description st
 
 func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRequest) (model.BlastJob, error) {
 	if w.suppressTaskModals {
+		if job, handled, err := w.submitBlastProcess(ctx, request); handled {
+			return job, err
+		}
 		if lc, ok := w.source.(*lemna.Client); ok {
 			if isLocalBlastRequest(request) {
 				return lc.SubmitBlast(ctx, request)
@@ -6160,7 +7921,11 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 				CancelError: prompt.ErrBackToQueryInput,
 			}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 				safeTaskUpdate(update)("Preparing local BLAST+ run...")
-				return lc.SubmitBlast(mergeContexts(ctx, taskCtx), request)
+				runCtx := phygoboost.MergeContext(ctx, taskCtx)
+				if job, handled, err := w.submitBlastProcess(runCtx, request); handled {
+					return job, err
+				}
+				return lc.SubmitBlast(runCtx, request)
 			})
 		}
 		return tui.RunTaskValueContext(tui.TaskPage{
@@ -6171,7 +7936,11 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 			CancelError: prompt.ErrBackToQueryInput,
 		}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 			safeTaskUpdate(update)("Submitting to lemna.org BLAST...")
-			return lc.SubmitBlastServerOnly(mergeContexts(ctx, taskCtx), request)
+			runCtx := phygoboost.MergeContext(ctx, taskCtx)
+			if job, handled, err := w.submitBlastProcess(runCtx, request); handled {
+				return job, err
+			}
+			return lc.SubmitBlastServerOnly(runCtx, request)
 		})
 	}
 
@@ -6183,7 +7952,11 @@ func (w *BlastWizard) submitBlastOnce(ctx context.Context, request model.BlastRe
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (model.BlastJob, error) {
 		safeTaskUpdate(update)("Submitting BLAST job...")
-		return w.source.SubmitBlast(mergeContexts(ctx, taskCtx), request)
+		runCtx := phygoboost.MergeContext(ctx, taskCtx)
+		if job, handled, err := w.submitBlastProcess(runCtx, request); handled {
+			return job, err
+		}
+		return w.source.SubmitBlast(runCtx, request)
 	})
 }
 
@@ -6193,7 +7966,7 @@ func (w *BlastWizard) canRunLocalBlastFallback(ctx context.Context, request mode
 		return false, nil
 	}
 	if w.suppressTaskModals {
-		cap, err := lc.DetectBlastCapabilities(ctx, request.Species)
+		cap, err := w.detectLemnaBlastCapabilitiesDirect(ctx, lc, request.Species)
 		if err != nil {
 			return false, err
 		}
@@ -6214,7 +7987,7 @@ func (w *BlastWizard) canRunLocalBlastFallback(ctx context.Context, request mode
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) (lemna.BlastCapability, error) {
 		safeTaskUpdate(update)("Checking local FASTA downloads...")
-		return lc.DetectBlastCapabilities(mergeContexts(ctx, taskCtx), request.Species)
+		return w.detectLemnaBlastCapabilitiesDirect(phygoboost.MergeContext(ctx, taskCtx), lc, request.Species)
 	})
 	if err != nil {
 		return false, err
@@ -6239,20 +8012,63 @@ func normalizeWorkflowBlastProgram(program string) string {
 	return program
 }
 
+func shouldAutoFallbackToLocalBlast(err error, request model.BlastRequest, src source.DataSource) bool {
+	if err == nil || isLocalBlastRequest(request) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if _, ok := src.(*lemna.Client); ok {
+		return strings.Contains(message, "selectable datasets") ||
+			strings.Contains(message, "does not currently expose any selectable datasets") ||
+			strings.Contains(message, "automated result retrieval is not implemented") ||
+			strings.Contains(message, "result parsing is not enabled yet") ||
+			strings.Contains(message, "could not parse server job id") ||
+			strings.Contains(message, "did not expose a report url") ||
+			strings.Contains(message, "server blast rejected the request") ||
+			strings.Contains(message, "did not expose a completed result view") ||
+			strings.Contains(message, "did not expose a tab-delimited results download")
+	}
+	if _, ok := src.(*phytozome.Client); ok {
+		return strings.Contains(message, "blast results: code 422") ||
+			strings.Contains(message, "the job failed") ||
+			strings.Contains(message, "required file:") ||
+			strings.Contains(message, ".phr' does not exist") ||
+			strings.Contains(message, "does not exist.")
+	}
+	return false
+}
+
+func shouldUseCombinedRemoteBlastExecution(src source.DataSource, total int, request model.BlastRequest) bool {
+	if _, ok := src.(*lemna.Client); ok && !isLocalBlastRequest(request) {
+		return false
+	}
+	return shouldUseCombinedRemoteBlastWorker(total, request)
+}
+
 func (w *BlastWizard) waitForBlastResultsWithRetry(ctx context.Context, jobID string) (model.BlastResult, error) {
 	if w.suppressTaskModals {
+		if results, handled, err := w.waitBlastResultsProcess(ctx, jobID, 3*time.Second, 5*time.Minute); handled {
+			return results, err
+		}
 		return w.source.WaitForBlastResults(ctx, jobID, 3*time.Second, 5*time.Minute)
 	}
 	for {
 		var results model.BlastResult
 		var err error
 		if w.suppressTaskModals {
-			results, err = w.source.WaitForBlastResults(ctx, jobID, 3*time.Second, 5*time.Minute)
+			if processResults, handled, processErr := w.waitBlastResultsProcess(ctx, jobID, 3*time.Second, 5*time.Minute); handled {
+				results, err = processResults, processErr
+			} else {
+				results, err = w.source.WaitForBlastResults(ctx, jobID, 3*time.Second, 5*time.Minute)
+			}
 		} else {
 			results, err = w.waitForBlastResultsWithProgress(ctx, jobID, 3*time.Second, 5*time.Minute)
 		}
 		if err == nil {
 			return results, nil
+		}
+		if shouldAutoFallbackToLocalBlast(err, model.BlastRequest{}, w.source) {
+			return model.BlastResult{}, err
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, tui.ErrTaskCancelled) || errors.Is(err, prompt.ErrBackToQueryInput) {
 			return model.BlastResult{}, prompt.ErrBackToQueryInput
@@ -6427,12 +8243,12 @@ func (w *BlastWizard) showSelection(ctx context.Context, candidate model.Species
 	}
 
 	if c, ok := w.source.(*lemna.Client); ok {
-		cap, err := c.DetectBlastCapabilities(ctx, candidate)
+		cap, err := w.detectLemnaBlastCapabilitiesDirect(ctx, c, candidate)
 		lines = append(lines, "", "lemna.org capability summary")
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("Could not detect capabilities: %v", err))
 		} else {
-			progs := c.AvailableBlastPrograms(ctx, candidate)
+			progs := availableBlastProgramsFromCapability(cap)
 			if len(progs) > 0 {
 				lines = append(lines, "Available programs: "+strings.Join(progs, ", "))
 			} else {
@@ -6524,7 +8340,7 @@ func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context,
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(string)) ([]string, error) {
 		taskUpdate := safeTaskUpdate(update)
-		labelCtx := mergeContexts(ctx, taskCtx)
+		labelCtx := phygoboost.MergeContext(ctx, taskCtx)
 		taskUpdate("Reviewing keyword result rows...")
 		working := cloneKeywordSearchGroups(groups)
 		if _, ok := w.source.(*lemna.Client); ok {
@@ -6562,7 +8378,7 @@ func (w *BlastWizard) enrichKeywordLabelsFromPhytozome(ctx context.Context, sele
 	if _, ok := w.source.(*lemna.Client); !ok {
 		return groups
 	}
-	phytozomeSource := phytozome.NewClient(w.httpClient)
+	phytozomeSource := w.phytozomeHelperSource()
 	phytozomeCandidates, err := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
 	if err != nil {
 		return groups
@@ -6586,7 +8402,10 @@ func (w *BlastWizard) enrichKeywordLabelsFromPhytozome(ctx context.Context, sele
 			if searchTerm == "" {
 				continue
 			}
-			rows, err := phytozomeSource.SearchKeywordRows(ctx, phytozomeSpecies, searchTerm)
+			rows, handled, err := searchKeywordRowsForSourceProcess(ctx, phytozomeSource, phytozomeSpecies, searchTerm, false, false)
+			if !handled {
+				rows, err = phytozomeSource.SearchKeywordRows(ctx, phytozomeSpecies, searchTerm)
+			}
 			if err != nil {
 				continue
 			}
@@ -7442,7 +9261,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		excelPath := filepath.Join(outputDir, baseName+".xlsx")
 		stepStart := time.Now()
 		if err := withSpinner(w.out, "Writing selected keyword Excel file...", func() error {
-			return export.WriteKeywordResultsExcel(excelPath, rows)
+			return export.WriteKeywordResultsExcelProcess(ctx, excelPath, rows)
 		}); err != nil {
 			steps = append(steps, keywordReportStep("Write selected Excel", stepStart, time.Now(), "failed", err.Error()))
 			return err
@@ -7454,7 +9273,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		rawPath := filepath.Join(outputDir, baseName+"_raw.xlsx")
 		stepStart := time.Now()
 		if err := withSpinner(w.out, "Writing raw keyword Excel file...", func() error {
-			return export.WriteKeywordResultsExcel(rawPath, allRows)
+			return export.WriteKeywordResultsExcelProcess(ctx, rawPath, allRows)
 		}); err != nil {
 			steps = append(steps, keywordReportStep("Write raw Excel", stepStart, time.Now(), "failed", err.Error()))
 			return err
@@ -7471,6 +9290,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		w.prefetchKeywordSequences(ctx, preloadRows, nil)
 		steps = append(steps, keywordReportStep("Preload keyword peptide sequences", preloadStart, time.Now(), "ok", fmt.Sprintf("%d keyword rows checked before writing text files", len(preloadRows))))
 	}
+	var sequenceRecords []model.ProteinSequenceRecord
 	if settings.WriteRawExcel && settings.WriteText {
 		rawTextPath := filepath.Join(outputDir, baseName+"_raw.txt")
 		fetchStart := time.Now()
@@ -7487,10 +9307,13 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 			steps = append(steps, keywordReportStep("Fetch/use raw peptide sequences", fetchStart, time.Now(), "failed", err.Error()))
 			return err
 		}
+		if len(sequenceRecords) == 0 && len(rows) > 0 {
+			sequenceRecords = filterKeywordProteinSequenceRecords(allRows, rawRecords, rows)
+		}
 		steps = append(steps, keywordReportStep("Fetch/use raw peptide sequences", fetchStart, time.Now(), "ok", fmt.Sprintf("%d sequence records available", len(rawRecords))))
 		writeStart := time.Now()
 		if err := withSpinner(w.out, "Writing raw peptide text file...", func() error {
-			return export.WriteProteinSequencesText(rawTextPath, rawRecords)
+			return export.WriteProteinSequencesTextProcess(ctx, rawTextPath, rawRecords)
 		}); err != nil {
 			steps = append(steps, keywordReportStep("Write raw peptide text", writeStart, time.Now(), "failed", err.Error()))
 			return err
@@ -7498,7 +9321,6 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		steps = append(steps, keywordReportStep("Write raw peptide text", writeStart, time.Now(), "ok", fmt.Sprintf("%d peptide records written", len(rawRecords))))
 		files.RawTextPath = rawTextPath
 	}
-	var sequenceRecords []model.ProteinSequenceRecord
 	var sequenceAudit report.SequenceAudit
 	if settings.WriteText {
 		textPath := filepath.Join(outputDir, baseName+".txt")
@@ -7507,7 +9329,9 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 			records []model.ProteinSequenceRecord
 			err     error
 		)
-		if w.suppressTaskModals {
+		if len(sequenceRecords) > 0 {
+			records = append([]model.ProteinSequenceRecord(nil), sequenceRecords...)
+		} else if w.suppressTaskModals {
 			records, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, rows, nil)
 		} else {
 			records, err = w.fetchKeywordProteinSequenceRecords(ctx, rows)
@@ -7521,7 +9345,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		steps = append(steps, keywordReportStep("Fetch/use peptide sequences", fetchStart, time.Now(), "ok", fmt.Sprintf("%d sequence records available", len(records))))
 		writeStart := time.Now()
 		if err := withSpinner(w.out, "Writing peptide text file...", func() error {
-			return export.WriteProteinSequencesText(textPath, records)
+			return export.WriteProteinSequencesTextProcess(ctx, textPath, records)
 		}); err != nil {
 			steps = append(steps, keywordReportStep("Write peptide text", writeStart, time.Now(), "failed", err.Error()))
 			return err
@@ -7553,21 +9377,23 @@ func (w *BlastWizard) exportKeywordExcelAndFetchRecords(ctx context.Context, row
 		Total:       len(rows) + 1,
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
-		exportCtx := mergeContexts(ctx, taskCtx)
+		exportCtx := phygoboost.MergeContext(ctx, taskCtx)
 		progress := safeProgress(update)
-		type excelResult struct {
-			err error
-		}
-		excelDone := make(chan excelResult, 1)
-		go func() {
-			excelDone <- excelResult{err: export.WriteKeywordResultsExcel(excelPath, rows)}
-		}()
+		excelDone := phygoboost.StartAsyncResult(exportCtx, func(runCtx context.Context) (struct{}, error) {
+			return struct{}{}, export.WriteKeywordResultsExcelProcess(runCtx, excelPath, rows)
+		})
 		records, fetchErr := w.fetchKeywordProteinSequenceRecordsWithProgress(exportCtx, rows, func(current int, message string) {
 			progress(current, message)
 		})
-		excel := <-excelDone
-		if excel.err != nil {
-			return nil, excel.err
+		var excelErr error
+		select {
+		case result := <-excelDone:
+			excelErr = result.Err
+		case <-exportCtx.Done():
+			excelErr = exportCtx.Err()
+		}
+		if excelErr != nil {
+			return nil, excelErr
 		}
 		progress(len(rows)+1, "Wrote keyword Excel file and fetched peptide sequences.")
 		if fetchErr != nil {
@@ -7617,7 +9443,7 @@ func (w *BlastWizard) resolveURLQuerySequenceInput(ctx context.Context, candidat
 
 	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
 	if !ok {
-		phytozomeSource := phytozome.NewClient(w.httpClient)
+		phytozomeSource := w.phytozomeHelperSource()
 		phytozomeCandidates, loadErr := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
 		if loadErr == nil {
 			if phytozomeSpecies, phytozomeOK := findSpeciesCandidateByJBrowseName(phytozomeCandidates, jbrowseName); phytozomeOK {
@@ -7633,7 +9459,7 @@ func (w *BlastWizard) resolveURLQuerySequenceInput(ctx context.Context, candidat
 
 	resolveLabel := databaseDisplayName(resolverSource.Name())
 	gene, err := withSpinnerValue(w.out, "Resolving "+resolveLabel+" gene report URL...", prompt.ErrBackToQueryInput, func(taskCtx context.Context) (*model.QuerySequenceSource, error) {
-		return w.resolveGeneReportSequence(mergeContexts(ctx, taskCtx), resolverSource, species, reportType, identifier, input, normalizedURL)
+		return w.resolveGeneReportSequence(phygoboost.MergeContext(ctx, taskCtx), resolverSource, species, reportType, identifier, input, normalizedURL)
 	})
 	if err != nil {
 		return nil, false, err
@@ -7656,7 +9482,7 @@ func (w *BlastWizard) resolveURLQuerySequenceInputBatch(ctx context.Context, can
 
 	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
 	if !ok {
-		phytozomeSource := phytozome.NewClient(w.httpClient)
+		phytozomeSource := w.phytozomeHelperSource()
 		phytozomeCandidates, loadErr := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
 		if loadErr == nil {
 			if phytozomeSpecies, phytozomeOK := findSpeciesCandidateByJBrowseName(phytozomeCandidates, jbrowseName); phytozomeOK {
@@ -7680,9 +9506,15 @@ func (w *BlastWizard) resolveURLQuerySequenceInputBatch(ctx context.Context, can
 func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSource source.DataSource, species model.SpeciesCandidate, reportType, identifier, input, normalizedURL string) (*model.QuerySequenceSource, error) {
 	switch reportType {
 	case "gene", "transcript":
-		resolved, err := resolverSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
+		resolved, handled, err := fetchGeneQuerySequenceProcess(ctx, resolverSource, species, reportType, identifier)
+		if !handled {
+			resolved, err = resolverSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
+		}
 		if err != nil {
 			return nil, err
+		}
+		if resolved == nil {
+			return nil, fmt.Errorf("%s returned an empty gene report sequence", databaseDisplayName(resolverSource.Name()))
 		}
 		gene := *resolved
 		gene.OriginalInputURL = strings.TrimSpace(input)
@@ -7708,9 +9540,15 @@ func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSou
 		if !ok {
 			return nil, fmt.Errorf("%s does not support protein report URL resolution", databaseDisplayName(resolverSource.Name()))
 		}
-		resolved, err := resolver.FetchProteinQuerySequence(ctx, species, identifier)
+		resolved, handled, err := fetchProteinQuerySequenceProcess(ctx, resolverSource, species, identifier)
+		if !handled {
+			resolved, err = resolver.FetchProteinQuerySequence(ctx, species, identifier)
+		}
 		if err != nil {
 			return nil, err
+		}
+		if resolved == nil {
+			return nil, fmt.Errorf("%s returned an empty protein report sequence", databaseDisplayName(resolverSource.Name()))
 		}
 		gene := *resolved
 		gene.OriginalInputURL = strings.TrimSpace(input)
@@ -7745,7 +9583,7 @@ func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []mo
 		Total:       len(rows),
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
-		return w.fetchProteinSequenceRecordsWithProgress(mergeContexts(ctx, taskCtx), rows, update)
+		return w.fetchProteinSequenceRecordsWithProgress(phygoboost.MergeContext(ctx, taskCtx), rows, update)
 	})
 }
 
@@ -7762,7 +9600,7 @@ func (w *BlastWizard) fetchProteinSequenceRecordsWithProgress(ctx context.Contex
 
 	results := w.prefetchBlastSequences(ctx, rows, update)
 
-	for _, row := range rows {
+	for idx, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -7774,7 +9612,7 @@ func (w *BlastWizard) fetchProteinSequenceRecordsWithProgress(ctx context.Contex
 			if ok && prefetched.err != nil && !isMissingProteinSequenceError(prefetched.err) {
 				return nil, fmt.Errorf("protein sequence for %s: %w", sequenceID, prefetched.err)
 			}
-			progress(len(records), fmt.Sprintf("Skipped missing peptide sequence for %s.", sequenceID))
+			progress(idx+1, fmt.Sprintf("Skipped missing peptide sequence for %s.", sequenceID))
 			continue
 		}
 		sequence := prefetched.sequence
@@ -7783,6 +9621,7 @@ func (w *BlastWizard) fetchProteinSequenceRecordsWithProgress(ctx context.Contex
 			Header:   fmt.Sprintf(">%s|%s", row.Species, row.Protein),
 			Sequence: sequence,
 		})
+		progress(idx+1, fmt.Sprintf("Prepared peptide sequence for %s.", sequenceID))
 	}
 
 	progress(len(rows), "Fetched peptide sequences.")
@@ -7798,7 +9637,7 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 		Total:       len(rows),
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
-		return w.fetchKeywordProteinSequenceRecordsWithProgress(mergeContexts(ctx, taskCtx), rows, update)
+		return w.fetchKeywordProteinSequenceRecordsWithProgress(phygoboost.MergeContext(ctx, taskCtx), rows, update)
 	})
 }
 
@@ -7808,7 +9647,7 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecordsWithProgress(ctx context
 
 	results := w.prefetchKeywordSequences(ctx, rows, update)
 
-	for _, row := range rows {
+	for idx, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -7822,7 +9661,7 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecordsWithProgress(ctx context
 			if ok && prefetched.err != nil && !isMissingProteinSequenceError(prefetched.err) {
 				return nil, fmt.Errorf("protein sequence for keyword row %s: %w", row.TranscriptID, prefetched.err)
 			}
-			progress(len(records), fmt.Sprintf("Skipped missing keyword peptide sequence for %s.", sequenceID))
+			progress(idx+1, fmt.Sprintf("Skipped missing keyword peptide sequence for %s.", sequenceID))
 			continue
 		}
 		sequence := prefetched.sequence
@@ -7831,10 +9670,36 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecordsWithProgress(ctx context
 			Header:   keywordProteinSequenceHeader(row),
 			Sequence: sequence,
 		})
+		progress(idx+1, fmt.Sprintf("Prepared keyword peptide sequence for %s.", sequenceID))
 	}
 
 	progress(len(rows), "Fetched keyword peptide sequences.")
 	return records, nil
+}
+
+func filterKeywordProteinSequenceRecords(allRows []model.KeywordResultRow, allRecords []model.ProteinSequenceRecord, selectedRows []model.KeywordResultRow) []model.ProteinSequenceRecord {
+	if len(allRows) == 0 || len(allRecords) == 0 || len(selectedRows) == 0 {
+		return nil
+	}
+	recordByHeader := make(map[string][]model.ProteinSequenceRecord, len(allRecords))
+	for _, record := range allRecords {
+		recordByHeader[record.Header] = append(recordByHeader[record.Header], record)
+	}
+	filtered := make([]model.ProteinSequenceRecord, 0, len(selectedRows))
+	for _, row := range selectedRows {
+		header := keywordProteinSequenceHeader(row)
+		queue := recordByHeader[header]
+		if len(queue) == 0 {
+			continue
+		}
+		filtered = append(filtered, queue[0])
+		if len(queue) == 1 {
+			delete(recordByHeader, header)
+		} else {
+			recordByHeader[header] = queue[1:]
+		}
+	}
+	return filtered
 }
 
 func keywordProteinSequenceHeader(row model.KeywordResultRow) string {
@@ -7928,15 +9793,27 @@ func (w *BlastWizard) fetchProteinSequenceCached(ctx context.Context, targetID i
 		if err := w.cachedProteinSequenceMiss(cacheKey); err != nil {
 			return "", err
 		}
-		fetchCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
-		defer cancel()
-		sequence, err := w.source.FetchProteinSequence(fetchCtx, targetID, sequenceID)
-		if err != nil {
-			w.storeProteinSequenceMiss(cacheKey, err)
+		if sequence, err := phygoboost.RunWithTimeoutValue(ctx, proteinFetchTimeout, func(fetchCtx context.Context) (string, error) {
+			if sequence, handled, err := w.fetchProteinSequenceProcess(fetchCtx, targetID, sequenceID); handled {
+				if err != nil {
+					w.storeProteinSequenceMiss(cacheKey, err)
+					return "", err
+				}
+				w.storeProteinSequence(cacheKey, sequence)
+				return sequence, nil
+			}
+			sequence, err := w.source.FetchProteinSequence(fetchCtx, targetID, sequenceID)
+			if err != nil {
+				w.storeProteinSequenceMiss(cacheKey, err)
+				return "", err
+			}
+			w.storeProteinSequence(cacheKey, sequence)
+			return sequence, nil
+		}); err == nil {
+			return sequence, nil
+		} else {
 			return "", err
 		}
-		w.storeProteinSequence(cacheKey, sequence)
-		return sequence, nil
 	})
 	if err != nil {
 		return "", err
@@ -7978,46 +9855,48 @@ func (w *BlastWizard) prefetchBlastSequences(ctx context.Context, rows []model.B
 	}
 
 	var mu sync.Mutex
-	jobs := make(chan fetchTask)
-	done := make(chan struct{}, len(tasks))
-	workerCount := maxInt(parallelismFor(len(tasks), maxParallelFetchJobs), networkParallelismFor(len(tasks)))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for task := range jobs {
-				sequence, err := w.fetchProteinSequenceCached(ctx, task.targetID, task.id)
-				mu.Lock()
-				results[task.key] = sequenceFetchResult{sequence: sequence, err: err}
-				mu.Unlock()
-				done <- struct{}{}
-			}
-		}()
+	completedCount := 0
+	totalTasks := len(tasks)
+	spec := mainNetworkSpecForSource(w.source, "prefetch blast protein sequences")
+	spec.Workers = cappedMainNetworkWorkers(w.source, len(tasks))
+	if prefetchWorkers := phygoboost.BackgroundPrefetchWorkers(len(tasks)); prefetchWorkers > 0 && prefetchWorkers < spec.Workers {
+		spec.Workers = prefetchWorkers
 	}
-
-	go func() {
-		for _, task := range tasks {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				workers.Wait()
-				close(done)
-				return
-			case jobs <- task:
+	slotClosers := make([]func(), 0, len(tasks))
+	for idx := range tasks {
+		slotKey := fmt.Sprintf("prefetch-blast-seq-%d", idx)
+		title := fmt.Sprintf("Sequence %d/%d", idx+1, len(tasks))
+		initial := fmt.Sprintf("Queued (%s)", oneLinePreview(tasks[idx].id))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, title, 2, initial); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
+		}
+	}
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
 			}
 		}
-		close(jobs)
-		workers.Wait()
-		close(done)
 	}()
-
-	completedCount := 0
-	for range done {
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(tasks), func(ctx context.Context, idx int) error {
+		task := tasks[idx]
+		slotKey := fmt.Sprintf("prefetch-blast-seq-%d", idx)
+		_ = workflowTaskSlotUpdate(ctx, slotKey, 0, fmt.Sprintf("Fetching %s", oneLinePreview(task.id)))
+		sequence, err := w.fetchProteinSequenceCached(ctx, task.targetID, task.id)
+		mu.Lock()
+		results[task.key] = sequenceFetchResult{sequence: sequence, err: err}
 		completedCount++
-		progress(completedCount, fmt.Sprintf("Fetching peptide sequences... %d/%d", completedCount, len(tasks)))
-	}
+		currentCount := completedCount
+		mu.Unlock()
+		progress(currentCount, fmt.Sprintf("Fetching peptide sequences... %d/%d", currentCount, totalTasks))
+		if err == nil {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 2, fmt.Sprintf("Fetched %s", oneLinePreview(task.id)))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 1, fmt.Sprintf("Unavailable (%s)", oneLinePreview(task.id)))
+		}
+		return nil
+	})
 	return results
 }
 
@@ -8048,46 +9927,49 @@ func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model
 	}
 
 	var mu sync.Mutex
-	jobs := make(chan string)
-	done := make(chan struct{}, len(taskIDs))
-	workerCount := maxInt(parallelismFor(len(taskIDs), maxParallelFetchJobs), networkParallelismFor(len(taskIDs)))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for sequenceID := range jobs {
-				sequence, err := w.fetchProteinSequenceCached(ctx, 0, sequenceID)
-				mu.Lock()
-				results[sequenceID] = sequenceFetchResult{sequence: sequence, err: err}
-				mu.Unlock()
-				done <- struct{}{}
-			}
-		}()
+	completedTasks := len(results)
+	totalTasks := len(taskIDs)
+	spec := mainNetworkSpecForSource(w.source, "prefetch keyword protein sequences")
+	spec.Workers = cappedMainNetworkWorkers(w.source, len(taskIDs))
+	if prefetchWorkers := phygoboost.BackgroundPrefetchWorkers(len(taskIDs)); prefetchWorkers > 0 && prefetchWorkers < spec.Workers {
+		spec.Workers = prefetchWorkers
 	}
-
-	go func() {
-		for _, sequenceID := range taskIDs {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				workers.Wait()
-				close(done)
-				return
-			case jobs <- sequenceID:
+	slotClosers := make([]func(), 0, len(taskIDs))
+	for idx := range taskIDs {
+		slotKey := fmt.Sprintf("prefetch-keyword-seq-%d", idx)
+		title := fmt.Sprintf("Keyword sequence %d/%d", idx+1, len(taskIDs))
+		initial := fmt.Sprintf("Queued (%s)", oneLinePreview(taskIDs[idx]))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, title, 2, initial); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
+		}
+	}
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
 			}
 		}
-		close(jobs)
-		workers.Wait()
-		close(done)
 	}()
-
-	completedCount := 0
-	for range done {
-		completedCount++
-		progress(completedCount, fmt.Sprintf("Fetching keyword peptide sequences... %d/%d", completedCount, len(taskIDs)))
-	}
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(taskIDs), func(ctx context.Context, idx int) error {
+		sequenceID := taskIDs[idx]
+		slotKey := fmt.Sprintf("prefetch-keyword-seq-%d", idx)
+		_ = workflowTaskSlotUpdate(ctx, slotKey, 0, fmt.Sprintf("Fetching %s", oneLinePreview(sequenceID)))
+		sequence, err := w.fetchProteinSequenceCached(ctx, 0, sequenceID)
+		mu.Lock()
+		results[sequenceID] = sequenceFetchResult{sequence: sequence, err: err}
+		completedTasks++
+		currentTasks := completedTasks
+		mu.Unlock()
+		progress(currentTasks, fmt.Sprintf("Fetching keyword peptide sequences... %d/%d sequences", currentTasks, totalTasks))
+		if err == nil {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 2, fmt.Sprintf("Fetched %s", oneLinePreview(sequenceID)))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, slotKey, 1, fmt.Sprintf("Unavailable (%s)", oneLinePreview(sequenceID)))
+		}
+		return nil
+	})
+	progress(len(rows), "Fetched keyword peptide sequences.")
 	return results
 }
 
@@ -8524,20 +10406,28 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string) ([]model.KeywordSearchGroup, error) {
+func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string, wide bool) ([]model.KeywordSearchGroup, error) {
+	title := "Searching keyword terms"
+	description := "Searching annotation rows for each keyword."
+	initial := "Searching keyword terms..."
+	if wide {
+		title = "Wide-searching keyword terms"
+		description = "Searching Phytozome keyword rows with the new search engine wide search program."
+		initial = "Wide-searching keyword terms..."
+	}
 	return tui.RunProgressTaskValueContext(tui.TaskPage{
 		Path:        w.tuiPath("Keyword", "Searching"),
-		Title:       "Searching keyword terms",
-		Description: "Searching annotation rows for each keyword.",
-		Initial:     "Searching keyword terms...",
+		Title:       title,
+		Description: description,
+		Initial:     initial,
 		Total:       len(keywords),
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.KeywordSearchGroup, error) {
-		return w.searchKeywordGroupsWithProgress(mergeContexts(ctx, taskCtx), species, keywords, identifications, update)
+		return w.searchKeywordGroupsWithProgress(phygoboost.MergeContext(ctx, taskCtx), species, keywords, identifications, wide, update)
 	})
 }
 
-func (w *BlastWizard) searchKeywordGroupsWithProgress(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string, update func(int, string)) ([]model.KeywordSearchGroup, error) {
+func (w *BlastWizard) searchKeywordGroupsWithProgress(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string, wide bool, update func(int, string)) ([]model.KeywordSearchGroup, error) {
 	progress := safeProgress(update)
 	if len(identifications) != 0 && len(identifications) != len(keywords) {
 		return nil, fmt.Errorf("keyword label_name count %d does not match keyword count %d", len(identifications), len(keywords))
@@ -8552,58 +10442,52 @@ func (w *BlastWizard) searchKeywordGroupsWithProgress(ctx context.Context, speci
 	}
 
 	groups := make([]model.KeywordSearchGroup, len(keywords))
-	progress(0, "Searching keyword terms...")
+	progress(0, keywordSearchProgressMessage(wide, 0, len(keywords)))
 
 	results := make([]keywordSearchResult, len(keywords))
-	jobs := make(chan int)
-	outcomes := make(chan keywordSearchResult, len(keywords))
-	workerCount := maxInt(parallelismFor(len(keywords), maxParallelKeywordJobs), networkParallelismFor(len(keywords)))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for idx := range jobs {
-				started := time.Now()
-				rows, err := w.searchKeywordRowsWithTimeout(ctx, species, keywords[idx])
-				outcomes <- keywordSearchResult{index: idx, started: started, ended: time.Now(), rows: rows, err: err}
-			}
-		}()
-	}
-
-	go func() {
-		for i := range keywords {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				workers.Wait()
-				close(outcomes)
-				return
-			case jobs <- i:
-			}
-		}
-		close(jobs)
-		workers.Wait()
-		close(outcomes)
-	}()
-
 	doneCount := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case result, ok := <-outcomes:
-			if !ok {
-				goto keywordResultsDone
-			}
-			results[result.index] = result
-			doneCount++
-			progress(doneCount, fmt.Sprintf("Searching keyword terms... %d/%d", doneCount, len(keywords)))
+	var resultMu sync.Mutex
+	spec := mainNetworkSpecForSource(w.source, "search keyword groups")
+	spec.Workers = cappedMainNetworkWorkers(w.source, len(keywords))
+	slotClosers := make([]func(), 0, len(keywords))
+	for idx := range keywords {
+		slotKey := fmt.Sprintf("keyword-search-%d", idx)
+		title := fmt.Sprintf("Keyword %d/%d", idx+1, len(keywords))
+		initial := fmt.Sprintf("Queued (%s)", oneLinePreview(keywords[idx]))
+		if slot, ok := registerWorkflowTaskSlot(ctx, slotKey, title, 2, initial); ok {
+			ctx = contextWithTaskSlot(ctx, slotKey, slot)
+			slotClosers = append(slotClosers, slot.remove)
 		}
 	}
+	defer func() {
+		for _, closeSlot := range slotClosers {
+			if closeSlot != nil {
+				closeSlot()
+			}
+		}
+	}()
+	if err := phygoboost.ParallelForSpec(ctx, spec, len(keywords), func(ctx context.Context, idx int) error {
+		started := time.Now()
+		_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("keyword-search-%d", idx), 0, fmt.Sprintf("Searching %s", oneLinePreview(keywords[idx])))
+		rows, searchErr := w.searchKeywordRowsWithTimeout(ctx, species, keywords[idx], wide)
+		resultMu.Lock()
+		results[idx] = keywordSearchResult{index: idx, started: started, ended: time.Now(), rows: rows, err: searchErr}
+		doneCount++
+		progress(doneCount, keywordSearchProgressMessage(wide, doneCount, len(keywords)))
+		if searchErr == nil {
+			_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("keyword-search-%d", idx), 2, fmt.Sprintf("Completed (%s)", oneLinePreview(keywords[idx])))
+		} else {
+			_ = workflowTaskSlotUpdate(ctx, fmt.Sprintf("keyword-search-%d", idx), 1, fmt.Sprintf("Failed (%s)", oneLinePreview(keywords[idx])))
+		}
+		resultMu.Unlock()
+		if searchErr != nil && isCancellationLikeError(searchErr) {
+			return searchErr
+		}
+		return ctx.Err()
+	}); err != nil {
+		return nil, err
+	}
 
-keywordResultsDone:
 	for i, keyword := range keywords {
 		rows := results[i].rows
 		err := results[i].err
@@ -8616,12 +10500,20 @@ keywordResultsDone:
 		}
 		for idx := range rows {
 			rows[idx].SearchTerm = keyword
+			if strings.TrimSpace(rows[idx].SearchType) == "" && wide {
+				rows[idx].SearchType = "wide search"
+			}
+			if strings.TrimSpace(rows[idx].SearchType) == "" {
+				rows[idx].SearchType = classifyKeywordInputType(keyword)
+			}
 			if len(identifications) == len(keywords) {
 				rows[idx].LabelName = labelName
 			}
 		}
+		searchType := keywordRowsSearchType(rows, keyword, wide)
 		groups[i] = model.KeywordSearchGroup{
 			SearchTerm:       keyword,
+			SearchType:       searchType,
 			LabelName:        labelName,
 			SearchStartedAt:  results[i].started,
 			SearchEndedAt:    results[i].ended,
@@ -8633,18 +10525,46 @@ keywordResultsDone:
 	return groups, nil
 }
 
-func (w *BlastWizard) searchKeywordRowsWithTimeout(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	searchCtx, cancel := context.WithTimeout(ctx, keywordSearchTimeout)
-	defer cancel()
-	return w.source.SearchKeywordRows(searchCtx, species, keyword)
+func keywordSearchProgressMessage(wide bool, done int, total int) string {
+	prefix := "Searching keyword terms"
+	if wide {
+		prefix = "Wide-searching keyword terms"
+	}
+	if done <= 0 || total <= 0 {
+		return prefix + "..."
+	}
+	return fmt.Sprintf("%s... %d/%d", prefix, done, total)
+}
+
+func (w *BlastWizard) searchKeywordRowsWithTimeout(ctx context.Context, species model.SpeciesCandidate, keyword string, wide bool) ([]model.KeywordResultRow, error) {
+	return phygoboost.RunWithTimeoutValue(ctx, keywordSearchTimeout, func(searchCtx context.Context) ([]model.KeywordResultRow, error) {
+		if rows, handled, err := w.searchKeywordRowsProcess(searchCtx, species, keyword, wide); handled {
+			return rows, err
+		}
+		if wide {
+			searcher, ok := w.source.(source.WideKeywordSearcher)
+			if !ok {
+				return nil, fmt.Errorf("%s does not support wide keyword search", w.source.Name())
+			}
+			return searcher.SearchKeywordRowsWide(searchCtx, species, keyword)
+		}
+		return w.source.SearchKeywordRows(searchCtx, species, keyword)
+	})
+}
+
+func keywordRowsSearchType(rows []model.KeywordResultRow, keyword string, wide bool) string {
+	for _, row := range rows {
+		if value := strings.TrimSpace(row.SearchType); value != "" {
+			return value
+		}
+	}
+	if wide {
+		return "wide search"
+	}
+	return classifyKeywordInputType(keyword)
 }
 
 func (w *BlastWizard) waitForBlastResultsWithProgress(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
-	type resultPayload struct {
-		result model.BlastResult
-		err    error
-	}
-
 	total := int(timeout / time.Second)
 	if total <= 0 {
 		total = 1
@@ -8657,13 +10577,15 @@ func (w *BlastWizard) waitForBlastResultsWithProgress(ctx context.Context, jobID
 		Total:       total,
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) (model.BlastResult, error) {
-		waitCtx := mergeContexts(ctx, taskCtx)
+		waitCtx := phygoboost.MergeContext(ctx, taskCtx)
 		progress := safeProgress(update)
-		done := make(chan resultPayload, 1)
-		go func() {
-			result, err := w.source.WaitForBlastResults(waitCtx, jobID, pollInterval, timeout)
-			done <- resultPayload{result: result, err: err}
-		}()
+		done := phygoboost.StartAsyncResult(waitCtx, func(runCtx context.Context) (model.BlastResult, error) {
+			result, handled, err := w.waitBlastResultsProcess(runCtx, jobID, pollInterval, timeout)
+			if !handled {
+				result, err = w.source.WaitForBlastResults(runCtx, jobID, pollInterval, timeout)
+			}
+			return result, err
+		})
 
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
@@ -8671,11 +10593,11 @@ func (w *BlastWizard) waitForBlastResultsWithProgress(ctx context.Context, jobID
 		for {
 			select {
 			case payload := <-done:
-				if payload.err != nil {
-					return model.BlastResult{}, payload.err
+				if payload.Err != nil {
+					return model.BlastResult{}, payload.Err
 				}
 				progress(total, "BLAST results are ready.")
-				return payload.result, nil
+				return payload.Value, nil
 			case <-ticker.C:
 				elapsed := int(time.Since(start) / time.Second)
 				if elapsed > total {

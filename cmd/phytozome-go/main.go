@@ -1,11 +1,18 @@
-package main
+﻿package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/KiriKirby/phytozome-go/internal/cachex"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/workflow"
+	"github.com/rs/zerolog"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"go.uber.org/automaxprocs/maxprocs"
 )
 
 var version = "dev"
@@ -15,51 +22,88 @@ const author = "wangsychn"
 const repoURL = "https://github.com/KiriKirby/phytozome-go"
 
 func main() {
-	args := os.Args[1:]
-
-	if len(args) < 1 {
-		runDesktopWizard()
-		return
-	}
-
-	switch args[0] {
-	case "version", "--version", "-version":
-		printVersion()
-	case "blast":
-		runBlast(args[1:])
-	case "help", "--help", "-h":
-		printUsage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", args[0])
-		printUsage()
-		os.Exit(1)
-	}
-}
-
-func runDesktopWizard() {
-	if err := runInteractiveWizard(); err != nil {
-		os.Exit(1)
-	}
-}
-
-func runBlast(args []string) {
-	if len(args) == 0 {
-		printBlastUsage()
-		return
-	}
-
-	switch args[0] {
-	case "plan":
-		printBlastPlan()
-	case "wizard":
-		if err := runInteractiveWizard(); err != nil {
+	_, _ = maxprocs.Set(maxprocs.Logger(nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer phygoboost.ClosePools()
+	defer phygoboost.ClosePools()
+	defer cachex.CloseAll()
+	handled, err := phygoboost.RunIfWorker(ctx)
+	if handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-	default:
-		fmt.Fprintf(os.Stderr, "unknown blast subcommand: %s\n\n", args[0])
-		printBlastUsage()
+		return
+	}
+	configureRuntime()
+	stopDiagnostics := phygoboost.StartDiagnostics(ctx)
+	defer stopDiagnostics()
+
+	root := rootCommand(ctx)
+	if len(os.Args) == 1 {
+		root.SetArgs([]string{"blast", "wizard"})
+	}
+	if err := root.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func rootCommand(ctx context.Context) *cobra.Command {
+	root := &cobra.Command{
+		Use:           "phytozome-go",
+		Short:         displayName,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			printVersion()
+		},
+	})
+	blast := &cobra.Command{
+		Use:   "blast",
+		Short: "Run BLAST and keyword workflows",
+	}
+	blast.AddCommand(&cobra.Command{
+		Use:   "plan",
+		Short: "Print the BLAST workflow plan",
+		Run: func(cmd *cobra.Command, args []string) {
+			printBlastPlan()
+		},
+	})
+	blast.AddCommand(&cobra.Command{
+		Use:   "wizard",
+		Short: "Start the interactive workflow",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInteractiveWizard(ctx)
+		},
+	})
+	root.AddCommand(blast)
+	return root
+}
+
+func configureRuntime() {
+	viper.SetEnvPrefix("PHYTOZOME_GO")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
+	viper.AutomaticEnv()
+	level := strings.ToLower(strings.TrimSpace(viper.GetString("LOG_LEVEL")))
+	switch level {
+	case "trace":
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "warn":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+	_ = phygoboost.RuntimeState()
 }
 
 func printBlastPlan() {
@@ -72,28 +116,13 @@ func printBlastPlan() {
 	fmt.Println("  4) review results, select rows, and export files")
 }
 
-func runInteractiveWizard() error {
+func runInteractiveWizard(ctx context.Context) error {
 	wizard := workflow.NewBlastWizardWithTUIInfo(os.Stdout, workflowTUIInfo())
-	err := wizard.Run(context.Background())
+	err := wizard.Run(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "blast wizard failed: %v\n", err)
 	}
 	return err
-}
-
-func printUsage() {
-	printHeader()
-	fmt.Println()
-	fmt.Println("Usage:")
-	fmt.Println("  phytozome-go blast wizard")
-	fmt.Println("  phytozome-go blast plan")
-	fmt.Println("  phytozome-go version")
-}
-
-func printBlastUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  phytozome-go blast wizard")
-	fmt.Println("  phytozome-go blast plan")
 }
 
 func printHeader() {
@@ -103,7 +132,6 @@ func printHeader() {
 }
 
 func printVersion() {
-	// A compact version output for machine-friendly calls
 	fmt.Printf("%s %s\nAuthor: %s\nRepo: %s\n", displayName, version, author, repoURL)
 }
 
@@ -115,3 +143,4 @@ func workflowTUIInfo() workflow.TUIInfo {
 		RepoURL:     repoURL,
 	}
 }
+

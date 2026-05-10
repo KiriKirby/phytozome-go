@@ -1,27 +1,25 @@
-package interpro
+﻿package interpro
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/KiriKirby/phytozome-go/internal/appfs"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	"github.com/KiriKirby/phytozome-go/internal/cachex"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
+	"github.com/goccy/go-json"
 	"golang.org/x/sync/singleflight"
 )
 
 const interProBaseURL = "https://www.ebi.ac.uk/interpro/api/entry/all/protein/uniprot/"
+
+var diskCache = cachex.MustOpen("interpro", "protein")
 
 type Client struct {
 	httpClient *http.Client
@@ -68,7 +66,7 @@ type diskEntry struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = perf.HTTPClient()
+		httpClient = phygoboost.HTTPClient()
 	}
 	return &Client{
 		httpClient: httpClient,
@@ -77,6 +75,27 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) Lookup(ctx context.Context, accession string) (Entry, bool, error) {
+	result, err := phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecHeavy,
+		Domain:      "www.ebi.ac.uk",
+		Description: "lookup interpro entry",
+	}, func(runCtx context.Context) (struct {
+		Entry Entry
+		OK    bool
+	}, error) {
+		entry, ok, err := c.lookup(runCtx, accession)
+		return struct {
+			Entry Entry
+			OK    bool
+		}{Entry: entry, OK: ok}, err
+	})
+	if err != nil {
+		return Entry{}, false, err
+	}
+	return result.Entry, result.OK, nil
+}
+
+func (c *Client) lookup(ctx context.Context, accession string) (Entry, bool, error) {
 	accession = normalizeAccession(accession)
 	if accession == "" {
 		return Entry{}, false, nil
@@ -168,7 +187,7 @@ func (c *Client) fetchPage(ctx context.Context, requestURL string) (apiPage, err
 	if err != nil {
 		return apiPage{}, fmt.Errorf("fetch InterPro: %w", err)
 	}
-	defer resp.Body.Close()
+	defer phygoboost.DrainAndClose(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return apiPage{}, nil
 	}
@@ -365,40 +384,15 @@ func memberAccessions(values map[string]map[string]string) ([]string, []string) 
 }
 
 func readDiskEntry(accession string) (Entry, bool) {
-	path, err := diskEntryPath(accession)
-	if err != nil {
-		return Entry{}, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Entry{}, false
-	}
 	var stored diskEntry
-	if err := json.Unmarshal(data, &stored); err != nil {
+	if !diskCache.ReadJSON("entry:"+strings.ToUpper(strings.TrimSpace(accession)), &stored) {
 		return Entry{}, false
 	}
 	return stored.Entry, true
 }
 
 func writeDiskEntry(accession string, entry Entry) {
-	path, err := diskEntryPath(accession)
-	if err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(diskEntry{Entry: entry}, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0o644)
-}
-
-func diskEntryPath(accession string) (string, error) {
-	dir, err := appfs.CacheDir("interpro", "protein")
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256([]byte(strings.ToUpper(strings.TrimSpace(accession))))
-	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json"), nil
+	diskCache.WriteJSON("entry:"+strings.ToUpper(strings.TrimSpace(accession)), diskEntry{Entry: entry})
 }
 
 func normalizeAccession(value string) string {
@@ -437,3 +431,4 @@ func uniquePreserveOrder(values []string) []string {
 	}
 	return out
 }
+

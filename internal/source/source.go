@@ -21,6 +21,14 @@ type UniProtResolver interface {
 	FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error)
 }
 
+type BroadKeywordSearcher interface {
+	SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
+}
+
+type WideKeywordSearcher interface {
+	SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
+}
+
 type ProteinReportResolver interface {
 	FetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error)
 }

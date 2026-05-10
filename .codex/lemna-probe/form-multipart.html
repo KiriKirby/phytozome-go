@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<!--[if lt IE 7]><html class="lt-ie9 lt-ie8 lt-ie7" lang="en" dir="ltr"><![endif]-->
+<!--[if IE 7]><html class="lt-ie9 lt-ie8" lang="en" dir="ltr"><![endif]-->
+<!--[if IE 8]><html class="lt-ie9" lang="en" dir="ltr"><![endif]-->
+<!--[if gt IE 8]><!--><html lang="en" dir="ltr" prefix="content: http://purl.org/rss/1.0/modules/content/ dc: http://purl.org/dc/terms/ foaf: http://xmlns.com/foaf/0.1/ og: http://ogp.me/ns# rdfs: http://www.w3.org/2000/01/rdf-schema# sioc: http://rdfs.org/sioc/ns# sioct: http://rdfs.org/sioc/types# skos: http://www.w3.org/2004/02/skos/core# xsd: http://www.w3.org/2001/XMLSchema#"><!--<![endif]-->
+<head>
+<meta charset="utf-8" />
+<meta name="Generator" content="Drupal 7 (http://drupal.org)" />
+<link rel="http://www.w3.org/ns/hydra/core#apiDocumentation" href="https://www.lemna.org/web-services//doc/v0.1" />
+<link rel="shortcut icon" href="https://www.lemna.org/sites/default/files/favicon_0.ico" type="image/vnd.microsoft.icon" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="MobileOptimized" content="width" />
+<meta name="HandheldFriendly" content="true" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>Nucleotide to Nucleotide BLAST (blastn) | lemna.org</title>
+<style type="text/css" media="all">
+@import url("https://www.lemna.org/modules/system/system.base.css?sus3az");
+@import url("https://www.lemna.org/modules/system/system.menus.css?sus3az");
+@import url("https://www.lemna.org/modules/system/system.messages.css?sus3az");
+@import url("https://www.lemna.org/modules/system/system.theme.css?sus3az");
+</style>
+<style type="text/css" media="all">
+@import url("https://www.lemna.org/sites/all/modules/simplenews/simplenews.css?sus3az");
+@import url("https://www.lemna.org/modules/comment/comment.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/date/date_repeat_field/date_repeat_field.css?sus3az");
+@import url("https://www.lemna.org/modules/field/theme/field.css?sus3az");
+@import url("https://www.lemna.org/modules/node/node.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/picture/picture_wysiwyg.css?sus3az");
+@import url("https://www.lemna.org/modules/poll/poll.css?sus3az");
+@import url("https://www.lemna.org/modules/search/search.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal/tripal/theme/css/tripal.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal/tripal_chado/theme/css/tripal_chado.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal/tripal_ws/theme/css/tripal_ws.css?sus3az");
+@import url("https://www.lemna.org/modules/user/user.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/extlink/css/extlink.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/views/css/views.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/ckeditor/css/ckeditor.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/media/modules/media_wysiwyg/css/media_wysiwyg.base.css?sus3az");
+</style>
+<style type="text/css" media="all">
+@import url("https://www.lemna.org/sites/all/modules/ctools/css/ctools.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/panels/css/panels.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal/tripal_ds/theme/css/tripal_ds.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal/tripal_ds/theme/fonts/font-awesome-4.7.0/css/font-awesome.min.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/panels/plugins/layouts/onecol/onecol.css?sus3az");
+@import url("https://www.lemna.org/modules/file/file.css?sus3az");
+@import url("https://www.lemna.org/sites/all/modules/tripal_blast/theme/css/form.css?sus3az");
+@import url("https://www.lemna.org/sites/all/libraries/superfish/css/superfish.css?sus3az");
+@import url("https://www.lemna.org/sites/all/libraries/superfish/style/default.css?sus3az");
+</style>
+<style type="text/css" media="screen">
+@import url("https://www.lemna.org/sites/all/themes/adaptivetheme/at_core/css/at.settings.style.headings.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/adaptivetheme/at_core/css/at.settings.style.image.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/adaptivetheme/at_core/css/at.settings.style.login.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/adaptivetheme/at_core/css/at.layout.css?sus3az");
+</style>
+<style type="text/css" media="all">
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/html-elements.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/forms.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/tables.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/page.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/articles.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/comments.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/fields.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/blocks.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/navigation.css?sus3az");
+@import url("https://www.lemna.org/sites/default/files/color/lemnatheme-e7427ab6/colors.css?sus3az");
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/sky.settings.style.css?sus3az");
+</style>
+<style type="text/css" media="print">
+@import url("https://www.lemna.org/sites/all/themes/lemnatheme/css/print.css?sus3az");
+</style>
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/default/files/adaptivetheme/lemnatheme_files/lemnatheme.responsive.layout.css?sus3az" media="only screen" />
+<style type="text/css" media="screen">
+@import url("https://www.lemna.org/sites/default/files/adaptivetheme/lemnatheme_files/lemnatheme.fonts.css?sus3az");
+</style>
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.custom.css?sus3az" media="only screen" />
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.smartphone.portrait.css?sus3az" media="only screen and (max-width:320px)" />
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.smartphone.landscape.css?sus3az" media="only screen and (min-width:321px) and (max-width:480px)" />
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.tablet.portrait.css?sus3az" media="only screen and (min-width:481px) and (max-width:768px)" />
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.tablet.landscape.css?sus3az" media="only screen and (min-width:769px) and (max-width:1024px)" />
+<link type="text/css" rel="stylesheet" href="https://www.lemna.org/sites/all/themes/lemnatheme/css/responsive.desktop.css?sus3az" media="only screen and (min-width:1025px)" />
+<style type="text/css" media="all">
+@import url("https://www.lemna.org/sites/default/files/fontyourface/wysiwyg.css?sus3az");
+</style>
+<link type="text/css" rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:300italic,300,700italic,700,800italic,800,regular|Open+Sans+Condensed:300italic,300,700|Rubik+One:regular&amp;subset=latin" media="all" />
+
+<!--[if lt IE 9]>
+<style type="text/css" media="screen">
+@import url("https://www.lemna.org/sites/default/files/adaptivetheme/lemnatheme_files/lemnatheme.lt-ie9.layout.css?sus3az");
+</style>
+<![endif]-->
+<style type="text/css" media="all">
+<!--/*--><![CDATA[/*><!--*/
+#branding{margin:0 0 8px 0;}h1#site-name{margin:0.4em 0 0 0;}header#header{padding:10px 0 0 0;}.site-logo{width:100%;height:46px;}.cvitjs{width:100%;}
+
+/*]]>*/-->
+</style>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/jquery_update/replace/jquery/1.12/jquery.min.js?v=1.12.4"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript">
+<!--//--><![CDATA[//><!--
+document.createElement( "picture" );
+//--><!]]>
+</script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/jquery-extend-3.4.0.js?v=1.12.4"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/jquery-html-prefilter-3.5.0-backport.js?v=1.12.4"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/jquery.once.js?v=1.2"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/drupal.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/jquery_update/js/jquery_browser.js?v=0.0.1"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/jquery_update/replace/ui/external/jquery.cookie.js?v=67fb34f6a866c40d0570"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/jquery_update/replace/jquery.form/4/jquery.form.min.js?v=4.2.1"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/form-single-submit.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/form.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/ajax.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/jquery_update/js/jquery_update.js?v=0.0.1"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/admin_menu/admin_devel/admin_devel.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/entityreference/js/entityreference.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/tripal/tripal/theme/js/tripal.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/iframe/iframe.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript">
+<!--//--><![CDATA[//><!--
+
+    var baseurl  = 'https://www.lemna.org';
+    var isClean  =  1;
+    var tripal_path = '/sites/all/modules/tripal/tripal';
+//--><!]]>
+</script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/tripal/tripal_ds/theme/js/tripal_ds.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript">
+<!--//--><![CDATA[//><!--
+var ds_theme_dir  = '/sites/all/modules/tripal/tripal_ds/theme';
+//--><!]]>
+</script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/progress.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/textarea.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/modules/file/file.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/misc/collapse.js?v=7.103"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/extlink/js/extlink.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/libraries/superfish/jquery.hoverIntent.minified.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/libraries/superfish/sfsmallscreen.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/libraries/superfish/supposition.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/libraries/superfish/superfish.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/libraries/superfish/supersubs.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/superfish/superfish.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/themes/lemnatheme/js/scripts.js?sus3az"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript">
+<!--//--><![CDATA[//><!--
+jQuery.extend(Drupal.settings, {"basePath":"\/","pathPrefix":"","setHasJsCookie":0,"ajaxPageState":{"theme":"lemnatheme","theme_token":"-RybV1dBNZeH2YbICNhItNoVKi1mDz_T8zLDs9Nc5-I","jquery_version":"1.12","jquery_version_token":"eqcOJorRTGPc6NAL_Zaef4tgC8HuH3POMp4axO7PoOw","js":{"sites\/all\/modules\/picture\/picturefill\/picturefill.min.js":1,"sites\/all\/modules\/picture\/picture.min.js":1,"sites\/all\/modules\/jquery_update\/replace\/jquery\/1.12\/jquery.min.js":1,"0":1,"misc\/jquery-extend-3.4.0.js":1,"misc\/jquery-html-prefilter-3.5.0-backport.js":1,"misc\/jquery.once.js":1,"misc\/drupal.js":1,"sites\/all\/modules\/jquery_update\/js\/jquery_browser.js":1,"sites\/all\/modules\/jquery_update\/replace\/ui\/external\/jquery.cookie.js":1,"sites\/all\/modules\/jquery_update\/replace\/jquery.form\/4\/jquery.form.min.js":1,"misc\/form-single-submit.js":1,"misc\/form.js":1,"misc\/ajax.js":1,"sites\/all\/modules\/jquery_update\/js\/jquery_update.js":1,"sites\/all\/modules\/admin_menu\/admin_devel\/admin_devel.js":1,"sites\/all\/modules\/entityreference\/js\/entityreference.js":1,"sites\/all\/modules\/tripal\/tripal\/theme\/js\/tripal.js":1,"sites\/all\/modules\/iframe\/iframe.js":1,"1":1,"sites\/all\/modules\/tripal\/tripal_ds\/theme\/js\/tripal_ds.js":1,"2":1,"misc\/progress.js":1,"misc\/textarea.js":1,"modules\/file\/file.js":1,"misc\/collapse.js":1,"sites\/all\/modules\/extlink\/js\/extlink.js":1,"sites\/all\/libraries\/superfish\/jquery.hoverIntent.minified.js":1,"sites\/all\/libraries\/superfish\/sfsmallscreen.js":1,"sites\/all\/libraries\/superfish\/supposition.js":1,"sites\/all\/libraries\/superfish\/superfish.js":1,"sites\/all\/libraries\/superfish\/supersubs.js":1,"sites\/all\/modules\/superfish\/superfish.js":1,"sites\/all\/themes\/lemnatheme\/js\/scripts.js":1},"css":{"modules\/system\/system.base.css":1,"modules\/system\/system.menus.css":1,"modules\/system\/system.messages.css":1,"modules\/system\/system.theme.css":1,"sites\/all\/modules\/simplenews\/simplenews.css":1,"modules\/comment\/comment.css":1,"sites\/all\/modules\/date\/date_repeat_field\/date_repeat_field.css":1,"modules\/field\/theme\/field.css":1,"modules\/node\/node.css":1,"sites\/all\/modules\/picture\/picture_wysiwyg.css":1,"modules\/poll\/poll.css":1,"modules\/search\/search.css":1,"sites\/all\/modules\/tripal\/tripal\/theme\/css\/tripal.css":1,"sites\/all\/modules\/tripal\/tripal_chado\/theme\/css\/tripal_chado.css":1,"sites\/all\/modules\/tripal\/tripal_ws\/theme\/css\/tripal_ws.css":1,"modules\/user\/user.css":1,"sites\/all\/modules\/extlink\/css\/extlink.css":1,"sites\/all\/modules\/views\/css\/views.css":1,"sites\/all\/modules\/ckeditor\/css\/ckeditor.css":1,"sites\/all\/modules\/media\/modules\/media_wysiwyg\/css\/media_wysiwyg.base.css":1,"sites\/all\/modules\/ctools\/css\/ctools.css":1,"sites\/all\/modules\/panels\/css\/panels.css":1,"sites\/all\/modules\/tripal\/tripal_ds\/theme\/css\/tripal_ds.css":1,"sites\/all\/modules\/tripal\/tripal_ds\/theme\/fonts\/font-awesome-4.7.0\/css\/font-awesome.min.css":1,"sites\/all\/modules\/panels\/plugins\/layouts\/onecol\/onecol.css":1,"modules\/file\/file.css":1,"sites\/all\/modules\/tripal_blast\/theme\/css\/form.css":1,"sites\/all\/libraries\/superfish\/css\/superfish.css":1,"sites\/all\/libraries\/superfish\/style\/default.css":1,"sites\/all\/themes\/adaptivetheme\/at_core\/css\/at.settings.style.headings.css":1,"sites\/all\/themes\/adaptivetheme\/at_core\/css\/at.settings.style.image.css":1,"sites\/all\/themes\/adaptivetheme\/at_core\/css\/at.settings.style.login.css":1,"sites\/all\/themes\/adaptivetheme\/at_core\/css\/at.layout.css":1,"sites\/all\/themes\/lemnatheme\/css\/html-elements.css":1,"sites\/all\/themes\/lemnatheme\/css\/forms.css":1,"sites\/all\/themes\/lemnatheme\/css\/tables.css":1,"sites\/all\/themes\/lemnatheme\/css\/page.css":1,"sites\/all\/themes\/lemnatheme\/css\/articles.css":1,"sites\/all\/themes\/lemnatheme\/css\/comments.css":1,"sites\/all\/themes\/lemnatheme\/css\/fields.css":1,"sites\/all\/themes\/lemnatheme\/css\/blocks.css":1,"sites\/all\/themes\/lemnatheme\/css\/navigation.css":1,"sites\/all\/themes\/lemnatheme\/color\/colors.css":1,"sites\/all\/themes\/lemnatheme\/css\/sky.settings.style.css":1,"sites\/all\/themes\/lemnatheme\/css\/print.css":1,"public:\/\/adaptivetheme\/lemnatheme_files\/lemnatheme.responsive.layout.css":1,"public:\/\/adaptivetheme\/lemnatheme_files\/lemnatheme.fonts.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.custom.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.smartphone.portrait.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.smartphone.landscape.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.tablet.portrait.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.tablet.landscape.css":1,"sites\/all\/themes\/lemnatheme\/css\/responsive.desktop.css":1,"sites\/default\/files\/fontyourface\/wysiwyg.css":1,"https:\/\/fonts.googleapis.com\/css?family=Open+Sans:300italic,300,700italic,700,800italic,800,regular|Open+Sans+Condensed:300italic,300,700|Rubik+One:regular\u0026subset=latin":1,"public:\/\/adaptivetheme\/lemnatheme_files\/lemnatheme.lt-ie9.layout.css":1,"0":1}},"urlIsAjaxTrusted":{"\/search\/node":true,"\/system\/ajax":true,"\/file\/ajax\/B\/query\/UPLOAD\/form-uBohWCoZVJ7mURwjtKnq4W7JyX9XQJTrDPmRva2wAFo":true,"\/blast\/nucleotide\/nucleotide":true},"superfish":{"1":{"id":"1","sf":{"delay":"400","animation":{"opacity":"show","height":"show"},"speed":150,"autoArrows":true,"dropShadows":true,"disableHI":false},"plugins":{"smallscreen":{"mode":"window_width","addSelected":false,"menuClasses":false,"hyperlinkClasses":false,"title":"Main menu"},"supposition":true,"bgiframe":false,"supersubs":{"minWidth":"12","maxWidth":"27","extraWidth":1}}}},"ajax":{"edit-example-sequence":{"callback":"ajax_blast_ui_perprogram_example_sequence_callback","wrapper":"fasta-textarea","method":"replaceWith","effect":"fade","event":"change","url":"\/system\/ajax","submit":{"_triggering_element_name":"example_sequence"}},"edit-upload-upload-button":{"wrapper":"edit-upload-ajax-wrapper","effect":"fade","progress":{"type":"throbber","message":null},"event":"mousedown","keypress":true,"prevent":"click","url":"\/file\/ajax\/B\/query\/UPLOAD\/form-uBohWCoZVJ7mURwjtKnq4W7JyX9XQJTrDPmRva2wAFo","submit":{"_triggering_element_name":"UPLOAD_upload_button","_triggering_element_value":"Upload"}},"edit-mmscores":{"callback":"gap_cost_callback","wrapper":"gap_cost_wrapper","event":"change","url":"\/system\/ajax","submit":{"_triggering_element_name":"M\u0026MScores"}}},"file":{"elements":{"#edit-upload-upload":"fasta,fna,fa,fas"}},"extlink":{"extTarget":0,"extClass":"ext","extLabel":"(link is external)","extImgClass":0,"extIconPlacement":"append","extSubdomains":1,"extExclude":"","extInclude":"","extCssExclude":"","extCssExplicit":"","extAlert":0,"extAlertText":"This link will take you to an external web site. We are not responsible for their content.","mailtoClass":"mailto","mailtoLabel":"(link sends e-mail)","extUseFontAwesome":false},"adaptivetheme":{"lemnatheme":{"layout_settings":{"bigscreen":"three-col-grail","tablet_landscape":"three-col-grail","tablet_portrait":"one-col-vert","smalltouch_landscape":"one-col-vert","smalltouch_portrait":"one-col-stack"},"media_query_settings":{"bigscreen":"only screen and (min-width:1025px)","tablet_landscape":"only screen and (min-width:769px) and (max-width:1024px)","tablet_portrait":"only screen and (min-width:481px) and (max-width:768px)","smalltouch_landscape":"only screen and (min-width:321px) and (max-width:480px)","smalltouch_portrait":"only screen and (max-width:320px)"}}}});
+//--><!]]>
+</script>
+</head>
+<body class="html not-front not-logged-in no-sidebars page-blast page-blast-nucleotide page-blast-nucleotide-nucleotide site-name-hidden atr-7.x-3.x atv-7.x-3.0-rc1 site-name-lemnaorg section-blast color-scheme-custom lemnatheme bs-n bb-n mb-n mbp-l rc-4 rct-4">
+  <div id="skip-link" class="nocontent">
+    <a href="#main-content" class="element-invisible element-focusable">Skip to main content</a>
+  </div>
+    <div id="page" class="container page ssc-n ssw-n ssa-l sss-n btc-n btw-b bta-l bts-n ntc-n ntw-b nta-l nts-n ctc-n ctw-b cta-l cts-n ptc-n ptw-b pta-l pts-n with-footer">
+
+  
+  <header id="header" class="clearfix" role="banner">
+
+          <!-- start: Branding -->
+      <div id="branding" class="branding-elements clearfix">
+
+                  <div id="logo">
+            <a href="/"><img class="site-logo" typeof="foaf:Image" src="https://www.lemna.org/sites/default/files/full_logo_619x112.png" alt="lemna.org" /></a>          </div>
+        
+                  <!-- start: Site name and Slogan hgroup -->
+          <div id="name-and-slogan" class="element-invisible h-group" id="name-and-slogan">
+
+                          <h1 id="site-name" class="element-invisible" id="site-name"><a href="/" title="Home page">lemna.org</a></h1>
+            
+            
+          </div><!-- /end #name-and-slogan -->
+
+        
+      </div><!-- /end #branding -->
+    
+    <div class="region region-header"><div class="region-inner clearfix"><nav id="block-system-user-menu" class="block block-system block-menu no-title odd first last block-count-1 block-region-header block-user-menu"  role="navigation"><div class="block-inner clearfix">  
+  
+  <ul class="menu clearfix"><li class="first leaf menu-depth-1 menu-item-1090"><a href="/user/login" title="">Log In</a></li><li class="last leaf menu-depth-1 menu-item-1095"><a href="/user/register" title="">Register</a></li></ul>
+  </div></nav></div></div>    <div id="menu-bar" class="nav clearfix"><h2 class="menu-toggle"><a href="#">Menu</a></h2><nav id="block-superfish-1" class="block block-superfish menu-wrapper menu-bar-wrapper clearfix odd first last block-count-2 block-region-menu-bar block-1" >  
+      <h2 class="element-invisible block-title element-invisible">Main menu</h2>
+  
+  <ul id="superfish-1" class="menu sf-menu sf-main-menu sf-horizontal sf-style-default sf-total-items-5 sf-parent-items-1 sf-single-items-4"><li id="menu-233-1" class="first odd sf-item-1 sf-depth-1 sf-no-children"><a href="/" class="sf-depth-1">Home</a></li><li id="menu-2416-1" class="middle even sf-item-2 sf-depth-1 sf-no-children"><a href="https://www.lemna.org/jbrowse2" title="Open a full-page Jbrowse2 session." class="sf-depth-1">Browse</a></li><li id="menu-743-1" class="active-trail middle odd sf-item-3 sf-depth-1 sf-total-children-2 sf-parent-children-2 sf-single-children-0 menuparent"><a href="/blast" title="" class="sf-depth-1 menuparent">BLAST</a><ul><li id="menu-745-1" class="active-trail first odd sf-item-1 sf-depth-2 sf-total-children-2 sf-parent-children-0 sf-single-children-2 menuparent"><a href="/blast/nucleotide" class="sf-depth-2 menuparent">Nucleotide Query</a><ul><li id="menu-747-1" class="active-trail first odd sf-item-1 sf-depth-3 sf-no-children"><a href="/blast/nucleotide/nucleotide" title="" class="sf-depth-3 active">BLASTn</a></li><li id="menu-749-1" class="last even sf-item-2 sf-depth-3 sf-no-children"><a href="/blast/nucleotide/protein" title="" class="sf-depth-3">BLASTx</a></li></ul></li><li id="menu-746-1" class="last even sf-item-2 sf-depth-2 sf-total-children-2 sf-parent-children-0 sf-single-children-2 menuparent"><a href="/blast/protein" class="sf-depth-2 menuparent">Protein Query</a><ul><li id="menu-748-1" class="first odd sf-item-1 sf-depth-3 sf-no-children"><a href="/blast/protein/protein" title="" class="sf-depth-3">BLASTp</a></li><li id="menu-750-1" class="last even sf-item-2 sf-depth-3 sf-no-children"><a href="/blast/protein/nucleotide" title="" class="sf-depth-3">tBLASTn</a></li></ul></li></ul></li><li id="menu-1078-1" class="middle even sf-item-4 sf-depth-1 sf-no-children"><a href="https://www.lemna.org/download" title="" class="sf-depth-1">Download</a></li><li id="menu-2414-1" class="last odd sf-item-5 sf-depth-1 sf-no-children"><a href="/content/about" class="sf-depth-1">About</a></li></ul>
+  </nav></div>
+  </header>
+
+  <div id="columns" class="no-menu-bar">
+    <div class="columns-inner clearfix">
+
+                  
+      
+      <div id="breadcrumb" class="clearfix"><nav class="breadcrumb-wrapper clearfix" role="navigation" aria-labelledby="breadcrumb-label"><h2 id="breadcrumb-label" class="element-invisible">You are here</h2><ol id="crumbs" class="clearfix"><li class="crumb crumb-first"><span typeof="v:Breadcrumb"><a rel="v:url"  property="v:title"  href="/blast" title="">BLAST</a></span></li><li class="crumb crumb-last"><span class="crumb-separator"> &#187; </span><span typeof="v:Breadcrumb"><a rel="v:url"  property="v:title"  href="/blast/nucleotide">Nucleotide Query</a></span></li></ol></nav></div>
+      <div id="content-column">
+        <div class="content-inner">
+
+          
+          <section id="main-content" role="main">
+
+                                      <header id="main-content-header">
+
+                                  <h1 id="page-title">
+                    Nucleotide to Nucleotide BLAST (blastn)                  </h1>
+                
+                
+              </header>
+                        
+            <!-- region: Main Content -->
+                          <div id="content">
+                <div id="block-system-main" class="block block-system no-title odd first last block-count-3 block-region-content block-main" >  
+  
+  <form class="blast-choice-form" enctype="multipart/form-data" action="/blast/nucleotide/nucleotide" method="post" id="blast-ui-per-blast-program-form" accept-charset="UTF-8"><div><input type="hidden" name="query_type" value="nucleotide" />
+<input type="hidden" name="db_type" value="nucleotide" />
+<input type="hidden" name="blast_program" value="blastn" />
+<fieldset class="blast-choice collapsible form-wrapper" id="edit-b"><legend><span class="fieldset-legend">Request a New BLAST</span></legend><div class="fieldset-wrapper"><fieldset class="collapsible form-wrapper" id="edit-query"><legend><span class="fieldset-legend">Enter <em class="placeholder">Nucleotide</em> Query Sequence</span></legend><div class="fieldset-wrapper"><div class="fieldset-description">Enter one or more queries in the top text box or use the browse button to upload a file from your local disk. The file may contain a single sequence or a list of sequences. In both cases, the data must be in <a href="http://www.ncbi.nlm.nih.gov/BLAST/blastcgihelp.shtml" target="_blank">FASTA format</a>.</div><span style="float: right;"><div class="form-item form-type-checkbox form-item-example-sequence">
+ <input type="checkbox" id="edit-example-sequence" name="example_sequence" value="1" class="form-checkbox" />  <label class="option" for="edit-example-sequence">Show an Example Sequence </label>
+
+</div>
+</span><div id="fasta-textarea"><div class="form-item form-type-textarea form-item-FASTA">
+  <label for="edit-fasta">Enter FASTA sequence(s) </label>
+ <div class="form-textarea-wrapper resizable"><textarea id="edit-fasta" name="FASTA" cols="60" rows="5" class="form-textarea"></textarea></div>
+<div class="description">Enter query sequence(s) in the text area.</div>
+</div>
+</div><div id="edit-upload-ajax-wrapper"><div class="form-item form-type-managed-file form-item-UPLOAD">
+  <label for="edit-upload-upload">Or upload your own query FASTA:   </label>
+ <div id="edit-upload" class="form-managed-file"><input type="file" id="edit-upload-upload" name="files[UPLOAD]" size="22" class="form-file" /><input type="submit" id="edit-upload-upload-button" name="UPLOAD_upload_button" value="Upload" class="form-submit" /><input type="hidden" name="UPLOAD[fid]" value="0" />
+</div>
+<div class="description">The file should be a plain-text FASTA
+  (.fasta, .fna, .fa, .fas) file. In other words, it cannot have formatting as is the
+  case with MS Word (.doc, .docx) or Rich Text Format (.rtf). It cannot be greater
+  than <em class="placeholder">8MB</em> in size. <strong>Don't forget to press the Upload button before
+  attempting to submit your BLAST.</strong></div>
+</div>
+</div></div></fieldset>
+<fieldset class="collapsible form-wrapper" id="edit-db"><legend><span class="fieldset-legend">Choose Search Target</span></legend><div class="fieldset-wrapper"><div class="fieldset-description">Choose from one of the <em class="placeholder">nucleotide</em> BLAST databases listed below. </div><div class="form-item form-type-select form-item-SELECT-DB">
+  <label for="edit-select-db"><em class="placeholder">Nucleotide</em> BLAST Databases: </label>
+ <select id="edit-select-db" name="SELECT_DB" class="form-select"><option value="" selected="selected">Select a Dataset</option><option value="1">A. thaliana TAIR10 cDNA</option><option value="11">Le. gibba 7742a REF-CSHL-1.0 Genome</option><option value="13">Le. japonica 7182 REF-CSHL-1.0 Genome</option><option value="12">Le. japonica 8627 REF-CSHL-1.0 Genome</option><option value="14">Le. japonica 9421 REF-CSHL-1.0 Genome</option><option value="15">Le. minor 7210 REF-CSHL-1.0 Genome</option><option value="16">Le. minor 9252 REF-CSHL-1.0 Genome</option><option value="17">Le. turionifera 9434 REF-CSHL-1.0 Genome</option><option value="18">Sp. polyrhiza 9509 REF-OXFORD-3.0 Genome</option><option value="19">Wo. australiana 8730 REF-CSHL-1.0 Genome</option></select>
+</div>
+</div></fieldset>
+<fieldset class="collapsible collapsed form-wrapper" id="edit-alg"><legend><span class="fieldset-legend">Advanced Options</span></legend><div class="fieldset-wrapper"><fieldset class="form-wrapper" id="edit-gparam"><legend><span class="fieldset-legend">General parameters</span></legend><div class="fieldset-wrapper"><div class="form-item form-type-select form-item-maxTarget">
+  <label for="edit-maxtarget">Max target sequences: </label>
+ <select id="edit-maxtarget" name="maxTarget" class="form-select"><option value="0"> </option><option value="10">10</option><option value="50">50</option><option value="100">100</option><option value="250">250</option><option value="500" selected="selected">500</option><option value="1000">1000</option><option value="5000">5000</option><option value="10000">10000</option><option value="20000">20000</option></select>
+<div class="description">Select the maximum number of unique target sequences per query sequence to show results for.</div>
+</div>
+<div class="form-item form-type-textfield form-item-eVal">
+  <label for="edit-eval">e-Value (Expected Threshold) </label>
+ <input type="text" id="edit-eval" name="eVal" value="0.001" size="12" maxlength="20" class="form-text" />
+<div class="description">Expected number of chance matches in a random model. This number should be give in a decimal format. <a href="https://www.ncbi.nlm.nih.gov/BLAST/blastcgihelp.shtml#expect" target="_blank">More Information</a> | <a href="https://www.youtube.com/watch?v=nO0wJgZRZJs" target="_blank">Expect value video tutorial</a></div>
+</div>
+<div class="form-item form-type-select form-item-wordSize">
+  <label for="edit-wordsize">Word size: </label>
+ <select id="edit-wordsize" name="wordSize" class="form-select"><option value="7">7</option><option value="11" selected="selected">11</option><option value="15">15</option><option value="16">16</option><option value="20">20</option><option value="24">24</option><option value="28">28</option><option value="32">32</option><option value="48">48</option><option value="64">64</option><option value="128">128</option><option value="256">256</option></select>
+<div class="description">The length of the seed that initiates an alignment</div>
+</div>
+</div></fieldset>
+<fieldset class="form-wrapper" id="edit-sparam"><legend><span class="fieldset-legend">Scoring parameters</span></legend><div class="fieldset-wrapper"><div class="form-item form-type-select form-item-M&amp;MScores">
+  <label for="edit-mmscores">Match/Mismatch Scores: </label>
+ <select id="edit-mmscores" name="M&amp;MScores" class="form-select"><option value="0" selected="selected">1,-2</option><option value="1">1,-3</option><option value="2">1,-4</option><option value="3">2,-3</option><option value="4">4,-5</option><option value="5">1,-1</option></select>
+<div class="description">Reward and penalty for matching and mismatching bases.</div>
+</div>
+<div id="gap_cost_wrapper"><div class="form-item form-type-select form-item-gapCost">
+  <label for="edit-gapcost">Gap Costs: </label>
+ <select id="edit-gapcost" name="gapCost" class="form-select"><option value="5_2" selected="selected">Existence: 5 Extension: 2</option><option value="2_2">Existence: 2 Extension: 2</option><option value="1_2">Existence: 1 Extension: 2</option><option value="0_2">Existence: 0 Extension: 2</option><option value="3_1">Existence: 3 Extension: 1</option><option value="2_1">Existence: 2 Extension: 1</option><option value="1_1">Existence: 1 Extension: 1</option></select>
+<div class="description">Cost to create and extend a gap in an alignment.</div>
+</div>
+</div></div></fieldset>
+</div></fieldset>
+<input type="submit" id="edit-submit" name="op" value=" BLAST " class="form-submit" /></div></fieldset>
+<input type="hidden" name="form_build_id" value="form-uBohWCoZVJ7mURwjtKnq4W7JyX9XQJTrDPmRva2wAFo" />
+<input type="hidden" name="form_id" value="blast_ui_per_blast_program_form" />
+</div></form>
+  </div>              </div>
+            
+            
+          </section>
+
+          
+        </div>
+      </div>
+
+                  
+    </div>
+  </div>
+
+      <footer role="contentinfo">
+            <div class="region region-footer"><div class="region-inner clearfix"><div id="block-panels-mini-footer-content" class="block block-panels-mini no-title odd first last block-count-4 block-region-footer block-footer-content" >  
+  
+  <div class="block-content content no-title"><div class="panel-display panel-1col clearfix" id="mini-panel-footer_content">
+  <div class="panel-panel panel-col">
+    <div><div class="panel-pane pane-custom pane-1 no-title block">
+  <div class="block-inner clearfix">
+    
+            
+    
+    <div class="block-content">
+      <p>This work was supported by the <a href="https://www.energy.gov/science/ber/biological-and-environmental-research">U.S. Department of Energy Office of Science (Office of Biological &amp; Environmental Research)</a>, <a href="https://www.hhmi.org">Howard Hughes Medical Insitute</a>, and the <a href="https://foundationfar.org/">Foundation for Food &amp; Agriculture Research</a>.</p>
+<p>lemna.org relies on open source software including <a href="https://www.drupal.org">Drupal</a>, <a href="https://tripal.info/">Tripal</a>, <a href="http://gmod.org/wiki/Chado">Chado</a>, <a href="http://blast.ncbi.nlm.nih.gov/Blast.cgi">NCBI Blast+</a>, and <a href="https://jbrowse.org/jb2/">JBrowse</a>.</p>
+    </div>
+
+    
+    
+  </div>
+</div>
+</div>
+  </div>
+</div>
+</div>
+  </div></div></div>      <p class="attribute-creator"></p>
+    </footer>
+  
+</div><!-- //End #page, .container -->
+
+  <script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/picture/picturefill/picturefill.min.js?v=3.0.1"></script>
+<script type="b3dcf4b63a0bef03ff95abae-text/javascript" src="https://www.lemna.org/sites/all/modules/picture/picture.min.js?v=7.103"></script>
+<script src="/cdn-cgi/scripts/7d0fa10a/cloudflare-static/rocket-loader.min.js" data-cf-settings="b3dcf4b63a0bef03ff95abae-|49" defer></script><script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9f9c68661e78d000',t:'MTc3ODQ1MjQyOQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>

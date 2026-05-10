@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,5 +157,20 @@ func TestSequenceLengthDotPlotRendersWithQuerySummaries(t *testing.T) {
 	}
 	if info.Size() < 20_000 {
 		t.Fatalf("expected rendered PDF with dot plot to be non-trivially sized, got %d bytes", info.Size())
+	}
+}
+
+func TestRenderBlastPDFProcessCreatesPDF(t *testing.T) {
+	data := SampleBlastReportData()
+	path := filepath.Join(t.TempDir(), "blast-process.pdf")
+	if err := RenderBlastPDFProcess(context.Background(), path, data); err != nil {
+		t.Fatalf("RenderBlastPDFProcess() error = %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rendered PDF: %v", err)
+	}
+	if !bytes.HasPrefix(content, []byte("%PDF-")) || !bytes.Contains(content, []byte("%%EOF")) {
+		t.Fatalf("process-rendered blast PDF is malformed")
 	}
 }

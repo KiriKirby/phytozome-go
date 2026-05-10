@@ -1,7 +1,8 @@
-package report
+﻿package report
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/phpdave11/gofpdf"
+
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 )
 
 const (
@@ -93,16 +96,18 @@ func (r *pdfReportRenderer) save(path string) error {
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("report path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create report directory: %w", err)
-	}
 	if err := r.doc.ensureSystemFonts(); err != nil {
 		return err
 	}
 	r.doc.pdf.SetFooterFunc(func() {
 		r.doc.drawFooter()
 	})
-	return r.doc.pdf.OutputFileAndClose(path)
+	return phygoboost.RunDisk(context.Background(), func(ctx context.Context) error {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("create report directory: %w", err)
+		}
+		return r.doc.pdf.OutputFileAndClose(path)
+	})
 }
 
 func (d *pdfDocument) ensureSystemFonts() error {
@@ -825,7 +830,12 @@ func firstReadableFont(paths []string) (string, []byte) {
 		if strings.TrimSpace(path) == "" {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		var data []byte
+		err := phygoboost.RunDisk(context.Background(), func(ctx context.Context) error {
+			var readErr error
+			data, readErr = os.ReadFile(path)
+			return readErr
+		})
 		if err != nil || len(data) == 0 {
 			continue
 		}
@@ -1151,3 +1161,4 @@ func pdfBytesForTest(data ReportData) ([]byte, error) {
 	err := r.doc.pdf.Output(&out)
 	return out.Bytes(), err
 }
+

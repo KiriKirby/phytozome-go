@@ -68,11 +68,11 @@ func SampleKeywordReportData() ReportData {
 				SourceNotes:  "sample release-backed keyword search context; all values are demonstration report data",
 			},
 			SearchTerms: []KeywordTermReport{
-				{SearchTerm: "phenylalanine ammonia lyase", InputType: "plain keyword", QueryOrder: 1, TotalRows: 11, SelectedRows: 5, LabelName: "PAL", MatchingNotes: "matched against already-loaded GFF3/AHRD annotation text", DurationMillis: 38400},
-				{SearchTerm: "cinnamate 4-hydroxylase", InputType: "plain keyword", QueryOrder: 2, TotalRows: 6, SelectedRows: 3, LabelName: "C4H", MatchingNotes: "matched against annotation fields in the current result set", DurationMillis: 29500},
-				{SearchTerm: "4CL", InputType: "identifier-like term", QueryOrder: 3, TotalRows: 4, SelectedRows: 2, LabelName: "4CL", MatchingNotes: "matched through alias and description fields already present in parsed rows", DurationMillis: 21700},
-				{SearchTerm: "CCR2", InputType: "identifier-like term", QueryOrder: 4, TotalRows: 2, SelectedRows: 1, LabelName: "CCR2", MatchingNotes: "matched through existing row aliases", DurationMillis: 16400},
-				{SearchTerm: "CAD8", InputType: "identifier-like term", QueryOrder: 5, TotalRows: 0, SelectedRows: 0, LabelName: "CAD8", MatchingNotes: "no rows in the current result table", DurationMillis: 11800},
+				{SearchTerm: "phenylalanine ammonia lyase", InputType: "plain keyword", SearchType: "keyword", QueryOrder: 1, TotalRows: 11, SelectedRows: 5, LabelName: "PAL", MatchingNotes: "matched against already-loaded GFF3/AHRD annotation text", DurationMillis: 38400},
+				{SearchTerm: "cinnamate 4-hydroxylase", InputType: "plain keyword", SearchType: "keyword", QueryOrder: 2, TotalRows: 6, SelectedRows: 3, LabelName: "C4H", MatchingNotes: "matched against annotation fields in the current result set", DurationMillis: 29500},
+				{SearchTerm: "4CL", InputType: "identifier-like term", SearchType: "keyword", QueryOrder: 3, TotalRows: 4, SelectedRows: 2, LabelName: "4CL", MatchingNotes: "matched through alias and description fields already present in parsed rows", DurationMillis: 21700},
+				{SearchTerm: "CCR2", InputType: "identifier-like term", SearchType: "keyword", QueryOrder: 4, TotalRows: 2, SelectedRows: 1, LabelName: "CCR2", MatchingNotes: "matched through existing row aliases", DurationMillis: 16400},
+				{SearchTerm: "CAD8", InputType: "identifier-like term", SearchType: "keyword", QueryOrder: 5, TotalRows: 0, SelectedRows: 0, LabelName: "CAD8", MatchingNotes: "no rows in the current result table", DurationMillis: 11800},
 			},
 			LabelTraces: []KeywordLabelReport{
 				{SearchTerm: "phenylalanine ammonia lyase", FinalLabel: "PAL", SourceField: "user input", SourceValue: "PAL", Method: "manual label", Explanation: "The user-supplied label was preserved for row readability and sequence headers."},

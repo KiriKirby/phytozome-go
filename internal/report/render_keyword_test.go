@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,5 +63,20 @@ func TestRenderKeywordPDFAllowsLongWrappedContent(t *testing.T) {
 	}
 	if !bytes.HasPrefix(content, []byte("%PDF-")) || !bytes.Contains(content, []byte("%%EOF")) {
 		t.Fatalf("long-content PDF is malformed")
+	}
+}
+
+func TestRenderKeywordPDFProcessCreatesPDF(t *testing.T) {
+	data := SampleKeywordReportData()
+	path := filepath.Join(t.TempDir(), "keyword-process.pdf")
+	if err := RenderKeywordPDFProcess(context.Background(), path, data); err != nil {
+		t.Fatalf("RenderKeywordPDFProcess() error = %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rendered PDF: %v", err)
+	}
+	if !bytes.HasPrefix(content, []byte("%PDF-")) || !bytes.Contains(content, []byte("%%EOF")) {
+		t.Fatalf("process-rendered keyword PDF is malformed")
 	}
 }

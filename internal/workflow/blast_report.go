@@ -1,4 +1,4 @@
-package workflow
+﻿package workflow
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -115,7 +115,7 @@ func (w *BlastWizard) renderBlastReportWithFiles(ctx context.Context, exportCtx 
 	data := w.buildBlastReportData(exportCtx, generatedFiles)
 
 	if w.suppressTaskModals {
-		if err := report.RenderBlastPDF(reportPath, data); err != nil {
+		if err := report.RenderBlastPDFProcess(ctx, reportPath, data); err != nil {
 			return "", err
 		}
 		return reportPath, nil
@@ -128,9 +128,8 @@ func (w *BlastWizard) renderBlastReportWithFiles(ctx context.Context, exportCtx 
 		Initial:     "Writing BLAST Data Analysis Report PDF...",
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(string)) error {
-		_ = taskCtx
 		safeTaskUpdate(update)("Writing BLAST Data Analysis Report PDF...")
-		return report.RenderBlastPDF(reportPath, data)
+		return report.RenderBlastPDFProcess(taskCtx, reportPath, data)
 	})
 	if err != nil {
 		return "", err
@@ -229,25 +228,15 @@ func inspectBlastGeneratedFilesList(ctx context.Context, files []exportFileResul
 	if len(specs) == 0 {
 		return out, nil
 	}
-	type inspectResult struct {
-		file report.GeneratedFile
-		err  error
+	inputs := make([]report.InspectGeneratedFileInput, len(specs))
+	for i, spec := range specs {
+		inputs[i] = report.InspectGeneratedFileInput{Path: spec.path, Type: spec.typ, Role: spec.role}
 	}
-	results := make([]inspectResult, len(specs))
-	if err := perf.ParallelFor(ctx, perf.WorkDisk, len(specs), func(_ context.Context, i int) error {
-		spec := specs[i]
-		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-		results[i] = inspectResult{file: file, err: err}
-		return err
-	}); err != nil {
+	results := make([]report.GeneratedFile, len(inputs))
+	if err := phygoboost.ParallelTaskJSON(ctx, phygoboost.TaskSpec{Level: phygoboost.ExecHeavy, LocalSlots: 1, Description: "inspect generated blast files"}, report.InspectGeneratedFileWorker, inputs, results); err != nil {
 		return nil, err
 	}
-	for _, result := range results {
-		if result.err != nil {
-			return nil, result.err
-		}
-		out = append(out, result.file)
-	}
+	out = append(out, results...)
 	return out, nil
 }
 
@@ -1950,3 +1939,5 @@ func buildBlastSequenceAudit(rows []model.BlastResultRow, records []model.Protei
 	}
 	return audit
 }
+
+

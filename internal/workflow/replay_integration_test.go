@@ -114,6 +114,50 @@ func TestReplaySpirodelaBlastExportRawAndPDF(t *testing.T) {
 	}
 }
 
+func TestReplayTest1ArabidopsisTAIR10BlastP(t *testing.T) {
+	if os.Getenv("PHYTO_REPLAY_TEST1") == "" {
+		t.Skip("set PHYTO_REPLAY_TEST1=1 to run the test1 Arabidopsis TAIR10 BLAST replay")
+	}
+	inputPath := strings.TrimSpace(os.Getenv("PHYTO_REPLAY_TEST1_PATH"))
+	if inputPath == "" {
+		inputPath = filepath.Join("bin", "output", "test1.txt")
+	}
+	items, err := loadReplayFastaItems(inputPath)
+	if err != nil {
+		t.Fatalf("load test1 FASTA %s: %v", inputPath, err)
+	}
+	if len(items) == 0 {
+		t.Fatalf("no FASTA items in %s", inputPath)
+	}
+
+	selected := model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+		SearchAlias: "Arabidopsis thaliana",
+		CommonName:  "thale cress",
+	}
+	request := replayBlastPRequest(selected, "BLASTP")
+	references := externalReferenceConfig{}
+	ctx, cancel := context.WithTimeout(context.Background(), replayEnvDuration("PHYTO_REPLAY_TIMEOUT_MINUTES", 45*time.Minute))
+	defer cancel()
+
+	w := NewBlastWizard(os.Stdout)
+	w.source = phytozome.NewClient(w.httpClient)
+	w.suppressTaskModals = true
+	start := time.Now()
+	runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, request, references)
+	if err != nil {
+		t.Fatalf("run test1 Arabidopsis TAIR10 BLASTP replay: %v", err)
+	}
+	duration := time.Since(start)
+	rows := 0
+	for _, run := range runs {
+		rows += len(run.Results.Rows)
+	}
+	t.Logf("test1 Arabidopsis TAIR10 BLASTP replay queries=%d runs=%d rows=%d duration=%s", len(items), len(runs), rows, duration.Round(time.Millisecond))
+}
+
 func replayOneBlastExport(t *testing.T, sourceName string, selected model.SpeciesCandidate, request model.BlastRequest, inputPath string, outputRoot string) {
 	t.Helper()
 	replayEnsureBlastPlusPath(t)

@@ -96,7 +96,7 @@ func TestBlastRowsDefaultBackTargetReturnsToQueryInput(t *testing.T) {
 }
 
 func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
-	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1"}}
+	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1", Aliases: "C4H; REF3"}}
 	columns, tableRows := buildKeywordSelectionTable(rows)
 	if len(columns) == 0 {
 		t.Fatal("expected keyword columns")
@@ -107,8 +107,17 @@ func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
 	if tableRows[0].Group != "alpha" {
 		t.Fatalf("unexpected row group: %q", tableRows[0].Group)
 	}
-	if columns[1].ID != "label_name" {
+	if columns[1].ID != "search_type" {
+		t.Fatalf("expected search_type column after search_term, got %#v", columns)
+	}
+	if columns[2].ID != "label_name" {
 		t.Fatalf("expected label_name column, got %#v", columns)
+	}
+	if columns[len(columns)-1].ID != "alias" {
+		t.Fatalf("expected alias as last keyword display column, got %#v", columns)
+	}
+	if tableRows[0].Cells[len(tableRows[0].Cells)-1] != "C4H; REF3" {
+		t.Fatalf("alias cell not carried into keyword display row: %#v", tableRows[0].Cells)
 	}
 }
 

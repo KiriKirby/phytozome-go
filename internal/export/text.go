@@ -1,14 +1,22 @@
-package export
+﻿package export
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 )
 
 func WriteProteinSequencesText(path string, records []model.ProteinSequenceRecord) error {
+	return phygoboost.RunDisk(context.Background(), func(context.Context) error {
+		return writeProteinSequencesTextLocked(path, records)
+	})
+}
+
+func writeProteinSequencesTextLocked(path string, records []model.ProteinSequenceRecord) error {
 	file, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create text file: %w", err)
@@ -40,3 +48,4 @@ func WriteProteinSequencesText(path string, records []model.ProteinSequenceRecor
 	}
 	return nil
 }
+

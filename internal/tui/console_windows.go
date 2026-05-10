@@ -3,12 +3,14 @@
 package tui
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/rivo/tview"
 )
 
@@ -101,7 +103,7 @@ func installConsoleResizeWatcher(app *tview.Application) func() {
 	var running atomic.Bool
 	running.Store(true)
 	done := make(chan struct{})
-	go func() {
+	phygoboost.GoTask(context.Background(), uiTaskSpec("watch console resize"), func(context.Context) {
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		lastWidth := initialWidth
@@ -126,7 +128,7 @@ func installConsoleResizeWatcher(app *tview.Application) func() {
 				app.QueueUpdateDraw(func() {})
 			}
 		}
-	}()
+	})
 	var once sync.Once
 	return func() {
 		once.Do(func() {

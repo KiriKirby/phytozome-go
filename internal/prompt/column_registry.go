@@ -17,17 +17,17 @@ type columnMetadata struct {
 }
 
 var keywordDisplayColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "label_name", "transcript", "description", "genome"},
-	"lemna":     {"search_term", "label_name", "transcript", "description", "genome"},
+	"phytozome": {"search_term", "search_type", "label_name", "transcript", "description", "genome", "alias"},
+	"lemna":     {"search_term", "label_name", "transcript", "description", "genome", "alias"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
+	"phytozome": {"search_term", "search_type", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"lemna":     {"search_term", "label_name", "transcript", "description", "genome", "protein_id", "gene_identifier", "location", "alias", "uniprot", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 }
 
 var keywordExportColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"row", "search_term", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
+	"phytozome": {"row", "search_term", "search_type", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
 	"lemna":     {"row", "search_term", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
 }
 
@@ -137,6 +137,7 @@ var columnHelpAliases = map[string]string{
 var columnMetadataByID = map[string]columnMetadata{
 	"row":                              {CompactHeader: "row", DetailLabel: "row", ExportHeader: "row"},
 	"search_tern":                      {CompactHeader: "search_tern", DetailLabel: "search_term", ExportHeader: "search_term"},
+	"search_type":                      {CompactHeader: "search_type", DetailLabel: "search_type", ExportHeader: "search_type"},
 	"label_name":                       {CompactHeader: "label_name", DetailLabel: "label_name", ExportHeader: "label_name"},
 	"transcript":                       {CompactHeader: "transcript", DetailLabel: "transcript", ExportHeader: "transcript"},
 	"discripition":                     {CompactHeader: "discripition", DetailLabel: "description", ExportHeader: "description"},
@@ -747,6 +748,12 @@ func blastColumnIsInterProLike(id string) bool {
 
 func dynamicColumnHelpText(id string) string {
 	switch {
+	case id == "search_type":
+		return columnHelp(
+			"Search program selected by the new keyword search engine for this row. If the selected program found nothing and wide search produced the hit, the value explicitly records that fallback.",
+			"新 keyword 搜索引擎为这一行选择的搜索程序。如果原本选择的程序没有命中，而宽搜索产生了结果，这里会明确记录这个回退。",
+			"新しい keyword 検索エンジンがこの行に選んだ検索プログラムです。最初のプログラムで命中せず wide search が結果を返した場合、その fallback も明示します。",
+		)
 	case strings.HasPrefix(id, "attr_"):
 		name := humanizeColumnSuffix(strings.TrimPrefix(id, "attr_"))
 		return columnHelp(

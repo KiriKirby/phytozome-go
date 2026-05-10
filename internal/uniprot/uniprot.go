@@ -1,25 +1,23 @@
-package uniprot
+﻿package uniprot
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
-	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/KiriKirby/phytozome-go/internal/appfs"
+	"github.com/KiriKirby/phytozome-go/internal/cachex"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
+	"github.com/goccy/go-json"
+	"github.com/jszwec/csvutil"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -27,6 +25,8 @@ const (
 	uniprotBaseURL = "https://rest.uniprot.org/uniprotkb/"
 	searchFields   = "accession,id,reviewed,protein_name,gene_names,organism_name,organism_id,length,cc_function,cc_catalytic_activity,go,go_id,ec,keyword,xref_pfam,xref_interpro,cc_pathway,cc_subcellular_location,protein_existence,annotation_score,fragment,cc_sequence_caution,ft_domain,ft_region,ft_motif,ft_act_site,ft_binding,xref_alphafolddb,xref_pdb"
 )
+
+var diskCache = cachex.MustOpen("uniprot", "search")
 
 type Client struct {
 	httpClient *http.Client
@@ -73,7 +73,7 @@ type diskEntry struct {
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = perf.HTTPClient()
+		httpClient = phygoboost.HTTPClient()
 	}
 	return &Client{
 		httpClient: httpClient,
@@ -82,6 +82,27 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) Lookup(ctx context.Context, accession string, row model.BlastResultRow) (Entry, bool, error) {
+	result, err := phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecHeavy,
+		Domain:      "rest.uniprot.org",
+		Description: "lookup uniprot entry",
+	}, func(runCtx context.Context) (struct {
+		Entry Entry
+		OK    bool
+	}, error) {
+		entry, ok, err := c.lookup(runCtx, accession, row)
+		return struct {
+			Entry Entry
+			OK    bool
+		}{Entry: entry, OK: ok}, err
+	})
+	if err != nil {
+		return Entry{}, false, err
+	}
+	return result.Entry, result.OK, nil
+}
+
+func (c *Client) lookup(ctx context.Context, accession string, row model.BlastResultRow) (Entry, bool, error) {
 	accession = normalizeAccession(accession)
 	if accession != "" {
 		entry, ok, err := c.lookupByQuery(ctx, "accession:"+accession, "accession:"+accession)
@@ -148,7 +169,7 @@ func (c *Client) lookupByQuery(ctx context.Context, cacheKey string, query strin
 		if err != nil {
 			return Entry{}, fmt.Errorf("fetch UniProt: %w", err)
 		}
-		defer resp.Body.Close()
+		defer phygoboost.DrainAndClose(resp.Body)
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			return Entry{}, fmt.Errorf("fetch UniProt: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
@@ -232,40 +253,15 @@ func candidateQueries(row model.BlastResultRow) []string {
 }
 
 func readDiskEntry(cacheKey string) (Entry, bool) {
-	path, err := diskEntryPath(cacheKey)
-	if err != nil {
-		return Entry{}, false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Entry{}, false
-	}
 	var stored diskEntry
-	if err := json.Unmarshal(data, &stored); err != nil {
+	if !diskCache.ReadJSON("entry:"+cacheKey, &stored) {
 		return Entry{}, false
 	}
 	return stored.Entry, true
 }
 
 func writeDiskEntry(cacheKey string, entry Entry) {
-	path, err := diskEntryPath(cacheKey)
-	if err != nil {
-		return
-	}
-	data, err := json.MarshalIndent(diskEntry{Entry: entry}, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, data, 0o644)
-}
-
-func diskEntryPath(cacheKey string) (string, error) {
-	dir, err := appfs.CacheDir("uniprot", "search")
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256([]byte(cacheKey))
-	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json"), nil
+	diskCache.WriteJSON("entry:"+cacheKey, diskEntry{Entry: entry})
 }
 
 func parseTSV(raw string) ([]Entry, error) {
@@ -277,60 +273,90 @@ func parseTSV(raw string) ([]Entry, error) {
 	reader.Comma = '\t'
 	reader.FieldsPerRecord = -1
 	reader.LazyQuotes = true
-	records, err := reader.ReadAll()
+	decoder, err := csvutil.NewDecoder(reader)
 	if err != nil {
 		return nil, fmt.Errorf("parse UniProt TSV: %w", err)
 	}
-	if len(records) < 2 {
-		return nil, nil
+	decoder.AlignRecord = true
+	decoder.Map = func(field, col string, v any) string {
+		return cleanValue(field)
 	}
-	index := make(map[string]int, len(records[0]))
-	for i, header := range records[0] {
-		index[strings.TrimSpace(header)] = i
-	}
-	entries := make([]Entry, 0, len(records)-1)
-	for _, fields := range records[1:] {
-		get := func(name string) string {
-			i, ok := index[name]
-			if !ok || i >= len(fields) {
-				return ""
+
+	var entries []Entry
+	for {
+		var row uniprotTSVRow
+		if err := decoder.Decode(&row); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
 			}
-			return cleanValue(fields[i])
+			return nil, fmt.Errorf("parse UniProt TSV: %w", err)
 		}
-		length, _ := strconv.Atoi(get("Length"))
+		length, _ := strconv.Atoi(row.Length)
 		entries = append(entries, Entry{
-			Accession:           get("Entry"),
-			EntryName:           get("Entry Name"),
-			Reviewed:            get("Reviewed"),
-			ProteinName:         get("Protein names"),
-			GeneNames:           get("Gene Names"),
-			Organism:            get("Organism"),
-			OrganismID:          get("Organism (ID)"),
+			Accession:           row.Entry,
+			EntryName:           row.EntryName,
+			Reviewed:            row.Reviewed,
+			ProteinName:         row.ProteinName,
+			GeneNames:           row.GeneNames,
+			Organism:            row.Organism,
+			OrganismID:          row.OrganismID,
 			Length:              length,
-			Function:            get("Function [CC]"),
-			CatalyticActivity:   get("Catalytic activity"),
-			GO:                  get("Gene Ontology (GO)"),
-			GOIDs:               get("Gene Ontology IDs"),
-			EC:                  get("EC number"),
-			Keywords:            get("Keywords"),
-			Pfam:                get("Pfam"),
-			InterPro:            get("InterPro"),
-			Pathway:             get("Pathway"),
-			SubcellularLocation: get("Subcellular location [CC]"),
-			ProteinExistence:    get("Protein existence"),
-			AnnotationScore:     get("Annotation"),
-			Fragment:            get("Fragment"),
-			SequenceCaution:     get("Sequence caution"),
-			Domain:              get("Domain [FT]"),
-			Region:              get("Region"),
-			Motif:               get("Motif"),
-			ActiveSite:          get("Active site"),
-			BindingSite:         get("Binding site"),
-			AlphaFoldDB:         get("AlphaFoldDB"),
-			PDB:                 get("PDB"),
+			Function:            row.Function,
+			CatalyticActivity:   row.CatalyticActivity,
+			GO:                  row.GO,
+			GOIDs:               row.GOIDs,
+			EC:                  row.EC,
+			Keywords:            row.Keywords,
+			Pfam:                row.Pfam,
+			InterPro:            row.InterPro,
+			Pathway:             row.Pathway,
+			SubcellularLocation: row.SubcellularLocation,
+			ProteinExistence:    row.ProteinExistence,
+			AnnotationScore:     row.AnnotationScore,
+			Fragment:            row.Fragment,
+			SequenceCaution:     row.SequenceCaution,
+			Domain:              row.Domain,
+			Region:              row.Region,
+			Motif:               row.Motif,
+			ActiveSite:          row.ActiveSite,
+			BindingSite:         row.BindingSite,
+			AlphaFoldDB:         row.AlphaFoldDB,
+			PDB:                 row.PDB,
 		})
 	}
 	return entries, nil
+}
+
+type uniprotTSVRow struct {
+	Entry               string `csv:"Entry"`
+	EntryName           string `csv:"Entry Name"`
+	Reviewed            string `csv:"Reviewed"`
+	ProteinName         string `csv:"Protein names"`
+	GeneNames           string `csv:"Gene Names"`
+	Organism            string `csv:"Organism"`
+	OrganismID          string `csv:"Organism (ID)"`
+	Length              string `csv:"Length"`
+	Function            string `csv:"Function [CC]"`
+	CatalyticActivity   string `csv:"Catalytic activity"`
+	GO                  string `csv:"Gene Ontology (GO)"`
+	GOIDs               string `csv:"Gene Ontology IDs"`
+	EC                  string `csv:"EC number"`
+	Keywords            string `csv:"Keywords"`
+	Pfam                string `csv:"Pfam"`
+	InterPro            string `csv:"InterPro"`
+	Pathway             string `csv:"Pathway"`
+	SubcellularLocation string `csv:"Subcellular location [CC]"`
+	ProteinExistence    string `csv:"Protein existence"`
+	AnnotationScore     string `csv:"Annotation"`
+	Fragment            string `csv:"Fragment"`
+	SequenceCaution     string `csv:"Sequence caution"`
+	Domain              string `csv:"Domain [FT]"`
+	Region              string `csv:"Region"`
+	Motif               string `csv:"Motif"`
+	ActiveSite          string `csv:"Active site"`
+	BindingSite         string `csv:"Binding site"`
+	AlphaFoldDB         string `csv:"AlphaFoldDB"`
+	PDB                 string `csv:"PDB"`
 }
 
 func chooseEntry(entries []Entry) Entry {
@@ -492,3 +518,4 @@ func ToJSON(entry Entry) string {
 	}
 	return string(data)
 }
+

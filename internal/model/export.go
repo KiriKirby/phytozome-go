@@ -16,6 +16,7 @@ type ExportMetadata struct {
 type KeywordResultRow struct {
 	SourceDatabase      string
 	SearchTerm          string
+	SearchType          string
 	LabelName           string
 	ProteinID           string
 	TranscriptID        string
@@ -35,6 +36,7 @@ type KeywordResultRow struct {
 
 type KeywordSearchGroup struct {
 	SearchTerm       string
+	SearchType       string
 	LabelName        string
 	LabelMethod      string
 	LabelSourceField string

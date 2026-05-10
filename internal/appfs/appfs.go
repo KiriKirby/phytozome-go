@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const cacheGeneration = "v2"
+
 func ApplicationDir() (string, error) {
 	executablePath, err := os.Executable()
 	if err == nil {
@@ -40,11 +42,11 @@ func CacheDir(parts ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := filepath.Join(appDir, ".cache")
+	base := filepath.Join(appDir, ".cache", cacheGeneration)
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", fmt.Errorf("ensure cache directory: %w", err)
 	}
-	markHiddenIfSupported(base)
+	markHiddenIfSupported(filepath.Join(appDir, ".cache"))
 
 	dir := base
 	for _, part := range parts {

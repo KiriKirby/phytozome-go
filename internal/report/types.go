@@ -106,6 +106,7 @@ type SpeciesReport struct {
 type KeywordTermReport struct {
 	SearchTerm     string
 	InputType      string
+	SearchType     string
 	QueryOrder     int
 	TotalRows      int
 	SelectedRows   int

@@ -1,4 +1,4 @@
-package workflow
+﻿package workflow
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -47,9 +47,8 @@ func (w *BlastWizard) renderKeywordReportForExport(ctx context.Context, rows []m
 		Initial:     "Writing Data Analysis Report PDF...",
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(string)) error {
-		_ = taskCtx
 		safeTaskUpdate(update)("Writing Data Analysis Report PDF...")
-		return report.RenderKeywordPDF(reportPath, data)
+		return report.RenderKeywordPDFProcess(taskCtx, reportPath, data)
 	})
 	if err != nil {
 		return "", err
@@ -139,25 +138,15 @@ func inspectKeywordGeneratedFiles(ctx context.Context, files exportFileResult, s
 	if len(filtered) == 0 {
 		return out, nil
 	}
-	type inspectResult struct {
-		file report.GeneratedFile
-		err  error
+	inputs := make([]report.InspectGeneratedFileInput, len(filtered))
+	for i, spec := range filtered {
+		inputs[i] = report.InspectGeneratedFileInput{Path: spec.path, Type: spec.typ, Role: spec.role}
 	}
-	results := make([]inspectResult, len(filtered))
-	if err := perf.ParallelFor(ctx, perf.WorkDisk, len(filtered), func(_ context.Context, i int) error {
-		spec := filtered[i]
-		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
-		results[i] = inspectResult{file: file, err: err}
-		return err
-	}); err != nil {
+	results := make([]report.GeneratedFile, len(inputs))
+	if err := phygoboost.ParallelTaskJSON(ctx, phygoboost.TaskSpec{Level: phygoboost.ExecHeavy, LocalSlots: 1, Description: "inspect generated keyword files"}, report.InspectGeneratedFileWorker, inputs, results); err != nil {
 		return nil, err
 	}
-	for _, result := range results {
-		if result.err != nil {
-			return nil, result.err
-		}
-		out = append(out, result.file)
-	}
+	out = append(out, results...)
 	return out, nil
 }
 
@@ -288,6 +277,7 @@ func keywordTermReports(groups []model.KeywordSearchGroup, selectedRows []model.
 		out = append(out, report.KeywordTermReport{
 			SearchTerm:     group.SearchTerm,
 			InputType:      classifyKeywordInputType(group.SearchTerm),
+			SearchType:     firstNonEmpty(group.SearchType, keywordRowsSearchType(group.Rows, group.SearchTerm, false)),
 			QueryOrder:     i + 1,
 			TotalRows:      len(group.Rows),
 			SelectedRows:   selected,
@@ -364,7 +354,8 @@ func keywordMatchingNotes(group model.KeywordSearchGroup) string {
 	case "lemna":
 		return "lemna workflow: selected species -> releaseForSpecies -> release GFF3 URL -> scan searchable GFF3 rows -> rowMatchesTerms -> optional AHRD enrichment from the same release when already available -> cache write; term duration: " + duration
 	case "phytozome":
-		return "Phytozome workflow: parse report URL if present -> try gene/transcript/protein identifier variants for specific IDs -> fallback to SearchGenesByKeyword(proteomeID, term, limit=20) only when no specific match was found -> build rows from returned gene/transcript records -> cache write; term duration: " + duration
+		searchType := firstNonEmpty(group.SearchType, keywordRowsSearchType(group.Rows, group.SearchTerm, false), "unclassified")
+		return "Phytozome workflow: new search engine classified this term as " + searchType + "; the selected search program ran first, and wide search ran only if that program returned no hits; term duration: " + duration
 	default:
 		return "rows came from current keyword result state; term duration: " + duration
 	}
@@ -978,3 +969,5 @@ func nonEmptyReportValues(values []string) []string {
 	}
 	return out
 }
+
+
