@@ -2,7 +2,6 @@ package phytozomekeyword
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -12,14 +11,10 @@ import (
 type fakeFinder struct {
 	genesByID       map[string]GeneRecord
 	genesByKeyword  map[string][]GeneRecord
-	errByID         map[string]error
 	keywordRequests []string
 }
 
 func (f *fakeFinder) FetchGeneByGeneID(ctx context.Context, proteomeID int, geneID string) (GeneRecord, error) {
-	if err, ok := f.errByID[strings.ToUpper(geneID)]; ok {
-		return GeneRecord{}, err
-	}
 	if gene, ok := f.genesByID[strings.ToUpper(geneID)]; ok {
 		return gene, nil
 	}
@@ -88,47 +83,6 @@ func TestEngineMapsRiceKeywordTypes(t *testing.T) {
 	}
 }
 
-func TestSpecificIdentifierSearchPropagatesContextDeadline(t *testing.T) {
-	finder := &fakeFinder{
-		genesByID: map[string]GeneRecord{},
-		errByID:   map[string]error{"AT2G37040": context.DeadlineExceeded},
-	}
-	engine := New(finder)
-	_, err := engine.SearchKeywordRows(context.Background(), model.SpeciesCandidate{ProteomeID: 167}, "At2g37040")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("SearchKeywordRows error = %v, want context deadline", err)
-	}
-	if len(finder.keywordRequests) != 0 {
-		t.Fatalf("identifier timeout should not fall through to keyword search, got %#v", finder.keywordRequests)
-	}
-}
-
-func TestArabidopsisIdentifierSearchUsesUppercaseVariantFirst(t *testing.T) {
-	finder := &fakeFinder{genesByID: map[string]GeneRecord{
-		"AT2G37040": testArabidopsisGene("AT2G37040", "PAL1"),
-	}}
-	engine := New(finder)
-	rows, err := engine.SearchKeywordRows(context.Background(), model.SpeciesCandidate{
-		ProteomeID:  167,
-		JBrowseName: "Athaliana_TAIR10",
-	}, "At2g37040")
-	if err != nil {
-		t.Fatalf("SearchKeywordRows returned error: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1", len(rows))
-	}
-	if rows[0].SearchType != SearchTypePhytozomeID {
-		t.Fatalf("search type = %q, want %q", rows[0].SearchType, SearchTypePhytozomeID)
-	}
-	if rows[0].GeneIdentifier != "AT2G37040" {
-		t.Fatalf("gene identifier = %q, want AT2G37040", rows[0].GeneIdentifier)
-	}
-	if len(finder.keywordRequests) != 0 {
-		t.Fatalf("identifier hit should not fall through to keyword search, got %#v", finder.keywordRequests)
-	}
-}
-
 func TestEngineRecordsWideSearchFallback(t *testing.T) {
 	gene := testRiceGene("LOC_Os05g25640")
 	finder := &fakeFinder{
@@ -169,37 +123,6 @@ func TestEngineCanForceWideSearch(t *testing.T) {
 	}
 	if rows[0].GeneIdentifier != "LOC_Os05g25640" {
 		t.Fatalf("forced wide search should use wide keyword result, got %q", rows[0].GeneIdentifier)
-	}
-}
-
-func TestEmptyKeywordResultsAreNotCached(t *testing.T) {
-	if cacheableResult(nil, "temporary miss") {
-		t.Fatal("empty keyword results should not be cacheable")
-	}
-	if cacheableResult([]model.KeywordResultRow{}, "temporary miss") {
-		t.Fatal("zero-length keyword result slices should not be cacheable")
-	}
-	if !cacheableResult([]model.KeywordResultRow{{SearchTerm: "temporary miss", SearchType: SearchTypeWide}}, "temporary miss") {
-		t.Fatal("non-empty complete keyword results should remain cacheable")
-	}
-}
-
-func testArabidopsisGene(id string, alias string) GeneRecord {
-	return GeneRecord{
-		PrimaryIdentifier: id,
-		Symbols:           []string{alias},
-		Organism: GeneOrganismInfo{
-			OrganismName:      "Arabidopsis thaliana",
-			AnnotationVersion: "TAIR10",
-			Proteome:          167,
-		},
-		Transcripts: []GeneTranscript{{
-			PrimaryIdentifier:   id + ".1",
-			SecondaryIdentifier: "PAC:1",
-			Protein:             id + ".1",
-			IsPrimary:           "1",
-		}},
-		Deflines: []string{alias + " protein"},
 	}
 }
 

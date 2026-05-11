@@ -40,6 +40,38 @@ func TestBlastExportKeepsReservedUniProtLengthColumnsInOriginalPositions(t *test
 	}
 }
 
+func TestKeywordExcelIncludesSearchTypeForPhytozome(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyword.xlsx")
+	rows := []model.KeywordResultRow{{
+		SourceDatabase: "phytozome",
+		SearchTerm:     "XP_015639656",
+		SearchType:     "RefSeq XP protein",
+		TranscriptID:   "LOC_Os05g25640.1",
+	}}
+	if err := WriteKeywordResultsExcel(path, rows); err != nil {
+		t.Fatalf("WriteKeywordResultsExcel returned error: %v", err)
+	}
+	file, err := excelize.OpenFile(path)
+	if err != nil {
+		t.Fatalf("open keyword excel: %v", err)
+	}
+	defer file.Close()
+	headers, err := file.GetRows("Keyword Results")
+	if err != nil {
+		t.Fatalf("read keyword excel rows: %v", err)
+	}
+	if len(headers) < 2 {
+		t.Fatalf("expected header and row, got %d rows", len(headers))
+	}
+	searchTypeIdx := indexOfAny(headers[0], "search_type")
+	if searchTypeIdx < 0 {
+		t.Fatalf("keyword export header missing search_type: %v", headers[0])
+	}
+	if got := headers[1][searchTypeIdx]; got != "RefSeq XP protein" {
+		t.Fatalf("search_type value = %q, want RefSeq XP protein", got)
+	}
+}
+
 func TestBlastExportLeavesUniProtCellsBlankWhenRowHasNoUniProtAccession(t *testing.T) {
 	row := model.BlastResultRow{
 		SourceDatabase:                      "lemna",

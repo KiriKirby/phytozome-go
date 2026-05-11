@@ -96,7 +96,7 @@ func TestBlastRowsDefaultBackTargetReturnsToQueryInput(t *testing.T) {
 }
 
 func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
-	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1", Aliases: "C4H; REF3"}}
+	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1"}}
 	columns, tableRows := buildKeywordSelectionTable(rows)
 	if len(columns) == 0 {
 		t.Fatal("expected keyword columns")
@@ -113,17 +113,12 @@ func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
 	if columns[2].ID != "label_name" {
 		t.Fatalf("expected label_name column, got %#v", columns)
 	}
-	if columns[len(columns)-1].ID != "alias" {
-		t.Fatalf("expected alias as last keyword display column, got %#v", columns)
-	}
-	if tableRows[0].Cells[len(tableRows[0].Cells)-1] != "C4H; REF3" {
-		t.Fatalf("alias cell not carried into keyword display row: %#v", tableRows[0].Cells)
-	}
 }
 
 func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
 	row := model.KeywordResultRow{
 		SearchTerm:     "alpha",
+		SearchType:     "keyword",
 		LabelName:      "C4H",
 		ProteinID:      "prot123",
 		TranscriptID:   "AT1G01010.1",
@@ -132,7 +127,7 @@ func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
 		Description:    "desc",
 	}
 	detail := keywordRowDetail(row)
-	for _, want := range []string{"label_name: C4H", "protein_id: prot123", "transcript: AT1G01010.1"} {
+	for _, want := range []string{"search_type: keyword", "label_name: C4H", "protein_id: prot123", "transcript: AT1G01010.1"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("keyword detail missing %q: %s", want, detail)
 		}

@@ -63,18 +63,6 @@ func newModalOverlay(child tview.Primitive, width int, height int) *modalOverlay
 	}
 }
 
-func (m *modalOverlay) SetSize(width int, height int) {
-	if m == nil {
-		return
-	}
-	if width > 0 {
-		m.width = width
-	}
-	if height > 0 {
-		m.height = height
-	}
-}
-
 func (m *modalOverlay) Draw(screen tcell.Screen) {
 	x, y, w, h := m.GetRect()
 	childW := m.width
@@ -180,17 +168,11 @@ func modalRoot(page TaskPage, body tview.Primitive, width int, height int) tview
 }
 
 func taskModalRoot(page TaskPage, body tview.Primitive, width int, height int) tview.Primitive {
-	root, _ := newTaskModalRoot(page, body, width, height)
-	return root
-}
-
-func newTaskModalRoot(page TaskPage, body tview.Primitive, width int, height int) (tview.Primitive, *modalOverlay) {
 	fallback := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), tview.NewBox())
 	root := tview.NewPages()
 	root.AddPage("background", currentBackground(fallback), true, true)
-	overlay := newModalOverlay(body, width, height)
-	root.AddPage("modal", overlay, true, true)
-	return root, overlay
+	root.AddPage("modal", newModalOverlay(body, width, height), true, true)
+	return root
 }
 
 func infoModalRoot(page InfoPage, body tview.Primitive, width int, height int) tview.Primitive {

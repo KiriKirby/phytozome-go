@@ -37,8 +37,6 @@ const (
 	ShortcutHome        = "Ctrl+O"
 	ShortcutConfirm     = "Enter"
 	ShortcutApply       = "Enter"
-	ShortcutWideSearch  = "Ctrl+W"
-	ShortcutBlast       = "Ctrl+B"
 	ShortcutPaste       = "Ctrl+V"
 	ShortcutCancel      = "Esc"
 	ShortcutAuto        = "Enter"
@@ -51,5 +49,6 @@ const (
 	ShortcutExport      = "Ctrl+G"
 	ShortcutExportAll   = "Ctrl+D"
 	ShortcutRetry       = "Ctrl+R"
+	ShortcutWideSearch  = "Ctrl+W"
 	ShortcutHelp        = "F1"
 )

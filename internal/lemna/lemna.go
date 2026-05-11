@@ -3,16 +3,12 @@ package lemna
 import (
 	"archive/tar"
 	"bufio"
-	"bytes"
+	"compress/gzip"
 	"context"
-	"encoding/csv"
-	"errors"
 	"fmt"
 	"html"
 	"io"
-	"mime/multipart"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path"
@@ -26,11 +22,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
-	"github.com/KiriKirby/phytozome-go/internal/searchengine/lemnakeyword"
-	"github.com/jszwec/csvutil"
-	"github.com/karrick/godirwalk"
-	"github.com/klauspost/compress/gzip"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -40,14 +32,10 @@ const (
 )
 
 var (
-	linkPattern           = regexp.MustCompile(`(?is)<a\s+href="([^"]+)">([^<]+)</a>`)
-	spacePattern          = regexp.MustCompile(`\s+`)
-	searchNoisePattern    = regexp.MustCompile(`[^a-z0-9]+`)
-	symbolTokenPattern    = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{1,8})?\d*\b`)
-	riceLocusPattern      = regexp.MustCompile(`(?i)^(?:LOC_)?(?:OS)?\d{2}G\d{5}(?:\.\d+)?$`)
-	refSeqProteinPattern  = regexp.MustCompile(`(?i)^(?:XP_?)\d+(?:\.\d+)?$`)
-	cytochromeP450Pattern = regexp.MustCompile(`(?i)^CYP\d+[A-Z]\d+[A-Z]?$`)
-	lemnaReportURLPattern = regexp.MustCompile(`(?i)^https?://(?:www\.)?lemna\.org/report/([^/\s]+)/([^?\s#]+)`)
+	linkPattern        = regexp.MustCompile(`(?is)<a\s+href="([^"]+)">([^<]+)</a>`)
+	spacePattern       = regexp.MustCompile(`\s+`)
+	searchNoisePattern = regexp.MustCompile(`[^a-z0-9]+`)
+	symbolTokenPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{1,8})?\d*\b`)
 )
 
 type Client struct {
@@ -61,8 +49,6 @@ type Client struct {
 	fastaIndexCache        map[string]map[string]fastaEntry
 	proteinReleaseCache    map[string]map[string]string
 	proteinSequenceCache   map[string]string
-	keywordEngine          *lemnakeyword.Engine
-	keywordIndexCache      map[string]lemnaKeywordIndex
 	keywordRowsCache       map[string][]model.KeywordResultRow
 	blastCapabilitiesCache map[string]BlastCapability
 	localResultsCache      map[string]model.BlastResult
@@ -79,11 +65,6 @@ type speciesMetaResult struct {
 	candidate model.SpeciesCandidate
 	release   releaseInfo
 	ok        bool
-}
-
-type speciesCandidatesDisk struct {
-	Candidates []model.SpeciesCandidate `json:"candidates"`
-	Releases   map[string]releaseInfo   `json:"releases"`
 }
 
 type releaseInfo struct {
@@ -125,50 +106,13 @@ type gffRow struct {
 }
 
 type ahrdRecord struct {
-	ProteinAccession         string `csv:"Protein-Accession"`
-	BlastHitAccession        string `csv:"Blast-Hit-Accession"`
-	QualityCode              string `csv:"AHRD-Quality-Code"`
-	HumanReadableDescription string `csv:"Human-Readable-Description"`
-	Interpro                 string `csv:"Interpro"`
-	GeneOntologyTerm         string `csv:"Gene-Ontology-Term"`
+	ProteinAccession         string
+	BlastHitAccession        string
+	QualityCode              string
+	HumanReadableDescription string
+	Interpro                 string
+	GeneOntologyTerm         string
 }
-
-const (
-	lemnaSearchTypeReportURL        = "report URL"
-	lemnaSearchTypeIdentifier       = "Lemna identifier"
-	lemnaSearchTypeRiceLocus        = "rice LOC_Os locus"
-	lemnaSearchTypeRefSeqProtein    = "RefSeq XP protein"
-	lemnaSearchTypeRiceGeneAlias    = "rice gene alias"
-	lemnaSearchTypeCytochromeFamily = "CYP73 family symbol"
-	lemnaSearchTypeKeyword          = "keyword"
-	lemnaSearchTypeWide             = "wide search"
-	lemnaSearchTypeBroad            = "broad search"
-)
-
-type lemnaKeywordIndex struct {
-	Release          releaseInfo              `json:"release"`
-	Species          model.SpeciesCandidate   `json:"species"`
-	Rows             []model.KeywordResultRow `json:"rows"`
-	ByIdentifier     map[string][]int         `json:"by_identifier"`
-	BySearchToken    map[string][]int         `json:"by_search_token"`
-	ByNormalizedText map[string][]int         `json:"by_normalized_text"`
-}
-
-type lemnaKeywordProgram interface {
-	Name() string
-	Match(term string) bool
-	Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error)
-}
-
-type lemnaReportURLProgram struct{}
-type lemnaIdentifierProgram struct{}
-type lemnaRiceLocusProgram struct{}
-type lemnaRefSeqProteinProgram struct{}
-type lemnaRiceAliasProgram struct{}
-type lemnaCytochromeFamilyProgram struct{}
-type lemnaKeywordProgramDefault struct{}
-type lemnaWideKeywordProgram struct{}
-type lemnaBroadKeywordProgram struct{}
 
 // BlastCapability describes detected BLAST capabilities for a release/species.
 type BlastCapability struct {
@@ -182,59 +126,45 @@ type BlastCapability struct {
 	NucleotideFastaURL    string
 }
 
-type lemnaBlastSession struct {
-	client *http.Client
-}
-
-type lemnaBlastSubmission struct {
-	JobID     string
-	ReportURL string
-	Message   string
-}
-
 // DetectBlastCapabilities inspects cached release metadata and returns a best-effort
 // capability summary for the given species. This function prefers the download
 // metadata cache and only attempts lightweight page parsing elsewhere (parsing
 // not implemented here - this is a conservative detection that enables CLI UX).
 func (c *Client) DetectBlastCapabilities(ctx context.Context, species model.SpeciesCandidate) (BlastCapability, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "detect lemna blast capabilities",
-	}, func(runCtx context.Context) (BlastCapability, error) {
-		// Return cached capabilities if present.
-		c.mu.RLock()
-		if c.blastCapabilitiesCache != nil {
-			if cached, ok := c.blastCapabilitiesCache[species.JBrowseName]; ok {
-				c.mu.RUnlock()
-				return cached, nil
-			}
+	// Return cached capabilities if present.
+	c.mu.RLock()
+	if c.blastCapabilitiesCache != nil {
+		if cached, ok := c.blastCapabilitiesCache[species.JBrowseName]; ok {
+			c.mu.RUnlock()
+			return cached, nil
 		}
-		rel, ok := c.releasesByJBrowseName[species.JBrowseName]
-		c.mu.RUnlock()
-		if !ok {
-			return BlastCapability{}, fmt.Errorf("no lemna.org release metadata for %s", species.JBrowseName)
-		}
+	}
+	rel, ok := c.releasesByJBrowseName[species.JBrowseName]
+	c.mu.RUnlock()
+	if !ok {
+		return BlastCapability{}, fmt.Errorf("no lemna.org release metadata for %s", species.JBrowseName)
+	}
 
-		cap := BlastCapability{
-			HasProteinFasta:    rel.ProteinURL != "",
-			ProteinFastaURL:    rel.ProteinURL,
-			HasNucleotideFasta: rel.NucleotideURL != "",
-			NucleotideFastaURL: rel.NucleotideURL,
-		}
+	cap := BlastCapability{
+		HasServerNucleotideDB: rel.BlastNDBID != 0,
+		BlastNDBID:            rel.BlastNDBID,
+		HasProteinFasta:       rel.ProteinURL != "",
+		ProteinFastaURL:       rel.ProteinURL,
+		HasNucleotideFasta:    rel.NucleotideURL != "",
+		NucleotideFastaURL:    rel.NucleotideURL,
+	}
 
-		c.enrichServerBlastCapability(runCtx, rel, &cap)
+	c.enrichServerBlastCapability(ctx, rel, &cap)
 
-		// Persist capability to cache for future quick lookups.
-		c.mu.Lock()
-		if c.blastCapabilitiesCache == nil {
-			c.blastCapabilitiesCache = make(map[string]BlastCapability)
-		}
-		c.blastCapabilitiesCache[species.JBrowseName] = cap
-		c.mu.Unlock()
+	// Persist capability to cache for future quick lookups.
+	c.mu.Lock()
+	if c.blastCapabilitiesCache == nil {
+		c.blastCapabilitiesCache = make(map[string]BlastCapability)
+	}
+	c.blastCapabilitiesCache[species.JBrowseName] = cap
+	c.mu.Unlock()
 
-		return cap, nil
-	})
+	return cap, nil
 }
 
 func (c *Client) cachedProteinTranscriptMaps(ctx context.Context, release releaseInfo) (map[string]string, map[string]string, error) {
@@ -354,7 +284,7 @@ func (c *Client) cachedProteinTranscriptMaps(ctx context.Context, release releas
 	return protCopy, transCopy, nil
 }
 
-func (c *Client) cachedFastaIndex(ctx context.Context, fastaPath string) (map[string]fastaEntry, error) {
+func (c *Client) cachedFastaIndex(fastaPath string) (map[string]fastaEntry, error) {
 	key := strings.TrimSpace(fastaPath)
 	if key == "" {
 		return nil, nil
@@ -413,7 +343,7 @@ func (c *Client) cachedFastaIndex(ctx context.Context, fastaPath string) (map[st
 			return copyIndex, nil
 		}
 
-		index, err := buildFastaIndex(ctx, fastaPath)
+		index, err := buildFastaIndex(fastaPath)
 		if err != nil {
 			return nil, err
 		}
@@ -445,36 +375,27 @@ func (c *Client) cachedFastaIndex(ctx context.Context, fastaPath string) (map[st
 // detected capabilities. The returned slice contains program names like:
 //   - "blastn", "blastx", "tblastn", "blastp"
 func (c *Client) AvailableBlastPrograms(ctx context.Context, species model.SpeciesCandidate) []string {
-	progs, err := phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "list lemna blast programs",
-	}, func(runCtx context.Context) ([]string, error) {
-		if runCtx == nil {
-			runCtx = context.Background()
-		}
-		cap, err := c.DetectBlastCapabilities(runCtx, species)
-		if err != nil {
-			return nil, err
-		}
-
-		progs := make([]string, 0, 4)
-		if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
-			progs = append(progs, "blastn")
-		}
-		if cap.HasServerProteinDB || cap.HasProteinFasta {
-			progs = append(progs, "blastx")
-		}
-		if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
-			progs = append(progs, "tblastn")
-		}
-		if cap.HasServerProteinDB || cap.HasProteinFasta {
-			progs = append(progs, "blastp")
-		}
-		return progs, nil
-	})
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cap, err := c.DetectBlastCapabilities(ctx, species)
 	if err != nil {
+		// On error, return no programs so callers can handle the missing capability.
 		return nil
+	}
+
+	progs := make([]string, 0, 4)
+	if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
+		progs = append(progs, "blastn")
+	}
+	if cap.HasServerProteinDB || cap.HasProteinFasta {
+		progs = append(progs, "blastx")
+	}
+	if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
+		progs = append(progs, "tblastn")
+	}
+	if cap.HasServerProteinDB || cap.HasProteinFasta {
+		progs = append(progs, "blastp")
 	}
 	return progs
 }
@@ -485,26 +406,32 @@ func (c *Client) enrichServerBlastCapability(ctx context.Context, rel releaseInf
 		dbID    int
 		ok      bool
 	}
-	programs := []string{"blastn", "tblastn", "blastx", "blastp"}
-	results := make([]capabilityResult, len(programs))
-	spec := phygoboost.ParallelSpec{Level: phygoboost.ExecHeavy, Domain: "www.lemna.org", Workers: phygoboost.NetworkWorkers(len(programs)), Description: "inspect lemna blast capability"}
-	_ = phygoboost.ParallelForSpec(ctx, spec, len(programs), func(ctx context.Context, i int) error {
-		program := programs[i]
-		pageURL, err := blastFormURL(program)
-		if err != nil {
-			results[i] = capabilityResult{program: program}
-			return nil
-		}
-		body, err := c.fetchText(ctx, pageURL)
-		if err != nil || body == "" {
-			results[i] = capabilityResult{program: program}
-			return nil
-		}
-		dbID, ok := findBlastDBID(body, rel)
-		results[i] = capabilityResult{program: program, dbID: dbID, ok: ok}
-		return nil
-	})
-	for _, result := range results {
+	results := make(chan capabilityResult, 4)
+	var workers sync.WaitGroup
+	for _, program := range []string{"blastn", "tblastn", "blastx", "blastp"} {
+		program := program
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			pageURL, err := blastFormURL(program)
+			if err != nil {
+				results <- capabilityResult{program: program}
+				return
+			}
+			body, err := c.fetchText(ctx, pageURL)
+			if err != nil || body == "" {
+				results <- capabilityResult{program: program}
+				return
+			}
+			dbID, ok := findBlastDBID(body, rel)
+			results <- capabilityResult{program: program, dbID: dbID, ok: ok}
+		}()
+	}
+	go func() {
+		workers.Wait()
+		close(results)
+	}()
+	for result := range results {
 		if !result.ok {
 			continue
 		}
@@ -554,7 +481,7 @@ func normalizeBlastProgramName(program string) string {
 }
 
 func findBlastDBID(body string, rel releaseInfo) (int, bool) {
-	for _, option := range parseBlastDatasetOptions(body) {
+	for _, option := range parseBlastOptions(body) {
 		text := normalizeSearchLoose(option.Text)
 		if text == "" {
 			continue
@@ -567,10 +494,6 @@ func findBlastDBID(body string, rel releaseInfo) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-func hasBlastDatasetOptions(body string) bool {
-	return len(parseBlastDatasetOptions(body)) > 0
 }
 
 type blastOption struct {
@@ -599,15 +522,6 @@ func parseBlastOptions(body string) []blastOption {
 	return options
 }
 
-func parseBlastDatasetOptions(body string) []blastOption {
-	selectRe := regexp.MustCompile(`(?is)<select\b[^>]*\bname=["']?SELECT_DB["']?[^>]*>(.*?)</select>`)
-	match := selectRe.FindStringSubmatch(body)
-	if len(match) < 2 {
-		return nil
-	}
-	return parseBlastOptions(match[1])
-}
-
 func blastOptionMatchesRoot(optionText string, rootDir string) bool {
 	parts := strings.Split(rootDir, "_")
 	if len(parts) < 3 {
@@ -622,7 +536,7 @@ func blastOptionMatchesRoot(optionText string, rootDir string) bool {
 }
 
 func blastFormHasDB(body string, dbID int) bool {
-	for _, option := range parseBlastDatasetOptions(body) {
+	for _, option := range parseBlastOptions(body) {
 		if option.Value == dbID {
 			return true
 		}
@@ -684,131 +598,14 @@ func ensureFASTA(sequence string) string {
 	return ">query\n" + sequence + "\n"
 }
 
-func sanitizeFASTAForLemna(sequence string) string {
-	sequence = strings.ReplaceAll(sequence, "\r\n", "\n")
-	sequence = strings.ReplaceAll(sequence, "\r", "\n")
-	return ensureFASTA(sequence)
-}
-
 func extractBlastJobID(value string) string {
 	for _, pattern := range []string{
 		`(?i)job(?:\s|-)?id[:=\s]*([0-9a-zA-Z_-]+)`,
-		`(?i)/blast/(?:results|report|job)/([0-9a-zA-Z._~-]+)`,
+		`(?i)/blast/(?:results|report|job)/([0-9a-zA-Z_-]+)`,
 		`(?i)rid=([0-9a-zA-Z_-]+)`,
 	} {
 		if match := regexp.MustCompile(pattern).FindStringSubmatch(value); len(match) >= 2 {
 			return match[1]
-		}
-	}
-	return ""
-}
-
-func extractBlastReportURL(body string, requestURL string) string {
-	patterns := []string{
-		`(?is)href=["']([^"']*/blast/report/[^"']+)["']`,
-		`(?is)action=["']([^"']*/blast/report/[^"']+)["']`,
-		`(?i)(https?://[^"'\\s>]+/blast/report/[^"'\\s<]+)`,
-		`(?i)(/blast/report/[^"'\\s<]+)`,
-	}
-	for _, pattern := range patterns {
-		matches := regexp.MustCompile(pattern).FindAllStringSubmatch(body, -1)
-		for _, match := range matches {
-			if len(match) < 2 {
-				continue
-			}
-			candidate := strings.TrimSpace(html.UnescapeString(match[1]))
-			if candidate == "" {
-				continue
-			}
-			return resolveURL(requestURL, candidate)
-		}
-	}
-	return ""
-}
-
-func extractBlastPageMessage(body string) string {
-	messageRe := regexp.MustCompile(`(?is)<div[^>]*class=["'][^"']*messages(?:\s+[a-z]+)?[^"']*["'][^>]*>(.*?)</div>`)
-	match := messageRe.FindStringSubmatch(body)
-	if len(match) < 2 {
-		return ""
-	}
-	text := cleanText(stripHTMLTags(match[1]))
-	return strings.TrimSpace(text)
-}
-
-func stripHTMLTags(input string) string {
-	if strings.TrimSpace(input) == "" {
-		return ""
-	}
-	tagRe := regexp.MustCompile(`(?is)<[^>]+>`)
-	return html.UnescapeString(tagRe.ReplaceAllString(input, " "))
-}
-
-func isBlastPendingPage(body string) bool {
-	text := strings.ToLower(cleanText(stripHTMLTags(body)))
-	return strings.Contains(text, "blast job in queue") ||
-		strings.Contains(text, "blast job in progress") ||
-		strings.Contains(text, "your blast has been registered and will be started shortly") ||
-		strings.Contains(text, "your blast job is currently running") ||
-		strings.Contains(text, "this page will automatically refresh")
-}
-
-func isBlastCompletedPage(body string) bool {
-	lower := strings.ToLower(body)
-	if strings.Contains(lower, "tab-delimited") && strings.Contains(lower, "/blast/") {
-		return true
-	}
-	text := strings.ToLower(cleanText(stripHTMLTags(body)))
-	return strings.Contains(text, "resulting blast hits") ||
-		strings.Contains(text, "number of results") ||
-		strings.Contains(text, "submission date")
-}
-
-func lemnaReportURLForJob(jobID string) string {
-	jobID = strings.TrimSpace(jobID)
-	if jobID == "" {
-		return ""
-	}
-	return baseURL + "/blast/report/" + strings.TrimLeft(jobID, "/")
-}
-
-func extractBlastDownloadURL(body string, reportURL string, linkText string, suffix string) string {
-	linkText = strings.ToLower(strings.TrimSpace(linkText))
-	suffix = strings.ToLower(strings.TrimSpace(suffix))
-	linkRe := regexp.MustCompile(`(?is)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
-	matches := linkRe.FindAllStringSubmatch(body, -1)
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		href := strings.TrimSpace(html.UnescapeString(match[1]))
-		label := strings.ToLower(cleanText(stripHTMLTags(match[2])))
-		if href == "" {
-			continue
-		}
-		if linkText != "" && strings.Contains(label, linkText) {
-			return resolveURL(reportURL, href)
-		}
-		if suffix != "" && strings.HasSuffix(strings.ToLower(href), suffix) {
-			return resolveURL(reportURL, href)
-		}
-	}
-	return ""
-}
-
-func extractBlastTargetLabelFromReport(body string) string {
-	patterns := []string{
-		`(?is)<strong>\s*Search Target\s*</strong>\s*:\s*([^<]+)</div>`,
-		`(?is)Search Target\s*</strong>\s*:\s*([^<]+)<`,
-	}
-	for _, pattern := range patterns {
-		match := regexp.MustCompile(pattern).FindStringSubmatch(body)
-		if len(match) < 2 {
-			continue
-		}
-		label := strings.TrimSpace(cleanText(stripHTMLTags(match[1])))
-		if label != "" {
-			return label
 		}
 	}
 	return ""
@@ -837,7 +634,7 @@ var officialClones = []officialClone{
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = phygoboost.HTTPClient()
+		httpClient = perf.HTTPClient()
 	}
 	return &Client{
 		baseHTTP:               httpClient,
@@ -847,7 +644,6 @@ func NewClient(httpClient *http.Client) *Client {
 		fastaIndexCache:        make(map[string]map[string]fastaEntry),
 		proteinReleaseCache:    make(map[string]map[string]string),
 		proteinSequenceCache:   make(map[string]string),
-		keywordIndexCache:      make(map[string]lemnaKeywordIndex),
 		keywordRowsCache:       make(map[string][]model.KeywordResultRow),
 		blastCapabilitiesCache: make(map[string]BlastCapability),
 		localResultsCache:      make(map[string]model.BlastResult),
@@ -859,31 +655,7 @@ func (c *Client) Name() string {
 	return "lemna.org"
 }
 
-func (c *Client) keywordSearchEngine() *lemnakeyword.Engine {
-	c.mu.RLock()
-	engine := c.keywordEngine
-	c.mu.RUnlock()
-	if engine != nil {
-		return engine
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.keywordEngine == nil {
-		c.keywordEngine = lemnakeyword.New(c)
-	}
-	return c.keywordEngine
-}
-
 func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "fetch lemna species candidates",
-	}, c.fetchSpeciesCandidates)
-}
-
-func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
 	c.mu.RLock()
 	if len(c.speciesCandidates) > 0 {
 		cached := append([]model.SpeciesCandidate(nil), c.speciesCandidates...)
@@ -891,13 +663,6 @@ func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 		return cached, nil
 	}
 	c.mu.RUnlock()
-	if cached, ok := readCachedJSON[speciesCandidatesDisk]("species-candidates", "download"); ok && len(cached.Candidates) > 0 {
-		c.mu.Lock()
-		c.speciesCandidates = append([]model.SpeciesCandidate(nil), cached.Candidates...)
-		c.releasesByJBrowseName = cloneReleaseMap(cached.Releases)
-		c.mu.Unlock()
-		return append([]model.SpeciesCandidate(nil), cached.Candidates...), nil
-	}
 
 	value, err, _ := c.sf.Do("species-candidates", func() (any, error) {
 		c.mu.RLock()
@@ -907,34 +672,51 @@ func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 			return cached, nil
 		}
 		c.mu.RUnlock()
-		if cached, ok := readCachedJSON[speciesCandidatesDisk]("species-candidates", "download"); ok && len(cached.Candidates) > 0 {
-			c.mu.Lock()
-			c.speciesCandidates = append([]model.SpeciesCandidate(nil), cached.Candidates...)
-			c.releasesByJBrowseName = cloneReleaseMap(cached.Releases)
-			c.mu.Unlock()
-			return append([]model.SpeciesCandidate(nil), cached.Candidates...), nil
-		}
 
 		rootDirs, err := c.listDownloadDirs(ctx, downloadURL)
 		if err != nil {
 			return nil, err
 		}
 
+		rootJobs := make(chan downloadDir)
+		rootResults := make(chan speciesMetaResult, len(rootDirs))
+		workerCount := perf.NetworkWorkers(len(rootDirs))
+
+		var workers sync.WaitGroup
+		for range workerCount {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for root := range rootJobs {
+					result := c.inspectRootDownloadDir(ctx, root)
+					if result.ok {
+						rootResults <- result
+					}
+				}
+			}()
+		}
+
+		go func() {
+			for _, root := range rootDirs {
+				select {
+				case <-ctx.Done():
+					close(rootJobs)
+					workers.Wait()
+					close(rootResults)
+					return
+				case rootJobs <- root:
+				}
+			}
+			close(rootJobs)
+			workers.Wait()
+			close(rootResults)
+		}()
+
 		candidates := make([]model.SpeciesCandidate, 0, len(rootDirs))
 		releases := make(map[string]releaseInfo, len(rootDirs))
-		var resultsMu sync.Mutex
-		spec := phygoboost.ParallelSpec{Level: phygoboost.ExecHeavy, Domain: "www.lemna.org", Workers: phygoboost.NetworkWorkers(len(rootDirs)), Description: "inspect lemna species downloads"}
-		if err := phygoboost.ParallelForSpec(ctx, spec, len(rootDirs), func(ctx context.Context, i int) error {
-			result := c.inspectRootDownloadDir(ctx, rootDirs[i])
-			if result.ok {
-				resultsMu.Lock()
-				candidates = append(candidates, result.candidate)
-				releases[result.candidate.JBrowseName] = result.release
-				resultsMu.Unlock()
-			}
-			return nil
-		}); err != nil {
-			return nil, err
+		for result := range rootResults {
+			candidates = append(candidates, result.candidate)
+			releases[result.candidate.JBrowseName] = result.release
 		}
 
 		sort.Slice(candidates, func(i, j int) bool {
@@ -952,10 +734,6 @@ func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 		c.speciesCandidates = append([]model.SpeciesCandidate(nil), candidates...)
 		c.releasesByJBrowseName = releases
 		c.mu.Unlock()
-		writeCachedJSON("species-candidates", "download", speciesCandidatesDisk{
-			Candidates: append([]model.SpeciesCandidate(nil), candidates...),
-			Releases:   cloneReleaseMap(releases),
-		})
 
 		return append([]model.SpeciesCandidate(nil), candidates...), nil
 	})
@@ -963,14 +741,6 @@ func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 		return nil, err
 	}
 	return value.([]model.SpeciesCandidate), nil
-}
-
-func cloneReleaseMap(values map[string]releaseInfo) map[string]releaseInfo {
-	out := make(map[string]releaseInfo, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
 }
 
 func (c *Client) inspectRootDownloadDir(ctx context.Context, root downloadDir) speciesMetaResult {
@@ -1043,16 +813,6 @@ func FilterSpeciesCandidates(candidates []model.SpeciesCandidate, keyword string
 }
 
 func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "submit lemna blast",
-	}, func(runCtx context.Context) (model.BlastJob, error) {
-		return c.submitBlast(runCtx, req)
-	})
-}
-
-func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
 		prog := strings.TrimSpace(req.Program[len("local:"):])
 		req.Program = prog
@@ -1115,145 +875,17 @@ func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model
 // silently falling back to local BLAST. The TUI workflow owns the local fallback
 // decision so users can see and approve the transition explicitly.
 func (c *Client) SubmitBlastServerOnly(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "submit lemna blast server only",
-	}, func(runCtx context.Context) (model.BlastJob, error) {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
-			return model.BlastJob{}, fmt.Errorf("server-only BLAST cannot run local program %q", req.Program)
-		}
-		return c.submitBlastToServer(runCtx, req)
-	})
-}
-
-func (c *Client) newBlastSession() (*lemnaBlastSession, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create lemna session cookie jar: %w", err)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
+		return model.BlastJob{}, fmt.Errorf("server-only BLAST cannot run local program %q", req.Program)
 	}
-	client := *c.baseHTTP
-	client.Jar = jar
-	return &lemnaBlastSession{client: &client}, nil
-}
-
-func (s *lemnaBlastSession) do(req *http.Request) (*http.Response, error) {
-	if s == nil || s.client == nil {
-		return nil, fmt.Errorf("lemna blast session is not initialized")
-	}
-	return s.client.Do(req)
-}
-
-func setBlastAdvancedOptions(form url.Values, req model.BlastRequest, program string) {
-	if req.AlignmentsToShow > 0 {
-		form.Set("maxTarget", strconv.Itoa(req.AlignmentsToShow))
-	}
-	if strings.TrimSpace(req.EValue) != "" && req.EValue != "-1" {
-		form.Set("eVal", strings.TrimSpace(req.EValue))
-	}
-	if form.Get("eVal") == "" {
-		form.Set("eVal", "0.001")
-	}
-	wordLength := strings.TrimSpace(req.WordLength)
-	if wordLength != "" && !strings.EqualFold(wordLength, "default") {
-		form.Set("wordSize", wordLength)
-	}
-	switch program {
-	case "blastn":
-		matrixChoice := "0"
-		if strings.Contains(strings.ToUpper(strings.TrimSpace(req.ComparisonMatrix)), "4,-5") {
-			matrixChoice = "4"
-		}
-		form.Set("M&MScores", matrixChoice)
-	case "blastx", "blastp", "tblastn":
-		matrix := strings.TrimSpace(req.ComparisonMatrix)
-		if matrix == "" || strings.EqualFold(matrix, "default") {
-			matrix = "BLOSUM62"
-		}
-		form.Set("Matrix", matrix)
-	}
-}
-
-func buildMultipartBlastBody(form url.Values, fasta string) (*bytes.Buffer, string, error) {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	for key, values := range form {
-		for _, value := range values {
-			if err := writer.WriteField(key, value); err != nil {
-				return nil, "", fmt.Errorf("write multipart field %s: %w", key, err)
-			}
-		}
-	}
-	if err := writer.WriteField("UPLOAD[fid]", firstNonEmpty(form.Get("UPLOAD[fid]"), "0")); err != nil {
-		return nil, "", fmt.Errorf("write upload fid: %w", err)
-	}
-	if err := writer.WriteField("FASTA", fasta); err != nil {
-		return nil, "", fmt.Errorf("write FASTA field: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
-	}
-	return body, writer.FormDataContentType(), nil
-}
-
-func (c *Client) fetchBlastFormPage(ctx context.Context, session *lemnaBlastSession, pageURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("create server BLAST form request: %w", err)
-	}
-	req.Header.Set("User-Agent", "phytozome-go/lemna")
-	resp, err := session.do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch server BLAST form: %w", err)
-	}
-	defer phygoboost.DrainAndClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch server BLAST form: unexpected status %s", resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read server BLAST form: %w", err)
-	}
-	return string(body), nil
-}
-
-func (c *Client) submitMultipartBlastForm(ctx context.Context, session *lemnaBlastSession, pageURL string, form url.Values, fasta string) (string, string, error) {
-	body, contentType, err := buildMultipartBlastBody(form, fasta)
-	if err != nil {
-		return "", "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pageURL, body)
-	if err != nil {
-		return "", "", fmt.Errorf("create server submit request: %w", err)
-	}
-	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Referer", pageURL)
-	req.Header.Set("User-Agent", "phytozome-go/lemna")
-	resp, err := session.do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("submit to lemna.org failed: %w", err)
-	}
-	defer phygoboost.DrainAndClose(resp.Body)
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("lemna.org submit returned status %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", fmt.Errorf("read lemna.org submit response: %w", err)
-	}
-	finalURL := pageURL
-	if resp.Request != nil && resp.Request.URL != nil {
-		finalURL = resp.Request.URL.String()
-	}
-	return string(respBody), finalURL, nil
+	return c.submitBlastToServer(ctx, req)
 }
 
 // submitBlastToServer is a conservative, best-effort server submission helper.
-// It attempts to POST a BLAST job to the lemna.org Tripal BLAST endpoints using
-// the same multipart/session semantics as the public form. When the site returns
-// an immediate validation or transport failure, this method returns a descriptive
-// error so callers can fall back to local BLAST quickly instead of hanging.
+// It attempts to POST a nucleotide BLAST job to the lemna.org endpoints using the
+// detected ProteomeID. This implementation is intentionally defensive: if the
+// site's submission form or tokens are not available, it returns a descriptive
+// error so callers can fall back to local BLAST.
 func (c *Client) submitBlastToServer(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
 	if _, err := c.releaseForSpecies(ctx, req.Species); err != nil {
 		return model.BlastJob{}, fmt.Errorf("no release metadata for species: %w", err)
@@ -1274,185 +906,63 @@ func (c *Client) submitBlastToServer(ctx context.Context, req model.BlastRequest
 	if err != nil {
 		return model.BlastJob{}, err
 	}
-	session, err := c.newBlastSession()
+	pageBody, err := c.fetchText(ctx, pageURL)
 	if err != nil {
-		return model.BlastJob{}, err
-	}
-	pageBody, err := c.fetchBlastFormPage(ctx, session, pageURL)
-	if err != nil {
-		return model.BlastJob{}, err
-	}
-	if !hasBlastDatasetOptions(pageBody) {
-		return model.BlastJob{}, fmt.Errorf("lemna.org public %s BLAST form does not currently expose any selectable datasets", program)
+		return model.BlastJob{}, fmt.Errorf("fetch server BLAST form: %w", err)
 	}
 	if !blastFormHasDB(pageBody, dbID) {
 		return model.BlastJob{}, fmt.Errorf("lemna.org server form for %s does not expose DB id %d", program, dbID)
 	}
 
 	form := parseBlastFormDefaults(pageBody)
+	form.Set("FASTA", ensureFASTA(req.Sequence))
 	form.Set("SELECT_DB", strconv.Itoa(dbID))
+	form.Set("maxTarget", strconv.Itoa(req.AlignmentsToShow))
+	if strings.TrimSpace(req.EValue) != "" && req.EValue != "-1" {
+		form.Set("eVal", req.EValue)
+	}
+	if form.Get("eVal") == "" {
+		form.Set("eVal", "0.001")
+	}
 	form.Set("op", " BLAST ")
 	form.Set("blast_program", program)
-	setBlastAdvancedOptions(form, req, program)
 
-	respText, finalURL, err := c.submitMultipartBlastForm(ctx, session, pageURL, form, sanitizeFASTAForLemna(req.Sequence))
+	submitURL := pageURL
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", submitURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return model.BlastJob{}, err
+		return model.BlastJob{}, fmt.Errorf("create server submit request: %w", err)
 	}
-	if message := strings.TrimSpace(extractBlastPageMessage(respText)); message != "" {
-		return model.BlastJob{}, fmt.Errorf("lemna.org server BLAST rejected the request: %s", message)
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Referer", pageURL)
+	httpReq.Header.Set("User-Agent", "phytozome-go/lemna")
+	resp, err := c.baseHTTP.Do(httpReq)
+	if err != nil {
+		return model.BlastJob{}, fmt.Errorf("submit to lemna.org failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// If site returned a non-200, treat as failure for robust behavior.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return model.BlastJob{}, fmt.Errorf("lemna.org submit returned status %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	reportURL := extractBlastReportURL(respText, finalURL)
-	jobID := extractBlastJobID(finalURL)
-	if jobID == "" {
-		jobID = extractBlastJobID(reportURL)
-	}
-	if jobID == "" && reportURL != "" {
-		jobID = strings.TrimPrefix(reportURL, baseURL+"/blast/report/")
+	// Try to extract a job id or results URL from the response body.
+	bbody, _ := io.ReadAll(resp.Body)
+	respText := string(bbody)
+	jobID := extractBlastJobID(respText)
+	if jobID == "" && resp.Request != nil && resp.Request.URL != nil {
+		jobID = extractBlastJobID(resp.Request.URL.String())
 	}
 
-	if reportURL == "" && jobID != "" {
-		reportURL = lemnaReportURLForJob(jobID)
-	}
-	if reportURL == "" {
-		return model.BlastJob{}, fmt.Errorf("lemna.org server BLAST accepted the form but did not expose a report URL for follow-up")
-	}
 	if jobID == "" {
-		jobID = reportURL
+		return model.BlastJob{}, fmt.Errorf("could not parse server job id from lemna.org response")
 	}
-	message := "submitted to lemna.org BLAST server"
-	if isBlastPendingPage(respText) {
-		message = "lemna.org BLAST job submitted and queued"
-	}
-	return model.BlastJob{
-		JobID:   jobID,
-		Message: message,
-	}, nil
+
+	return model.BlastJob{}, fmt.Errorf("lemna.org accepted server job %s, but automated result retrieval is not implemented for this server response", jobID)
 }
 
 func (c *Client) WaitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "wait lemna blast results",
-	}, func(runCtx context.Context) (model.BlastResult, error) {
-		return c.waitForBlastResults(runCtx, jobID, pollInterval, timeout)
-	})
-}
-
-func (c *Client) fetchBlastReportPage(ctx context.Context, session *lemnaBlastSession, reportURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reportURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("create lemna blast report request: %w", err)
-	}
-	req.Header.Set("User-Agent", "phytozome-go/lemna")
-	resp, err := session.do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch lemna blast report: %w", err)
-	}
-	defer phygoboost.DrainAndClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch lemna blast report: unexpected status %s", resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read lemna blast report: %w", err)
-	}
-	return string(body), nil
-}
-
-func (c *Client) downloadBlastResultsTSV(ctx context.Context, session *lemnaBlastSession, resultsURL string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultsURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create lemna blast TSV request: %w", err)
-	}
-	req.Header.Set("User-Agent", "phytozome-go/lemna")
-	resp, err := session.do(req)
-	if err != nil {
-		return nil, fmt.Errorf("download lemna blast TSV: %w", err)
-	}
-	defer phygoboost.DrainAndClose(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download lemna blast TSV: unexpected status %s", resp.Status)
-	}
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read lemna blast TSV: %w", err)
-	}
-	return data, nil
-}
-
-func reportURLForJobID(jobID string) string {
-	jobID = strings.TrimSpace(jobID)
-	if jobID == "" {
-		return ""
-	}
-	if strings.HasPrefix(strings.ToLower(jobID), "http://") || strings.HasPrefix(strings.ToLower(jobID), "https://") {
-		return jobID
-	}
-	if strings.HasPrefix(jobID, "/blast/report/") {
-		return resolveURL(baseURL, jobID)
-	}
-	return lemnaReportURLForJob(jobID)
-}
-
-func (c *Client) releaseForTargetLabel(ctx context.Context, label string) (releaseInfo, error) {
-	label = normalizeSearchLoose(label)
-	if label == "" {
-		return releaseInfo{}, fmt.Errorf("empty lemna target label")
-	}
-	if _, err := c.FetchSpeciesCandidates(ctx); err != nil {
-		return releaseInfo{}, err
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, release := range c.releasesByJBrowseName {
-		candidates := []string{release.DisplayLabel, release.RootDir, release.ReleaseDir}
-		for _, candidate := range candidates {
-			if normalizeSearchLoose(candidate) == label {
-				return release, nil
-			}
-		}
-	}
-	for _, release := range c.releasesByJBrowseName {
-		candidates := []string{release.DisplayLabel, release.RootDir, release.ReleaseDir}
-		for _, candidate := range candidates {
-			cleaned := normalizeSearchLoose(candidate)
-			if cleaned != "" && (strings.Contains(cleaned, label) || strings.Contains(label, cleaned)) {
-				return release, nil
-			}
-		}
-	}
-	return releaseInfo{}, fmt.Errorf("no lemna release matched target label %q", label)
-}
-
-func parseServerBlastTSV(data []byte, release releaseInfo) ([]model.BlastResultRow, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	rows, err := parseBlastTabularBuffer(data, nil)
-	if err != nil {
-		return nil, err
-	}
-	for i := range rows {
-		if rows[i].Species == "" {
-			rows[i].Species = release.DisplayLabel
-		}
-		if rows[i].JBrowseName == "" {
-			rows[i].JBrowseName = release.RootDir
-		}
-		if rows[i].TargetID == 0 {
-			rows[i].TargetID = release.BlastNDBID
-		}
-		if rows[i].GeneReportURL == "" {
-			rows[i].GeneReportURL = release.ReleaseURL
-		}
-	}
-	return rows, nil
-}
-
-func (c *Client) waitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
 	// Support returning local-run results cached by LocalBlastRun/LocalBlastRunFull.
 	// For local jobs we search the cache directory for a cached TSV result and load it.
 	if strings.HasPrefix(jobID, "local-") || strings.HasPrefix(jobID, "local:") {
@@ -1475,91 +985,20 @@ func (c *Client) waitForBlastResults(ctx context.Context, jobID string, pollInte
 		return res, nil
 	}
 
-	reportURL := reportURLForJobID(jobID)
-	if reportURL == "" {
-		return model.BlastResult{}, fmt.Errorf("lemna.org BLAST report URL is empty for job %q", jobID)
-	}
-	if pollInterval <= 0 {
-		pollInterval = 3 * time.Second
-	}
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-	session, err := c.newBlastSession()
-	if err != nil {
-		return model.BlastResult{}, err
-	}
-	deadline := time.Now().Add(timeout)
-	for {
-		if err := ctx.Err(); err != nil {
-			return model.BlastResult{}, fmt.Errorf("wait for lemna blast results canceled: %w", err)
-		}
-		if time.Now().After(deadline) {
-			return model.BlastResult{}, fmt.Errorf("lemna.org BLAST report did not complete within %s", timeout)
-		}
-
-		pageBody, err := c.fetchBlastReportPage(ctx, session, reportURL)
-		if err != nil {
-			return model.BlastResult{}, err
-		}
-		if message := strings.TrimSpace(extractBlastPageMessage(pageBody)); message != "" {
-			lower := strings.ToLower(message)
-			if strings.Contains(lower, "cancelled") {
-				return model.BlastResult{}, fmt.Errorf("lemna.org BLAST job was cancelled: %s", message)
-			}
-			if strings.Contains(lower, "unable to load your blast results") {
-				return model.BlastResult{}, fmt.Errorf("lemna.org BLAST report failed: %s", message)
-			}
-		}
-		if isBlastPendingPage(pageBody) {
-			timer := time.NewTimer(pollInterval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return model.BlastResult{}, fmt.Errorf("wait for lemna blast results canceled: %w", ctx.Err())
-			case <-timer.C:
-			}
-			continue
-		}
-		if !isBlastCompletedPage(pageBody) {
-			return model.BlastResult{}, fmt.Errorf("lemna.org BLAST report page did not expose a completed result view")
-		}
-
-		tsvURL := extractBlastDownloadURL(pageBody, reportURL, "tab-delimited", ".tsv")
-		if tsvURL == "" {
-			return model.BlastResult{}, fmt.Errorf("lemna.org BLAST report did not expose a tab-delimited results download")
-		}
-		data, err := c.downloadBlastResultsTSV(ctx, session, tsvURL)
-		if err != nil {
-			return model.BlastResult{}, err
-		}
-		release, relErr := c.releaseForTargetLabel(ctx, extractBlastTargetLabelFromReport(pageBody))
-		if relErr != nil {
-			release = releaseInfo{DisplayLabel: "lemna.org", ReleaseURL: reportURL}
-		}
-		rows, err := parseServerBlastTSV(data, release)
-		if err != nil {
-			return model.BlastResult{}, fmt.Errorf("parse lemna server BLAST results: %w", err)
-		}
-		return model.BlastResult{
-			JobID:   jobID,
-			Message: "lemna.org BLAST result loaded from server report",
-			Rows:    rows,
-		}, nil
-	}
+	// Non-local jobs: server-side parsing not implemented yet.
+	return model.BlastResult{}, fmt.Errorf("lemna.org BLAST result parsing is not enabled yet")
 }
 
 // RunLocalBlast executes a local BLAST workflow using available FASTA downloads.
 // This dispatches to the LocalBlastRun helper defined in localblast.go which
 // performs download, makeblastdb, run blast+, and caches results to disk.
 func (c *Client) RunLocalBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		LocalSlots:  1,
-		Description: "run lemna local blast wrapper",
-	}, func(runCtx context.Context) (model.BlastJob, error) {
-		return LocalBlastRun(runCtx, c, req)
-	})
+	// Delegate to LocalBlastRun which implements the full local BLAST workflow.
+	job, err := LocalBlastRun(ctx, c, req)
+	if err != nil {
+		return model.BlastJob{}, err
+	}
+	return job, nil
 }
 
 // loadBlastResultFromCache searches the lemna cache tree for jobID.tsv and
@@ -1572,224 +1011,119 @@ func (c *Client) loadBlastResultFromCache(jobID string) (model.BlastResult, erro
 	if err != nil {
 		return model.BlastResult{}, err
 	}
-	found, err := findBlastResultCacheFile(cacheRoot, jobID)
-	if err != nil {
-		return model.BlastResult{}, err
-	}
+	var found string
+	// Walk cache tree to find jobID+".tsv"
+	_ = filepath.Walk(cacheRoot, func(pathStr string, info os.FileInfo, err error) error {
+		if err != nil {
+			// ignore and continue walking
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Name() == jobID+".tsv" {
+			found = pathStr
+			return fmt.Errorf("found") // short-circuit
+		}
+		return nil
+	})
 	if found == "" {
 		return model.BlastResult{}, fmt.Errorf("no cached result file for job %s", jobID)
 	}
 
+	// parse simple TSV saved by saveBlastResultToCache
 	f, err := os.Open(found)
 	if err != nil {
 		return model.BlastResult{}, fmt.Errorf("open cached result: %w", err)
 	}
 	defer f.Close()
 
-	return parseCachedBlastResultTSV(f, jobID)
-}
-
-func findBlastResultCacheFile(cacheRoot string, jobID string) (string, error) {
-	jobID = strings.TrimSpace(jobID)
-	if jobID == "" {
-		return "", fmt.Errorf("empty job id")
-	}
-	if found := findDirectBlastResultCacheFile(filepath.Join(cacheRoot, "localblast"), jobID); found != "" {
-		return found, nil
-	}
-	var found string
-	foundErr := errors.New("found cached BLAST result")
-	err := godirwalk.Walk(cacheRoot, &godirwalk.Options{
-		Unsorted: true,
-		Callback: func(pathStr string, entry *godirwalk.Dirent) error {
-			if entry == nil || entry.IsDir() {
-				return nil
-			}
-			if entry.Name() == jobID+".tsv" {
-				found = pathStr
-				return foundErr
-			}
-			return nil
-		},
-		ErrorCallback: func(string, error) godirwalk.ErrorAction {
-			return godirwalk.SkipNode
-		},
-	})
-	if err != nil && !errors.Is(err, foundErr) && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("walk lemna cache: %w", err)
-	}
-	return found, nil
-}
-
-func findDirectBlastResultCacheFile(localBlastRoot string, jobID string) string {
-	speciesDirs, err := os.ReadDir(localBlastRoot)
-	if err != nil {
-		return ""
-	}
-	fileName := jobID + ".tsv"
-	for _, speciesDir := range speciesDirs {
-		if !speciesDir.IsDir() {
-			continue
-		}
-		releaseRoot := filepath.Join(localBlastRoot, speciesDir.Name())
-		releaseDirs, err := os.ReadDir(releaseRoot)
-		if err != nil {
-			continue
-		}
-		for _, releaseDir := range releaseDirs {
-			if !releaseDir.IsDir() {
-				continue
-			}
-			candidate := filepath.Join(releaseRoot, releaseDir.Name(), fileName)
-			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
-				return candidate
-			}
-		}
-	}
-	return ""
-}
-
-func parseCachedBlastResultTSV(input io.Reader, jobID string) (model.BlastResult, error) {
-	reader := csv.NewReader(input)
-	reader.Comma = '\t'
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-
-	header, err := reader.Read()
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return model.BlastResult{
-				JobID:   jobID,
-				Message: "local BLAST result loaded from cache",
-				Rows:    []model.BlastResultRow{},
-			}, nil
-		}
-		return model.BlastResult{}, fmt.Errorf("read cached result header: %w", err)
-	}
+	scanner := bufio.NewScanner(f)
 	result := model.BlastResult{
 		JobID:   jobID,
 		Message: "local BLAST result loaded from cache",
 		Rows:    []model.BlastResultRow{},
 	}
-	if !tsvHeaderContains(header, "subject_id") {
-		decoder, err := csvutil.NewDecoder(reader, header...)
-		if err != nil {
-			return model.BlastResult{}, fmt.Errorf("open legacy cached result decoder: %w", err)
-		}
-		decoder.AlignRecord = true
-		for {
-			var record legacyLocalBlastCacheRecord
-			if err := decoder.Decode(&record); err != nil {
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				return model.BlastResult{}, fmt.Errorf("decode legacy cached result: %w", err)
-			}
-			if record.Hit == 0 && strings.TrimSpace(record.Protein) == "" {
-				continue
-			}
-			result.Rows = append(result.Rows, model.BlastResultRow{
-				SourceDatabase:  "lemna",
-				HitNumber:       record.Hit,
-				Protein:         record.Protein,
-				SubjectID:       record.Protein,
-				QueryID:         record.QueryID,
-				QueryFrom:       record.QueryFrom,
-				QueryTo:         record.QueryTo,
-				EValue:          record.EValue,
-				PercentIdentity: record.PercentIdentity,
-				AlignLength:     record.AlignLength,
-				Bitscore:        record.Bitscore,
-				Identical:       int(record.PercentIdentity * float64(record.AlignLength) / 100),
-			})
-		}
-		return result, nil
-	}
-
-	decoder, err := csvutil.NewDecoder(reader, header...)
-	if err != nil {
-		return model.BlastResult{}, fmt.Errorf("open cached result decoder: %w", err)
-	}
-	decoder.AlignRecord = true
-	for {
-		var record localBlastCacheRecord
-		if err := decoder.Decode(&record); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return model.BlastResult{}, fmt.Errorf("decode cached result: %w", err)
-		}
-		if record.Hit == 0 && strings.TrimSpace(record.Protein) == "" {
+	lineNo := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineNo++
+		// skip header line
+		if lineNo == 1 {
 			continue
 		}
-		subjectID := firstNonEmpty(record.SubjectID, record.Protein)
+		fields := strings.Split(line, "\t")
+		if len(fields) < 9 {
+			continue
+		}
+		hit, _ := strconv.Atoi(fields[0])
+		protein := fields[1]
+		subjectID := protein
+		qseqid := fields[2]
+		qstartField := 3
+		if len(fields) >= 21 {
+			subjectID = fields[2]
+			qseqid = fields[3]
+			qstartField = 4
+		}
+		qstart, _ := strconv.Atoi(fields[qstartField])
+		qend, _ := strconv.Atoi(fields[qstartField+1])
+		targetFrom, targetTo := 0, 0
+		evalueField := qstartField + 2
+		if len(fields) >= 21 {
+			targetFrom, _ = strconv.Atoi(fields[qstartField+2])
+			targetTo, _ = strconv.Atoi(fields[qstartField+3])
+			evalueField = qstartField + 4
+		}
+		evalue := fields[evalueField]
+		pident, _ := strconv.ParseFloat(fields[evalueField+1], 64)
+		alignLen, _ := strconv.Atoi(fields[evalueField+2])
+		mismatch, gapOpen := 0, 0
+		bitscoreField := evalueField + 3
+		if len(fields) >= 21 {
+			mismatch, _ = strconv.Atoi(fields[evalueField+3])
+			gapOpen, _ = strconv.Atoi(fields[evalueField+4])
+			bitscoreField = evalueField + 5
+		}
+		bitscore, _ := strconv.ParseFloat(fields[bitscoreField], 64)
+
 		row := model.BlastResultRow{
 			SourceDatabase:  "lemna",
-			HitNumber:       record.Hit,
-			Protein:         record.Protein,
+			HitNumber:       hit,
+			Protein:         protein,
 			SubjectID:       subjectID,
-			QueryID:         record.QueryID,
-			QueryFrom:       record.QueryFrom,
-			QueryTo:         record.QueryTo,
-			TargetFrom:      record.TargetFrom,
-			TargetTo:        record.TargetTo,
-			EValue:          record.EValue,
-			PercentIdentity: record.PercentIdentity,
-			AlignLength:     record.AlignLength,
-			Mismatches:      record.Mismatches,
-			GapOpenings:     record.GapOpenings,
-			Bitscore:        record.Bitscore,
-			Identical:       int(record.PercentIdentity * float64(record.AlignLength) / 100),
-			Gaps:            record.GapOpenings,
-			TargetLength:    record.TargetLength,
-			SequenceID:      record.SequenceID,
-			TranscriptID:    record.TranscriptID,
-			TargetID:        record.TargetID,
-			JBrowseName:     record.JBrowseName,
-			GeneReportURL:   record.GeneReportURL,
-			Defline:         record.Defline,
+			QueryID:         qseqid,
+			QueryFrom:       qstart,
+			QueryTo:         qend,
+			TargetFrom:      targetFrom,
+			TargetTo:        targetTo,
+			EValue:          evalue,
+			PercentIdentity: pident,
+			AlignLength:     alignLen,
+			Mismatches:      mismatch,
+			GapOpenings:     gapOpen,
+			Bitscore:        bitscore,
+			Identical:       int(pident * float64(alignLen) / 100),
+			Gaps:            gapOpen,
+		}
+		if len(fields) >= 21 {
+			row.TargetLength, _ = strconv.Atoi(fields[bitscoreField+1])
+			row.SequenceID = fields[bitscoreField+2]
+			row.TranscriptID = fields[bitscoreField+3]
+			row.TargetID, _ = strconv.Atoi(fields[bitscoreField+4])
+			row.JBrowseName = fields[bitscoreField+5]
+			row.GeneReportURL = fields[bitscoreField+6]
+			row.Defline = fields[bitscoreField+7]
 		}
 		result.Rows = append(result.Rows, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return model.BlastResult{}, fmt.Errorf("scan cached result: %w", err)
 	}
 	return result, nil
 }
 
-type legacyLocalBlastCacheRecord struct {
-	Hit             int     `csv:"hit"`
-	Protein         string  `csv:"protein"`
-	QueryID         string  `csv:"qseqid"`
-	QueryFrom       int     `csv:"qstart"`
-	QueryTo         int     `csv:"qend"`
-	EValue          string  `csv:"evalue"`
-	PercentIdentity float64 `csv:"pident"`
-	AlignLength     int     `csv:"align_len"`
-	Bitscore        float64 `csv:"bitscore"`
-}
-
-func tsvHeaderContains(header []string, name string) bool {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return false
-	}
-	for _, value := range header {
-		if strings.EqualFold(strings.TrimSpace(value), name) {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "fetch lemna gene query sequence",
-	}, func(runCtx context.Context) (*model.QuerySequenceSource, error) {
-		return c.fetchGeneQuerySequence(runCtx, species, reportType, identifier)
-	})
-}
-
-func (c *Client) fetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	rows, err := c.SearchKeywordRows(ctx, species, identifier)
 	if err != nil {
 		return nil, err
@@ -1818,16 +1152,6 @@ func (c *Client) fetchGeneQuerySequence(ctx context.Context, species model.Speci
 }
 
 func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "fetch lemna uniprot accessions",
-	}, func(runCtx context.Context) ([]string, error) {
-		return c.fetchUniProtAccessions(runCtx, targetID, proteinID)
-	})
-}
-
-func (c *Client) fetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
 	proteinID = strings.TrimSpace(proteinID)
 	if proteinID == "" {
 		return nil, nil
@@ -1882,98 +1206,38 @@ func (c *Client) fetchUniProtAccessions(ctx context.Context, targetID int, prote
 }
 
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.keywordSearchEngine().SearchKeywordRows(runCtx, species, keyword)
-	})
-}
-
-func (c *Client) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows wide",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.keywordSearchEngine().SearchKeywordRowsWide(runCtx, species, keyword)
-	})
-}
-
-func (c *Client) SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows broad",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.keywordSearchEngine().SearchKeywordRowsBroad(runCtx, species, keyword)
-	})
-}
-
-func (c *Client) SearchKeywordRowsEngine(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows engine",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.searchKeywordRowsWithProgram(runCtx, species, keyword, c.selectKeywordProgram(keyword), true, "normal")
-	})
-}
-
-func (c *Client) SearchKeywordRowsWideEngine(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows wide engine",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.searchKeywordRowsWithProgram(runCtx, species, keyword, lemnaWideKeywordProgram{}, false, "forced-wide")
-	})
-}
-
-func (c *Client) SearchKeywordRowsBroadEngine(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "search lemna keyword rows broad engine",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.searchKeywordRowsWithProgram(runCtx, species, keyword, lemnaBroadKeywordProgram{}, false, "forced-broad")
-	})
-}
-
-func (c *Client) searchKeywordRowsWithProgram(ctx context.Context, species model.SpeciesCandidate, keyword string, program lemnaKeywordProgram, allowWideFallback bool, mode string) ([]model.KeywordResultRow, error) {
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
 		return nil, nil
 	}
-	cacheKey := c.keywordRowsCacheKey(species, keyword, program.Name(), mode)
+	cacheKey := species.JBrowseName + "|" + strings.ToLower(keyword)
 	c.mu.RLock()
-	if cached, ok := c.keywordRowsCache[cacheKey]; ok && len(cached) > 0 {
-		rows := cloneKeywordRows(cached)
+	if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+		rows := append([]model.KeywordResultRow(nil), cached...)
 		c.mu.RUnlock()
 		return rows, nil
 	}
 	c.mu.RUnlock()
-	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok && len(cached) > 0 {
-		rows := cloneKeywordRows(cached)
+	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+		rows := append([]model.KeywordResultRow(nil), cached...)
 		c.mu.Lock()
-		c.keywordRowsCache[cacheKey] = cloneKeywordRows(cached)
+		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
 		c.mu.Unlock()
 		return rows, nil
 	}
 
 	value, err, _ := c.sf.Do("keyword-rows:"+cacheKey, func() (any, error) {
 		c.mu.RLock()
-		if cached, ok := c.keywordRowsCache[cacheKey]; ok && len(cached) > 0 {
-			rows := cloneKeywordRows(cached)
+		if cached, ok := c.keywordRowsCache[cacheKey]; ok {
+			rows := append([]model.KeywordResultRow(nil), cached...)
 			c.mu.RUnlock()
 			return rows, nil
 		}
 		c.mu.RUnlock()
-		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok && len(cached) > 0 {
-			rows := cloneKeywordRows(cached)
+		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
+			rows := append([]model.KeywordResultRow(nil), cached...)
 			c.mu.Lock()
-			c.keywordRowsCache[cacheKey] = cloneKeywordRows(cached)
+			c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
 			c.mu.Unlock()
 			return rows, nil
 		}
@@ -1985,599 +1249,24 @@ func (c *Client) searchKeywordRowsWithProgram(ctx context.Context, species model
 		if release.GFFURL == "" {
 			return nil, fmt.Errorf("no GFF3 file found for %s", species.DisplayLabel())
 		}
-		index, err := c.cachedKeywordIndex(ctx, release, species)
+
+		rows, err := c.searchGFFRows(ctx, release, species, keyword, 200)
 		if err != nil {
 			return nil, err
 		}
-		rows, err := program.Search(ctx, c, index, species, release, keyword, 200)
-		if err != nil {
-			return nil, err
-		}
-		searchType := program.Name()
-		if len(rows) == 0 && allowWideFallback && program.Name() != lemnaSearchTypeWide {
-			wide := lemnaWideKeywordProgram{}
-			rows, err = wide.Search(ctx, c, index, species, release, keyword, 200)
-			if err != nil {
-				return nil, err
-			}
-			if len(rows) > 0 {
-				searchType = program.Name() + " (fallback to wide search)"
-			}
-		}
-		rows = finalizeKeywordRows(rows, keyword, searchType)
-		if len(rows) > 0 {
-			c.mu.Lock()
-			c.keywordRowsCache[cacheKey] = cloneKeywordRows(rows)
-			c.mu.Unlock()
-			writeCachedJSON("keyword-rows", cacheKey, rows)
-		}
-		return rows, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return cloneKeywordRows(value.([]model.KeywordResultRow)), nil
-}
-
-func (c *Client) keywordRowsCacheKey(species model.SpeciesCandidate, keyword string, program string, mode string) string {
-	if legacy := legacyKeywordRowsCacheKey(species, keyword, program, mode); legacy != "" {
-		return legacy
-	}
-	return strings.Join([]string{
-		strings.TrimSpace(species.JBrowseName),
-		strconv.Itoa(species.ProteomeID),
-		strings.ToLower(strings.TrimSpace(keyword)),
-		program,
-		mode,
-	}, "|")
-}
-
-func legacyKeywordRowsCacheKey(species model.SpeciesCandidate, keyword string, program string, mode string) string {
-	if program == lemnaSearchTypeKeyword && mode == "normal" {
-		return species.JBrowseName + "|" + strings.ToLower(strings.TrimSpace(keyword))
-	}
-	return ""
-}
-
-func (c *Client) selectKeywordProgram(term string) lemnaKeywordProgram {
-	programs := []lemnaKeywordProgram{
-		lemnaReportURLProgram{},
-		lemnaRiceLocusProgram{},
-		lemnaRefSeqProteinProgram{},
-		lemnaCytochromeFamilyProgram{},
-		lemnaRiceAliasProgram{},
-		lemnaIdentifierProgram{},
-		lemnaKeywordProgramDefault{},
-	}
-	for _, program := range programs {
-		if program.Match(term) {
-			return program
-		}
-	}
-	return lemnaKeywordProgramDefault{}
-}
-
-func (c *Client) cachedKeywordIndex(ctx context.Context, release releaseInfo, species model.SpeciesCandidate) (lemnaKeywordIndex, error) {
-	cacheKey := keywordIndexCacheKey(release, species)
-	c.mu.RLock()
-	if cached, ok := c.keywordIndexCache[cacheKey]; ok && len(cached.Rows) > 0 {
-		c.mu.RUnlock()
-		return cached, nil
-	}
-	c.mu.RUnlock()
-	if cached, ok := readCachedJSON[lemnaKeywordIndex]("keyword-index", cacheKey); ok && len(cached.Rows) > 0 {
 		c.mu.Lock()
-		if c.keywordIndexCache == nil {
-			c.keywordIndexCache = make(map[string]lemnaKeywordIndex)
-		}
-		c.keywordIndexCache[cacheKey] = cached
+		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
 		c.mu.Unlock()
-		return cached, nil
-	}
-
-	value, err, _ := c.sf.Do("keyword-index:"+cacheKey, func() (any, error) {
-		c.mu.RLock()
-		if cached, ok := c.keywordIndexCache[cacheKey]; ok && len(cached.Rows) > 0 {
-			c.mu.RUnlock()
-			return cached, nil
-		}
-		c.mu.RUnlock()
-		if cached, ok := readCachedJSON[lemnaKeywordIndex]("keyword-index", cacheKey); ok && len(cached.Rows) > 0 {
-			c.mu.Lock()
-			if c.keywordIndexCache == nil {
-				c.keywordIndexCache = make(map[string]lemnaKeywordIndex)
-			}
-			c.keywordIndexCache[cacheKey] = cached
-			c.mu.Unlock()
-			return cached, nil
-		}
-		index, err := c.buildKeywordIndex(ctx, release, species)
-		if err != nil {
-			return lemnaKeywordIndex{}, err
-		}
-		if len(index.Rows) > 0 {
-			c.mu.Lock()
-			if c.keywordIndexCache == nil {
-				c.keywordIndexCache = make(map[string]lemnaKeywordIndex)
-			}
-			c.keywordIndexCache[cacheKey] = index
-			c.mu.Unlock()
-			writeCachedJSON("keyword-index", cacheKey, index)
-		}
-		return index, nil
+		writeCachedJSON("keyword-rows", cacheKey, rows)
+		return rows, nil
 	})
-	if err != nil {
-		return lemnaKeywordIndex{}, err
-	}
-	return value.(lemnaKeywordIndex), nil
-}
-
-func (c *Client) buildKeywordIndex(ctx context.Context, release releaseInfo, species model.SpeciesCandidate) (lemnaKeywordIndex, error) {
-	rows, err := c.loadKeywordRowsForRelease(ctx, release, species)
-	if err != nil {
-		return lemnaKeywordIndex{}, err
-	}
-	index := lemnaKeywordIndex{
-		Release:          release,
-		Species:          species,
-		Rows:             rows,
-		ByIdentifier:     make(map[string][]int),
-		BySearchToken:    make(map[string][]int),
-		ByNormalizedText: make(map[string][]int),
-	}
-	for i := range index.Rows {
-		row := index.Rows[i]
-		for _, id := range keywordRowIdentifiers(row) {
-			for _, candidate := range normalizedIdentifierCandidates(id) {
-				addKeywordIndexHit(index.ByIdentifier, normalizeIdentifierKey(candidate), i)
-			}
-		}
-		for _, token := range keywordRowSearchTokens(row) {
-			addKeywordIndexHit(index.BySearchToken, normalizeIdentifierKey(token), i)
-		}
-		loose := normalizeSearchLoose(keywordRowSearchText(row))
-		tight := normalizeSearchTight(keywordRowSearchText(row))
-		for _, token := range strings.Fields(loose) {
-			addKeywordIndexHit(index.ByNormalizedText, token, i)
-		}
-		if tight != "" {
-			addKeywordIndexHit(index.ByNormalizedText, tight, i)
-		}
-	}
-	return index, nil
-}
-
-func (c *Client) loadKeywordRowsForRelease(ctx context.Context, release releaseInfo, species model.SpeciesCandidate) ([]model.KeywordResultRow, error) {
-	reader, closeFn, err := c.openMaybeGzip(ctx, release.GFFURL)
 	if err != nil {
 		return nil, err
 	}
-	defer closeFn()
-
-	rows := make([]model.KeywordResultRow, 0, 4096)
-	rowByTranscript := make(map[string]int)
-	rowByGene := make(map[string]int)
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		gff, ok := parseGFF3Line(line)
-		if !ok || !isSearchableFeatureType(gff.Type) {
-			continue
-		}
-		row := buildKeywordRowFromGFF(species, release, "", gff)
-		if addIndexedKeywordRow(&rows, rowByTranscript, rowByGene, row) {
-			continue
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan GFF3 %s: %w", release.GFFURL, err)
-	}
-
-	ahrd, err := c.loadAHRDRecords(ctx, release)
-	if err == nil && len(ahrd) > 0 {
-		for transcriptID, record := range ahrd {
-			idx, ok := findKeywordRowIndexForAHRD(rowByTranscript, rowByGene, transcriptID)
-			if !ok {
-				row := keywordRowFromAHRD(species, release, "", transcriptID, record)
-				addIndexedKeywordRow(&rows, rowByTranscript, rowByGene, row)
-				continue
-			}
-			enrichKeywordRowWithAHRD(&rows[idx], "", record)
-		}
-	}
-	return rows, nil
-}
-
-func keywordIndexCacheKey(release releaseInfo, species model.SpeciesCandidate) string {
-	return strings.Join([]string{
-		strings.TrimSpace(species.JBrowseName),
-		strconv.Itoa(species.ProteomeID),
-		strings.TrimSpace(release.ReleaseDir),
-		strings.TrimSpace(release.GFFURL),
-		strings.TrimSpace(release.AHRDURL),
-	}, "|")
-}
-
-func addKeywordIndexHit(index map[string][]int, key string, rowIndex int) {
-	key = strings.TrimSpace(strings.ToLower(key))
-	if key == "" {
-		return
-	}
-	hits := index[key]
-	if len(hits) > 0 && hits[len(hits)-1] == rowIndex {
-		return
-	}
-	index[key] = append(hits, rowIndex)
-}
-
-func addIndexedKeywordRow(rows *[]model.KeywordResultRow, rowByTranscript map[string]int, rowByGene map[string]int, row model.KeywordResultRow) bool {
-	key := firstNonEmpty(row.TranscriptID, row.GeneIdentifier, row.SequenceID, row.Location)
-	if key != "" {
-		for _, candidate := range normalizedIdentifierCandidates(key) {
-			if idx, ok := rowByTranscript[normalizeIdentifierKey(candidate)]; ok {
-				mergeKeywordRow(&(*rows)[idx], row)
-				return false
-			}
-			if idx, ok := rowByGene[normalizeIdentifierKey(candidate)]; ok {
-				mergeKeywordRow(&(*rows)[idx], row)
-				return false
-			}
-		}
-	}
-	idx := len(*rows)
-	*rows = append(*rows, row)
-	for _, id := range []string{row.TranscriptID, row.SequenceID, row.ProteinID} {
-		for _, candidate := range normalizedIdentifierCandidates(id) {
-			rowByTranscript[normalizeIdentifierKey(candidate)] = idx
-		}
-	}
-	for _, id := range []string{row.GeneIdentifier, stripTranscriptSuffix(row.TranscriptID)} {
-		for _, candidate := range normalizedIdentifierCandidates(id) {
-			rowByGene[normalizeIdentifierKey(candidate)] = idx
-		}
-	}
-	return true
-}
-
-func findKeywordRowIndexForAHRD(rowByTranscript map[string]int, rowByGene map[string]int, transcriptID string) (int, bool) {
-	for _, candidate := range normalizedIdentifierCandidates(transcriptID) {
-		if idx, ok := rowByTranscript[normalizeIdentifierKey(candidate)]; ok {
-			return idx, true
-		}
-	}
-	for _, candidate := range normalizedIdentifierCandidates(stripTranscriptSuffix(transcriptID)) {
-		if idx, ok := rowByGene[normalizeIdentifierKey(candidate)]; ok {
-			return idx, true
-		}
-	}
-	return 0, false
-}
-
-func mergeKeywordRow(dst *model.KeywordResultRow, src model.KeywordResultRow) {
-	if dst == nil {
-		return
-	}
-	dst.LabelName = firstNonEmpty(dst.LabelName, src.LabelName)
-	dst.ProteinID = firstNonEmpty(dst.ProteinID, src.ProteinID)
-	dst.TranscriptID = firstNonEmpty(dst.TranscriptID, src.TranscriptID)
-	dst.GeneIdentifier = firstNonEmpty(dst.GeneIdentifier, src.GeneIdentifier)
-	dst.Genome = firstNonEmpty(dst.Genome, src.Genome)
-	dst.Location = firstNonEmpty(dst.Location, src.Location)
-	dst.Aliases = mergeDelimitedValues(dst.Aliases, src.Aliases)
-	dst.UniProt = mergeDelimitedValues(dst.UniProt, src.UniProt)
-	dst.Description = firstNonEmpty(dst.Description, src.Description)
-	dst.Comments = mergeDelimitedValues(dst.Comments, src.Comments)
-	dst.AutoDefine = firstNonEmpty(dst.AutoDefine, src.AutoDefine)
-	dst.GeneReportURL = firstNonEmpty(dst.GeneReportURL, src.GeneReportURL)
-	dst.SequenceHeaderLabel = firstNonEmpty(dst.SequenceHeaderLabel, src.SequenceHeaderLabel)
-	dst.SequenceID = firstNonEmpty(dst.SequenceID, src.SequenceID)
-	if src.ExtraColumns != nil {
-		dst.ExtraColumns = ensureExtraColumns(dst.ExtraColumns)
-		for k, v := range src.ExtraColumns {
-			if _, ok := dst.ExtraColumns[k]; !ok || strings.TrimSpace(dst.ExtraColumns[k]) == "" {
-				dst.ExtraColumns[k] = v
-			}
-		}
-	}
-}
-
-func keywordRowFromAHRD(species model.SpeciesCandidate, release releaseInfo, searchTerm string, transcriptID string, record ahrdRecord) model.KeywordResultRow {
-	row := model.KeywordResultRow{
-		SourceDatabase:      "lemna",
-		SearchTerm:          searchTerm,
-		LabelName:           keywordShortLabelFromAHRD(searchTerm, record),
-		ProteinID:           record.ProteinAccession,
-		TranscriptID:        transcriptID,
-		GeneIdentifier:      stripTranscriptSuffix(transcriptID),
-		Genome:              species.DisplayLabel(),
-		Description:         record.HumanReadableDescription,
-		SequenceHeaderLabel: species.DisplayLabel(),
-		SequenceID:          firstNonEmpty(record.ProteinAccession, transcriptID),
-		GeneReportURL:       lemnaGeneReportURL(release.RootDir, stripTranscriptSuffix(transcriptID)),
-	}
-	enrichKeywordRowWithAHRD(&row, searchTerm, record)
-	return row
-}
-
-func enrichKeywordRowWithAHRD(row *model.KeywordResultRow, searchTerm string, record ahrdRecord) {
-	if row == nil {
-		return
-	}
-	row.LabelName = firstNonEmpty(row.LabelName, keywordShortLabelFromAHRD(searchTerm, record))
-	row.ProteinID = firstNonEmpty(row.ProteinID, record.ProteinAccession)
-	row.Description = firstNonEmpty(row.Description, record.HumanReadableDescription)
-	row.UniProt = mergeDelimitedValues(row.UniProt, uniprotAccessionFromAHRD(record))
-	row.ExtraColumns = ensureExtraColumns(row.ExtraColumns)
-	row.ExtraColumns["ahrd_protein_accession"] = record.ProteinAccession
-	row.ExtraColumns["ahrd_blast_hit_accession"] = record.BlastHitAccession
-	row.ExtraColumns["ahrd_quality_code"] = record.QualityCode
-	row.ExtraColumns["ahrd_human_readable_description"] = record.HumanReadableDescription
-	row.ExtraColumns["ahrd_interpro"] = record.Interpro
-	row.ExtraColumns["ahrd_gene_ontology_term"] = record.GeneOntologyTerm
-}
-
-func (lemnaReportURLProgram) Name() string { return lemnaSearchTypeReportURL }
-func (lemnaReportURLProgram) Match(term string) bool {
-	_, _, ok := lemnaReportKeyword(term)
-	return ok
-}
-func (lemnaReportURLProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	_, identifier, ok := lemnaReportKeyword(term)
-	if !ok {
-		return nil, nil
-	}
-	return searchKeywordIndexIdentifiers(index, []string{identifier}, limit), nil
-}
-
-func (lemnaIdentifierProgram) Name() string { return lemnaSearchTypeIdentifier }
-func (lemnaIdentifierProgram) Match(term string) bool {
-	return looksLikeSpecificKeywordIdentifier(term)
-}
-func (lemnaIdentifierProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	return searchKeywordIndexIdentifiers(index, specificKeywordIdentifierVariants(term), limit), nil
-}
-
-func (lemnaRiceLocusProgram) Name() string { return lemnaSearchTypeRiceLocus }
-func (lemnaRiceLocusProgram) Match(term string) bool {
-	return riceLocusPattern.MatchString(normalizeRiceLocusCandidate(term))
-}
-func (lemnaRiceLocusProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	return searchKeywordIndexAliases(index, riceLocusVariants(term), term, limit), nil
-}
-
-func (lemnaRefSeqProteinProgram) Name() string { return lemnaSearchTypeRefSeqProtein }
-func (lemnaRefSeqProteinProgram) Match(term string) bool {
-	return refSeqProteinPattern.MatchString(strings.TrimSpace(term))
-}
-func (lemnaRefSeqProteinProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	if aliases := aliasesForNormalizedTerm(curatedRiceRefSeqAliasMap(), term); len(aliases) > 0 {
-		if rows := searchKeywordIndexAliases(index, aliases, term, limit); len(rows) > 0 {
-			return rows, nil
-		}
-	}
-	return searchKeywordIndexIdentifiers(index, specificKeywordIdentifierVariants(term), limit), nil
-}
-
-func (lemnaRiceAliasProgram) Name() string { return lemnaSearchTypeRiceGeneAlias }
-func (lemnaRiceAliasProgram) Match(term string) bool {
-	return len(aliasesForNormalizedTerm(curatedRiceAliasMap(), term)) > 0 || osC4HLike(term)
-}
-func (lemnaRiceAliasProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	aliases := aliasesForNormalizedTerm(curatedRiceAliasMap(), term)
-	if len(aliases) == 0 {
-		aliases = []string{term}
-	}
-	return searchKeywordIndexAliases(index, aliases, term, limit), nil
-}
-
-func (lemnaCytochromeFamilyProgram) Name() string { return lemnaSearchTypeCytochromeFamily }
-func (lemnaCytochromeFamilyProgram) Match(term string) bool {
-	return cytochromeP450Pattern.MatchString(strings.TrimSpace(term))
-}
-func (lemnaCytochromeFamilyProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	queries := []string{term, strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(term)), "P")}
-	if aliases := aliasesForNormalizedTerm(curatedRiceAliasMap(), term); len(aliases) > 0 {
-		queries = append(aliases, queries...)
-	}
-	return searchKeywordIndexAliases(index, queries, term, limit), nil
-}
-
-func (lemnaKeywordProgramDefault) Name() string { return lemnaSearchTypeKeyword }
-func (lemnaKeywordProgramDefault) Match(term string) bool {
-	return strings.TrimSpace(term) != ""
-}
-func (lemnaKeywordProgramDefault) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	return searchKeywordIndexTerms(index, keywordTerms(term), false, limit), nil
-}
-
-func (lemnaWideKeywordProgram) Name() string { return lemnaSearchTypeWide }
-func (lemnaWideKeywordProgram) Match(term string) bool {
-	return strings.TrimSpace(term) != ""
-}
-func (lemnaWideKeywordProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	seen := make(map[string]struct{})
-	rows := make([]model.KeywordResultRow, 0, 16)
-	add := func(found []model.KeywordResultRow) {
-		for _, row := range found {
-			if addKeywordRow(&rows, seen, row, limit) {
-				return
-			}
-		}
-	}
-	for _, aliases := range [][]string{
-		aliasesForNormalizedTerm(curatedRiceAliasMap(), term),
-		aliasesForNormalizedTerm(curatedRiceRefSeqAliasMap(), term),
-		riceLocusVariants(term),
-		specificKeywordIdentifierVariants(term),
-	} {
-		if len(aliases) == 0 {
-			continue
-		}
-		add(searchKeywordIndexAliases(index, aliases, term, limit))
-		if len(rows) > 0 {
-			return rows, nil
-		}
-	}
-	add(searchKeywordIndexTerms(index, keywordTerms(wideKeywordQuery(term)), true, limit))
-	if len(rows) > 0 {
-		return rows, nil
-	}
-	for _, query := range relaxedKeywordQueries(term) {
-		add(searchKeywordIndexTerms(index, keywordTerms(query), true, limit))
-		if len(rows) > 0 {
-			return rows, nil
-		}
-	}
-	return rows, nil
-}
-
-func (lemnaBroadKeywordProgram) Name() string { return lemnaSearchTypeBroad }
-func (lemnaBroadKeywordProgram) Match(term string) bool {
-	return strings.TrimSpace(term) != ""
-}
-func (lemnaBroadKeywordProgram) Search(ctx context.Context, c *Client, index lemnaKeywordIndex, species model.SpeciesCandidate, release releaseInfo, term string, limit int) ([]model.KeywordResultRow, error) {
-	if limit <= 0 {
-		limit = 10000
-	}
-	wideRows, err := (lemnaWideKeywordProgram{}).Search(ctx, c, index, species, release, term, limit)
-	if err != nil || len(wideRows) > 0 {
-		return wideRows, err
-	}
-	return searchKeywordIndexTerms(index, keywordTerms(term), true, limit), nil
-}
-
-func searchKeywordIndexIdentifiers(index lemnaKeywordIndex, identifiers []string, limit int) []model.KeywordResultRow {
-	seen := make(map[string]struct{})
-	rows := make([]model.KeywordResultRow, 0, len(identifiers))
-	for _, identifier := range identifiers {
-		for _, candidate := range normalizedIdentifierCandidates(identifier) {
-			for _, rowIndex := range index.ByIdentifier[normalizeIdentifierKey(candidate)] {
-				if rowIndex < 0 || rowIndex >= len(index.Rows) {
-					continue
-				}
-				if addKeywordRow(&rows, seen, index.Rows[rowIndex], limit) {
-					return rows
-				}
-			}
-		}
-	}
-	return rows
-}
-
-func searchKeywordIndexAliases(index lemnaKeywordIndex, aliases []string, term string, limit int) []model.KeywordResultRow {
-	if len(aliases) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	rows := make([]model.KeywordResultRow, 0, len(aliases))
-	for _, alias := range aliases {
-		for _, row := range searchKeywordIndexIdentifiers(index, []string{alias}, limit) {
-			if addKeywordRow(&rows, seen, row, limit) {
-				return rows
-			}
-		}
-		if len(rows) > 0 {
-			continue
-		}
-		for _, row := range searchKeywordIndexTerms(index, keywordTerms(alias), true, limit) {
-			if addKeywordRow(&rows, seen, row, limit) {
-				return rows
-			}
-		}
-	}
-	return rows
-}
-
-func searchKeywordIndexTerms(index lemnaKeywordIndex, terms []string, loose bool, limit int) []model.KeywordResultRow {
-	terms = normalizeKeywordTerms(terms)
-	if len(terms) == 0 {
-		return nil
-	}
-	candidateCounts := make(map[int]int)
-	for _, term := range terms {
-		keys := []string{normalizeSearchLoose(term), normalizeSearchTight(term), normalizeIdentifierKey(term)}
-		seenForTerm := make(map[int]struct{})
-		for _, key := range keys {
-			if key == "" {
-				continue
-			}
-			for _, rowIndex := range index.BySearchToken[key] {
-				seenForTerm[rowIndex] = struct{}{}
-			}
-			for _, rowIndex := range index.ByNormalizedText[key] {
-				seenForTerm[rowIndex] = struct{}{}
-			}
-		}
-		for rowIndex := range seenForTerm {
-			candidateCounts[rowIndex]++
-		}
-	}
-	rows := make([]model.KeywordResultRow, 0, 16)
-	seen := make(map[string]struct{})
-	for rowIndex, matched := range candidateCounts {
-		if rowIndex < 0 || rowIndex >= len(index.Rows) {
-			continue
-		}
-		if !loose && matched < len(terms) {
-			continue
-		}
-		row := index.Rows[rowIndex]
-		if loose {
-			if !rowMatchesAnyTerm(row, terms) {
-				continue
-			}
-		} else if !rowMatchesTerms(row, terms) {
-			continue
-		}
-		if addKeywordRow(&rows, seen, row, limit) {
-			return rows
-		}
-	}
-	sortKeywordRows(rows)
-	return rows
-}
-
-func finalizeKeywordRows(rows []model.KeywordResultRow, searchTerm string, searchType string) []model.KeywordResultRow {
-	out := cloneKeywordRows(rows)
-	for i := range out {
-		out[i].SearchTerm = searchTerm
-		if strings.TrimSpace(out[i].SearchType) == "" {
-			out[i].SearchType = searchType
-		}
-	}
-	sortKeywordRows(out)
-	return out
-}
-
-func cloneKeywordRows(rows []model.KeywordResultRow) []model.KeywordResultRow {
-	out := append([]model.KeywordResultRow(nil), rows...)
-	for i := range out {
-		if out[i].ExtraColumns != nil {
-			extra := make(map[string]string, len(out[i].ExtraColumns))
-			for k, v := range out[i].ExtraColumns {
-				extra[k] = v
-			}
-			out[i].ExtraColumns = extra
-		}
-	}
-	return out
+	return value.([]model.KeywordResultRow), nil
 }
 
 func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "www.lemna.org",
-		Description: "fetch lemna protein sequence",
-	}, func(runCtx context.Context) (string, error) {
-		return c.fetchProteinSequence(runCtx, targetID, sequenceID)
-	})
-}
-
-func (c *Client) fetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
 	sequenceID = strings.TrimSpace(sequenceID)
 	if sequenceID == "" {
 		return "", fmt.Errorf("empty lemna.org sequence id")
@@ -2743,6 +1432,9 @@ func (c *Client) searchGFFRows(ctx context.Context, release releaseInfo, species
 			continue
 		}
 		row := buildKeywordRowFromGFF(species, release, keyword, gff)
+		if row.SearchType == "" {
+			row.SearchType = "lemna GFF3 keyword"
+		}
 		if row.TranscriptID != "" {
 			rowsByTranscript[row.TranscriptID] = row
 		}
@@ -2774,6 +1466,7 @@ func (c *Client) searchGFFRows(ctx context.Context, release releaseInfo, species
 				row = model.KeywordResultRow{
 					SourceDatabase:      "lemna",
 					SearchTerm:          keyword,
+					SearchType:          "lemna AHRD keyword",
 					LabelName:           keywordShortLabelFromAHRD(keyword, record),
 					ProteinID:           record.ProteinAccession,
 					TranscriptID:        transcriptID,
@@ -2879,30 +1572,31 @@ func (c *Client) loadAHRDRecords(ctx context.Context, release releaseInfo) (map[
 }
 
 func parseAHRDOutput(reader io.Reader, records map[string]ahrdRecord) error {
-	csvReader := csv.NewReader(reader)
-	csvReader.Comma = '\t'
-	csvReader.FieldsPerRecord = -1
-	csvReader.LazyQuotes = true
-	decoder, err := csvutil.NewDecoder(csvReader)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return fmt.Errorf("open AHRD TSV decoder: %w", err)
-	}
-	decoder.AlignRecord = true
-	for {
-		var record ahrdRecord
-		if err := decoder.Decode(&record); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return fmt.Errorf("decode AHRD output: %w", err)
-		}
-		if strings.TrimSpace(record.ProteinAccession) == "" || strings.HasPrefix(record.ProteinAccession, "#") {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 1024), 8*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Protein-Accession\t") {
 			continue
 		}
-		records[record.ProteinAccession] = record
+		cols := strings.Split(line, "\t")
+		for len(cols) < 6 {
+			cols = append(cols, "")
+		}
+		record := ahrdRecord{
+			ProteinAccession:         cols[0],
+			BlastHitAccession:        cols[1],
+			QualityCode:              cols[2],
+			HumanReadableDescription: cols[3],
+			Interpro:                 cols[4],
+			GeneOntologyTerm:         cols[5],
+		}
+		if record.ProteinAccession != "" {
+			records[record.ProteinAccession] = record
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan AHRD output: %w", err)
 	}
 	return nil
 }
@@ -3116,11 +1810,14 @@ func (c *Client) loadProteinReleaseSequences(ctx context.Context, release releas
 }
 
 func (c *Client) fetchText(ctx context.Context, requestURL string) (string, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      hostForRemoteFile(requestURL),
-		Description: "fetch lemna text",
-	}, func(runCtx context.Context) (string, error) {
+	c.mu.RLock()
+	if cached, ok := c.textCache[requestURL]; ok {
+		c.mu.RUnlock()
+		return cached, nil
+	}
+	c.mu.RUnlock()
+
+	value, err, _ := c.sf.Do("text:"+requestURL, func() (any, error) {
 		c.mu.RLock()
 		if cached, ok := c.textCache[requestURL]; ok {
 			c.mu.RUnlock()
@@ -3128,88 +1825,59 @@ func (c *Client) fetchText(ctx context.Context, requestURL string) (string, erro
 		}
 		c.mu.RUnlock()
 
-		value, err, _ := c.sf.Do("text:"+requestURL, func() (any, error) {
-			c.mu.RLock()
-			if cached, ok := c.textCache[requestURL]; ok {
-				c.mu.RUnlock()
-				return cached, nil
-			}
-			c.mu.RUnlock()
-
-			req, err := http.NewRequestWithContext(runCtx, http.MethodGet, requestURL, nil)
-			if err != nil {
-				return "", fmt.Errorf("create lemna.org request: %w", err)
-			}
-			resp, err := c.baseHTTP.Do(req)
-			if err != nil {
-				return "", fmt.Errorf("fetch %s: %w", requestURL, err)
-			}
-			defer phygoboost.DrainAndClose(resp.Body)
-			if resp.StatusCode != http.StatusOK {
-				return "", fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
-			}
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return "", fmt.Errorf("read %s: %w", requestURL, err)
-			}
-			text := string(body)
-			c.mu.Lock()
-			if c.textCache == nil {
-				c.textCache = make(map[string]string)
-			}
-			c.textCache[requestURL] = text
-			c.mu.Unlock()
-			return text, nil
-		})
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("create lemna.org request: %w", err)
 		}
-		return value.(string), nil
+		resp, err := c.baseHTTP.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("fetch %s: %w", requestURL, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", requestURL, err)
+		}
+		text := string(body)
+		c.mu.Lock()
+		if c.textCache == nil {
+			c.textCache = make(map[string]string)
+		}
+		c.textCache[requestURL] = text
+		c.mu.Unlock()
+		return text, nil
 	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
 }
 
 func (c *Client) openMaybeGzip(ctx context.Context, requestURL string) (io.Reader, func(), error) {
-	handle, runCtx, err := phygoboost.BindTaskSpec(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      hostForRemoteFile(requestURL),
-		Description: "open lemna remote data stream",
-	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 	if err != nil {
-		return nil, nil, err
-	}
-	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, requestURL, nil)
-	if err != nil {
-		if handle != nil {
-			handle.Release()
-		}
 		return nil, nil, fmt.Errorf("create lemna.org data request: %w", err)
 	}
 	resp, err := c.baseHTTP.Do(req)
 	if err != nil {
-		if handle != nil {
-			handle.Release()
-		}
 		return nil, nil, fmt.Errorf("fetch %s: %w", requestURL, err)
 	}
-	release := func() {
-		phygoboost.DrainAndClose(resp.Body)
-		if handle != nil {
-			handle.Release()
-		}
-	}
 	if resp.StatusCode != http.StatusOK {
-		release()
+		_ = resp.Body.Close()
 		return nil, nil, fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
 	}
 	if strings.HasSuffix(strings.ToLower(requestURL), ".gz") {
 		gz, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			release()
+			_ = resp.Body.Close()
 			return nil, nil, fmt.Errorf("open gzip stream %s: %w", requestURL, err)
 		}
-		return gz, func() { _ = gz.Close(); release() }, nil
+		return gz, func() { _ = gz.Close(); _ = resp.Body.Close() }, nil
 	}
-	return resp.Body, release, nil
+	return resp.Body, func() { _ = resp.Body.Close() }, nil
 }
 
 func parseLinks(body string, base string) []downloadFile {
@@ -3310,6 +1978,7 @@ func buildKeywordRowFromGFF(species model.SpeciesCandidate, release releaseInfo,
 	return model.KeywordResultRow{
 		SourceDatabase:      "lemna",
 		SearchTerm:          searchTerm,
+		SearchType:          "lemna GFF3 keyword",
 		LabelName:           labelName,
 		ProteinID:           proteinID,
 		TranscriptID:        transcript,
@@ -3357,7 +2026,33 @@ func rowMatchesTerms(row model.KeywordResultRow, terms []string) bool {
 	if len(terms) == 0 {
 		return false
 	}
-	return textValuesMatchTerms(keywordRowSearchValues(row), terms)
+	values := []string{
+		row.LabelName,
+		row.ProteinID,
+		row.TranscriptID,
+		row.GeneIdentifier,
+		row.Aliases,
+		row.UniProt,
+		row.Description,
+		row.Comments,
+		row.AutoDefine,
+	}
+	for _, key := range []string{
+		"attr_ID",
+		"attr_Name",
+		"attr_Parent",
+		"attr_Alias",
+		"attr_Dbxref",
+		"attr_product",
+		"attr_description",
+		"attr_Note",
+		"attr_note",
+	} {
+		if row.ExtraColumns != nil {
+			values = append(values, row.ExtraColumns[key])
+		}
+	}
+	return textValuesMatchTerms(values, terms)
 }
 
 func ahrdRecordMatchesTerms(record ahrdRecord, terms []string) bool {
@@ -3721,327 +2416,4 @@ func lookupAHRDRecord(records map[string]ahrdRecord, key string) (ahrdRecord, bo
 		}
 	}
 	return ahrdRecord{}, false
-}
-
-func lemnaReportKeyword(value string) (rootDir string, identifier string, ok bool) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", "", false
-	}
-	match := lemnaReportURLPattern.FindStringSubmatch(value)
-	if len(match) < 3 {
-		return "", "", false
-	}
-	return strings.TrimSpace(match[1]), strings.TrimSpace(match[2]), strings.TrimSpace(match[2]) != ""
-}
-
-func looksLikeSpecificKeywordIdentifier(value string) bool {
-	value = strings.TrimSpace(value)
-	if value == "" || strings.ContainsAny(value, " \t") {
-		return false
-	}
-	hasLetter := false
-	hasDigit := false
-	for _, ch := range value {
-		switch {
-		case ch >= 'a' && ch <= 'z', ch >= 'A' && ch <= 'Z':
-			hasLetter = true
-		case ch >= '0' && ch <= '9':
-			hasDigit = true
-		case ch == '.' || ch == '_' || ch == '-' || ch == ':':
-		default:
-			return false
-		}
-	}
-	return hasLetter && hasDigit
-}
-
-func specificKeywordIdentifierVariants(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	variants := make([]string, 0, 8)
-	seen := make(map[string]struct{})
-	add := func(candidate string) {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" {
-			return
-		}
-		key := strings.ToLower(candidate)
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		variants = append(variants, candidate)
-	}
-	add(value)
-	add(strings.ToUpper(value))
-	add(strings.ToLower(value))
-	if normalized := normalizeRiceLocusCandidate(value); normalized != "" {
-		add(normalized)
-		add("LOC_" + normalized)
-	}
-	for _, candidate := range normalizedIdentifierCandidates(value) {
-		add(candidate)
-	}
-	return variants
-}
-
-func riceLocusVariants(term string) []string {
-	normalized := normalizeRiceLocusCandidate(term)
-	if normalized == "" || !riceLocusPattern.MatchString(normalized) {
-		return specificKeywordIdentifierVariants(term)
-	}
-	return specificKeywordIdentifierVariants("LOC_" + normalized)
-}
-
-func normalizeRiceLocusCandidate(term string) string {
-	value := strings.TrimSpace(term)
-	if value == "" {
-		return ""
-	}
-	value = strings.ReplaceAll(value, "-", "_")
-	value = strings.ReplaceAll(value, " ", "")
-	upper := strings.ToUpper(value)
-	upper = strings.TrimPrefix(upper, "LOC_")
-	if strings.HasPrefix(upper, "OS") && len(upper) >= 8 {
-		upper = upper[2:]
-	}
-	parts := regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`).FindStringSubmatch(upper)
-	if len(parts) == 0 {
-		return ""
-	}
-	return "Os" + parts[1] + "g" + parts[2] + parts[3]
-}
-
-func osC4HLike(term string) bool {
-	normalized := strings.ToUpper(strings.NewReplacer("_", "", "-", "", " ", "").Replace(strings.TrimSpace(term)))
-	return strings.HasPrefix(normalized, "OSC4H") && len(normalized) > len("OSC4H")
-}
-
-func aliasesForNormalizedTerm(catalog map[string][]string, term string) []string {
-	key := normalizeAliasKey(term)
-	values := catalog[key]
-	if len(values) == 0 {
-		return nil
-	}
-	return append([]string(nil), values...)
-}
-
-func curatedRiceRefSeqAliasMap() map[string][]string {
-	return map[string][]string{
-		normalizeAliasKey("XP_015639656"): {"LOC_Os05g25640"},
-		normalizeAliasKey("XP_015635394"): {"LOC_Os01g60450"},
-		normalizeAliasKey("XP_015623447"): {"LOC_Os02g26770"},
-		normalizeAliasKey("XP_015626579"): {"LOC_Os02g26810"},
-	}
-}
-
-func curatedRiceAliasMap() map[string][]string {
-	return map[string][]string{
-		normalizeAliasKey("OsC4H1"):    {"LOC_Os05g25640"},
-		normalizeAliasKey("CYP73A35p"): {"LOC_Os01g60450"},
-		normalizeAliasKey("OsC4H2a"):   {"LOC_Os02g26770"},
-		normalizeAliasKey("OsC4H2"):    {"LOC_Os02g26810"},
-		normalizeAliasKey("CYP73A38"):  {"LOC_Os05g25640"},
-		normalizeAliasKey("CYP73A39"):  {"LOC_Os01g60450"},
-		normalizeAliasKey("CYP73A40"):  {"LOC_Os02g26770"},
-	}
-}
-
-func wideKeywordQuery(term string) string {
-	return strings.ReplaceAll(strings.TrimSpace(term), "_", " ")
-}
-
-func relaxedKeywordQueries(term string) []string {
-	term = strings.TrimSpace(term)
-	if term == "" {
-		return nil
-	}
-	queries := make([]string, 0, 4)
-	add := func(query string) {
-		query = strings.TrimSpace(query)
-		if query == "" || strings.EqualFold(query, term) {
-			return
-		}
-		for _, existing := range queries {
-			if strings.EqualFold(existing, query) {
-				return
-			}
-		}
-		queries = append(queries, query)
-	}
-	add(strings.ReplaceAll(term, "_", " "))
-	add(strings.ReplaceAll(term, "-", " "))
-	if refSeqProteinPattern.MatchString(term) {
-		add(strings.TrimSuffix(strings.ReplaceAll(term, "_", ""), ".1"))
-	}
-	if cytochromeP450Pattern.MatchString(term) {
-		add(strings.TrimSuffix(strings.ToUpper(term), "P"))
-	}
-	return queries
-}
-
-func normalizeAliasKey(value string) string {
-	value = strings.ToUpper(strings.TrimSpace(value))
-	replacer := strings.NewReplacer("_", "", "-", "", " ", "", ".", "")
-	return replacer.Replace(value)
-}
-
-func normalizeIdentifierKey(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func normalizeKeywordTerms(terms []string) []string {
-	out := make([]string, 0, len(terms))
-	seen := make(map[string]struct{})
-	for _, term := range terms {
-		term = strings.TrimSpace(strings.ToLower(term))
-		if term == "" {
-			continue
-		}
-		if _, ok := seen[term]; ok {
-			continue
-		}
-		seen[term] = struct{}{}
-		out = append(out, term)
-	}
-	return out
-}
-
-func rowMatchesAnyTerm(row model.KeywordResultRow, terms []string) bool {
-	values := keywordRowSearchValues(row)
-	for _, term := range terms {
-		if textValuesMatchTerms(values, []string{term}) {
-			return true
-		}
-	}
-	return false
-}
-
-func keywordRowIdentifiers(row model.KeywordResultRow) []string {
-	values := []string{
-		row.ProteinID,
-		row.TranscriptID,
-		row.GeneIdentifier,
-		row.SequenceID,
-	}
-	if row.ExtraColumns != nil {
-		for _, key := range []string{
-			"attr_ID",
-			"attr_Name",
-			"attr_Parent",
-			"attr_protein_id",
-			"attr_protein",
-			"attr_protein_accession",
-			"ahrd_protein_accession",
-			"ahrd_blast_hit_accession",
-		} {
-			values = append(values, row.ExtraColumns[key])
-		}
-	}
-	return values
-}
-
-func keywordRowSearchTokens(row model.KeywordResultRow) []string {
-	values := keywordRowIdentifiers(row)
-	values = append(values, strings.FieldsFunc(row.Aliases, splitKeywordToken)...)
-	values = append(values, strings.FieldsFunc(row.UniProt, splitKeywordToken)...)
-	if row.ExtraColumns != nil {
-		for _, key := range []string{"attr_Alias", "attr_Dbxref", "ahrd_interpro", "ahrd_gene_ontology_term"} {
-			values = append(values, strings.FieldsFunc(row.ExtraColumns[key], splitKeywordToken)...)
-		}
-	}
-	return values
-}
-
-func splitKeywordToken(r rune) bool {
-	switch r {
-	case ';', ',', '|', '\t', '\n', '\r', ' ', ':':
-		return true
-	default:
-		return false
-	}
-}
-
-func keywordRowSearchValues(row model.KeywordResultRow) []string {
-	values := []string{
-		row.LabelName,
-		row.ProteinID,
-		row.TranscriptID,
-		row.GeneIdentifier,
-		row.Aliases,
-		row.UniProt,
-		row.Description,
-		row.Comments,
-		row.AutoDefine,
-		row.SequenceID,
-		row.GeneReportURL,
-	}
-	if row.ExtraColumns != nil {
-		for _, key := range []string{
-			"attr_ID",
-			"attr_Name",
-			"attr_Parent",
-			"attr_Alias",
-			"attr_Dbxref",
-			"attr_product",
-			"attr_description",
-			"attr_Note",
-			"attr_note",
-			"ahrd_protein_accession",
-			"ahrd_blast_hit_accession",
-			"ahrd_human_readable_description",
-			"ahrd_interpro",
-			"ahrd_gene_ontology_term",
-		} {
-			values = append(values, row.ExtraColumns[key])
-		}
-	}
-	return values
-}
-
-func keywordRowSearchText(row model.KeywordResultRow) string {
-	return strings.Join(keywordRowSearchValues(row), " ")
-}
-
-func mergeDelimitedValues(left string, right string) string {
-	values := make([]string, 0, 4)
-	values = append(values, strings.FieldsFunc(left, splitKeywordToken)...)
-	values = append(values, strings.FieldsFunc(right, splitKeywordToken)...)
-	seen := make(map[string]struct{}, len(values))
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	return strings.Join(out, "; ")
-}
-
-func sortKeywordRows(rows []model.KeywordResultRow) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		left := rows[i]
-		right := rows[j]
-		for _, pair := range [][2]string{
-			{left.GeneIdentifier, right.GeneIdentifier},
-			{left.TranscriptID, right.TranscriptID},
-			{left.ProteinID, right.ProteinID},
-			{left.Location, right.Location},
-		} {
-			if pair[0] == pair[1] {
-				continue
-			}
-			return strings.ToLower(pair[0]) < strings.ToLower(pair[1])
-		}
-		return false
-	})
 }

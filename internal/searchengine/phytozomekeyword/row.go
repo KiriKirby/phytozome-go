@@ -43,7 +43,6 @@ func buildKeywordResultRow(searchTerm string, searchType string, species model.S
 		SearchTerm:          searchTerm,
 		SearchType:          searchType,
 		LabelName:           labelName,
-		ProteinID:           strings.TrimSpace(transcript.Protein),
 		TranscriptID:        strings.TrimSpace(transcript.PrimaryIdentifier),
 		GeneIdentifier:      geneIdentifier,
 		Genome:              formatKeywordGenome(gene),

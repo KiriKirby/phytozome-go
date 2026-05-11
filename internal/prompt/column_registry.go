@@ -17,8 +17,8 @@ type columnMetadata struct {
 }
 
 var keywordDisplayColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "search_type", "label_name", "transcript", "description", "genome", "alias"},
-	"lemna":     {"search_term", "label_name", "transcript", "description", "genome", "alias"},
+	"phytozome": {"search_term", "search_type", "label_name", "transcript", "description", "genome"},
+	"lemna":     {"search_term", "label_name", "transcript", "description", "genome"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{

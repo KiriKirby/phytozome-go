@@ -2,7 +2,6 @@ package phytozomekeyword
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -11,7 +10,6 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -78,10 +76,6 @@ type GeneFinder interface {
 	SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]GeneRecord, error)
 }
 
-type BroadGeneKeywordFinder interface {
-	SearchGenesByKeywordBroad(ctx context.Context, proteomeID int, keyword string, limit int) ([]GeneRecord, error)
-}
-
 type Engine struct {
 	finder GeneFinder
 	mu     sync.RWMutex
@@ -103,23 +97,11 @@ func New(finder GeneFinder) *Engine {
 }
 
 func (e *Engine) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome keyword engine rows",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, e.selectProgram(keyword), true, "normal")
-	})
+	return e.searchKeywordRowsWithProgram(ctx, species, keyword, e.selectProgram(keyword), true, "normal")
 }
 
 func (e *Engine) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome keyword engine rows wide",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, wideSearchProgram{}, false, "forced-wide")
-	})
+	return e.searchKeywordRowsWithProgram(ctx, species, keyword, wideSearchProgram{}, false, "forced-wide")
 }
 
 func (e *Engine) searchKeywordRowsWithProgram(ctx context.Context, species model.SpeciesCandidate, keyword string, program searchProgram, allowWideFallback bool, mode string) ([]model.KeywordResultRow, error) {
@@ -176,12 +158,10 @@ func (e *Engine) searchKeywordRowsWithProgram(ctx context.Context, species model
 			}
 		}
 		rows := e.buildRows(keyword, searchType, species, genes)
-		if cacheableResult(rows, keyword) {
-			e.mu.Lock()
-			e.cache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
-			e.mu.Unlock()
-			writeCachedJSON("rows", cacheKey, rows)
-		}
+		e.mu.Lock()
+		e.cache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
+		e.mu.Unlock()
+		writeCachedJSON("rows", cacheKey, rows)
 		return rows, nil
 	})
 	if err != nil {
@@ -232,7 +212,7 @@ func (e *Engine) buildRows(searchTerm string, searchType string, species model.S
 
 func cacheableResult(rows []model.KeywordResultRow, keyword string) bool {
 	if len(rows) == 0 {
-		return false
+		return true
 	}
 	for _, row := range rows {
 		if strings.TrimSpace(row.SearchType) == "" {
@@ -364,6 +344,7 @@ func (wideSearchProgram) Search(ctx context.Context, engine *Engine, species mod
 		aliasesForNormalizedTerm(riceAliasByNormalized, term),
 		aliasesForNormalizedTerm(refSeqAliasByNormalized, term),
 		riceLocusVariants(term),
+		SpecificIdentifierVariants(term),
 	} {
 		if len(aliases) == 0 {
 			continue
@@ -384,24 +365,6 @@ func (wideSearchProgram) Search(ctx context.Context, engine *Engine, species mod
 	add(found)
 	if len(genes) > 0 {
 		return genes, nil
-	}
-	if broadFinder, ok := engine.finder.(BroadGeneKeywordFinder); ok {
-		found, err = broadFinder.SearchGenesByKeywordBroad(ctx, species.ProteomeID, term, 10000)
-		if err != nil {
-			return nil, err
-		}
-		for _, gene := range found {
-			geneID := strings.TrimSpace(gene.PrimaryIdentifier)
-			if geneID != "" {
-				if fullGene, err := engine.finder.FetchGeneByGeneID(ctx, species.ProteomeID, geneID); err == nil {
-					gene = fullGene
-				}
-			}
-			addGene(&genes, seen, gene)
-		}
-		if len(genes) > 0 {
-			return genes, nil
-		}
 	}
 	found, err = engine.searchKeyword(ctx, species, wideKeywordQuery(term), 50)
 	if err != nil {
@@ -431,46 +394,28 @@ func (e *Engine) searchSpecificIdentifier(ctx context.Context, species model.Spe
 	for _, variant := range variants {
 		switch reportType {
 		case "gene":
-			gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
 		case "transcript":
-			gene, err := e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
 		case "protein":
-			gene, err := e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
 		default:
-			gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
 				continue
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
-			gene, err = e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
 				continue
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
-			gene, err = e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant)
-			if err == nil {
+			if gene, err := e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
 				addGene(&genes, seen, gene)
-			} else if shouldStopSpecificIdentifierSearch(ctx, err) {
-				return nil, err
 			}
 		}
 		if len(genes) > 0 && reportType != "" {
@@ -478,32 +423,6 @@ func (e *Engine) searchSpecificIdentifier(ctx context.Context, species model.Spe
 		}
 	}
 	return genes, nil
-}
-
-func shouldStopSpecificIdentifierSearch(ctx context.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	if ctx != nil && ctx.Err() != nil {
-		return true
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
-	if message == "" {
-		return false
-	}
-	if strings.Contains(message, "context deadline exceeded") || strings.Contains(message, "operation was canceled") || strings.Contains(message, "client.timeout") || strings.Contains(message, "timeout awaiting response headers") {
-		return true
-	}
-	if strings.Contains(message, "unexpected eof") || strings.Contains(message, "connection reset") || strings.Contains(message, "connection refused") || strings.Contains(message, "tls handshake timeout") || strings.Contains(message, "no such host") {
-		return true
-	}
-	if strings.Contains(message, "status 429") || strings.Contains(message, "too many requests") || strings.Contains(message, "status 5") {
-		return true
-	}
-	return false
 }
 
 func (e *Engine) searchAliasesAsGenes(ctx context.Context, species model.SpeciesCandidate, aliases []string) ([]GeneRecord, error) {
@@ -631,16 +550,9 @@ func SpecificIdentifierVariants(value string) []string {
 		seen[candidate] = struct{}{}
 		variants = append(variants, candidate)
 	}
-	upper := strings.ToUpper(value)
-	if arabidopsisGeneIDLabelPattern.MatchString(value) || strings.HasPrefix(upper, "AT") {
-		add(upper)
-		add(value)
-		add(strings.ToLower(value))
-	} else {
-		add(value)
-		add(upper)
-		add(strings.ToLower(value))
-	}
+	add(value)
+	add(strings.ToUpper(value))
+	add(strings.ToLower(value))
 	if normalized := normalizeRiceLocusCandidate(value); normalized != "" {
 		add(normalized)
 		add("LOC_" + normalized)

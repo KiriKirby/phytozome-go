@@ -1,92 +1,12 @@
 # phytozome GO Agent Notes
 
-This file tracks the intended shape of `phytozome GO` and its release packaging, including the new search engine direction, current Phytozome keyword-search behavior, and the expanded plan for fully supporting `lemna.org` mode (download-backed and BLAST interactions). It documents product identity, workflows, reliability constraints, search architecture, design decisions for `lemna.org`, API surfaces, CLI UX, implementation tasks, tests, and risks.
+This file tracks the intended shape of `phytozome GO` and its release packaging, with an expanded, actionable plan for fully supporting `lemna.org` mode (download-backed and BLAST interactions). It documents product identity, workflows, reliability constraints, design decisions for `lemna.org`, API surfaces, CLI UX, implementation tasks, tests, and risks.
 
 ## Product identity
 
 - Product name: `phytozome GO`
 - CLI command: `phytozome-go`
 - GitHub repository and Go module: `phytozome-go`
-
-## Current merge baseline
-
-- The current working tree was rebuilt with `C:\Users\wangsychn\Desktop\phytozome-batch-cli_another` as the newer base, then the local Phytozome keyword new-search-engine work from `C:\Users\wangsychn\Documents\GitHub\phytozome-go` was merged onto it.
-- A local backup of the pre-replacement repository was kept at `C:\Users\wangsychn\Documents\GitHub\phytozome-go_backup_20260509_012045`.
-- Treat the `phytozome-batch-cli_another` lineage as the product baseline for broad UI/workflow changes, and treat this repository's new-search-engine work as the authoritative implementation for Phytozome keyword searching.
-- The older website-style Phytozome broad search was not discarded. Its behavior is folded into the new Phytozome keyword wide-search program as the broad/web-style fallback stage.
-
-## Top-level goals for the new search engine
-
-- Migrate all search behavior into a dedicated new search engine system over time. Current implementation scope is Phytozome keyword search only.
-- Keep the search-engine code isolated under `internal/searchengine/`, with database and mode specific packages below it. Current package: `internal/searchengine/phytozomekeyword`.
-- Every search term is conceptually independent. Each line of keyword input may be classified into a different input type, routed through a different search program, and reported with its own `search_type`.
-- Normal Phytozome keyword search must classify each term, run only the selected search program first, and fall back to the wide-search program only when that selected program returns no rows. Rows produced by this fallback must record the original program plus ` (fallback to wide search)` in `search_type`.
-- Forced wide search is a separate user action. In the Phytozome keyword input page, the `Wide search` button and `Ctrl+W` shortcut run every input term directly through the wide-search program.
-- Wide search is not "run every program blindly". It is a dedicated program that combines the shared fuzzy mechanisms in a performance-conscious order: curated alias mappings, specific identifier lookup, broad/web-style keyword search, normalized keyword search, and relaxed keyword variants.
-- Search programs must be forgiving about casing, common prefixes, separators, omitted rice prefixes such as `LOC_` / `Os`, RefSeq forms such as `XP_015639656` vs `XP015639656`, and symbol variants such as `OsC4H1`.
-- New search work must use the shared performance system: shared HTTP clients, cancellable contexts, bounded parallelism for per-term work, `singleflight` for duplicate in-flight lookups, and persistent atomic caches where stable remote payloads are reused.
-
-## Phygoboost runtime architecture
-
-- The runtime-control source of truth is now the `docs/phygoboost/` document set:
-  - `docs/phygoboost/README.md`
-  - `docs/phygoboost/work-classification.md`
-  - `docs/phygoboost/work-inventory.md`
-  - `docs/phygoboost/architecture.md`
-  - `docs/phygoboost/scheduler.md`
-  - `docs/phygoboost/network-pools.md`
-  - `docs/phygoboost/ipc-heavy.md`
-  - `docs/phygoboost/workflow-contracts.md`
-  - `docs/phygoboost/rewrite-plan.md`
-- `phygoboost` fully replaces the old conceptual split between `internal/perf`, `internal/procworker`, and `internal/pipeline`.
-- The intended runtime has exactly two processes:
-  - `main`
-  - `heavy`
-- `phygoboost` is a resource controller and execution coordinator, not a workflow planner.
-- Workflow packages own their own stage planning, counts, retries, labels, and progress semantics.
-- The runtime must not contain BLAST-specific or keyword-specific planner files analogous to the old `blast_plan.go`.
-- Network control must use per-domain pools, not one coarse shared network bucket as the main abstraction.
-- All production HTTP traffic must go through `phygoboost`-owned shared clients.
-- Local execution slots are shared across `main` and `heavy` through one total pool with runtime-based sizing and hard guardrails.
-- Scheduler policy should stay simple:
-  - first come, first served
-  - explicit acquire and release
-  - no workflow-type priority classes
-  - no "internal versus external tool" priority split
-- IPC between `main` and `heavy` must stay small and transport-focused; it must not grow into a second scheduler or a hidden workflow planner.
-- When implementing or reviewing runtime work, always check it against the `docs/phygoboost/` contract before adding code.
-- Work classification policy is part of that contract:
-  - `docs/phygoboost/work-classification.md` defines the rules for assigning `0`, `1A`, `1B`, `2A`, and `2B`
-  - `docs/phygoboost/work-inventory.md` is the archive/index of current classified work
-  - any new runtime, workflow, source, search, worker, export, report, or UI-loading work must be classified and added to the inventory in the same change
-  - if a new case does not fit the classification rules cleanly, update the classification standard first, then update the inventory
-- Additional hard rules for future phygoboost refactors:
-  - class `0` work is outside `phygoboost` control and must not be forced through local/network/process pools
-  - UI-tight work must remain in `main`, usually `0` or `1A`
-  - architecture rewrites must preserve and, when possible, strengthen existing concurrency, caching, data reuse, batching, prefetch, cancellation, and shared-transport optimizations rather than deleting them for simplicity
-
-## Phytozome keyword search engine status
-
-- Public entry points:
-  - `(*phytozomekeyword.Engine).SearchKeywordRows(...)` for normal classified search with automatic wide fallback.
-  - `(*phytozomekeyword.Engine).SearchKeywordRowsWide(...)` for forced wide search.
-  - `(*phytozome.Client).SearchKeywordRows(...)` and `SearchKeywordRowsWide(...)` delegate to the new engine.
-- Search program names currently written to `search_type`:
-  - `report URL`
-  - `Phytozome identifier`
-  - `rice LOC_Os locus`
-  - `RefSeq XP protein`
-  - `rice gene alias`
-  - `CYP73 family symbol`
-  - `keyword`
-  - `wide search`
-- Supported rice/Oryza sativa curated equivalence inputs currently include:
-  - Locus IDs: `LOC_Os05g25640`, `LOC_Os01g60450`, `LOC_Os02g26770`, `LOC_Os02g26810`.
-  - RefSeq XP proteins: `XP_015639656`, `XP_015635394`, `XP_015623447`, `XP_015626579`.
-  - Rice aliases: `OsC4H1`, `CYP73A35p`, `OsC4H2a`, `OsC4H2`.
-  - CYP73 symbols: `CYP73A38`, `CYP73A39`, `CYP73A40`.
-- The result model, table display, details, Excel export, PDF/report rendering, sample data, and column registry all include `search_type`.
-- Cache files for Phytozome keyword search-engine rows live under `.cache/searchengine/phytozome/keyword/rows/` through `appfs.CacheDir`, with SHA-256 file names and atomic writes.
 
 ## Top-level goals for lemna.org mode
 
@@ -169,10 +89,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - Each search term appears as a centered, non-selectable group title row above its result rows, matching the old non-TUI table grouping intent.
   - Search-term group order is fixed to the query order.
   - Sorting in keyword tables is performed only inside each search-term group; sorting must never move rows between groups.
-  - The `search_term` display column is not sortable because group headers already define the search-term partition.
-  - The `search_type` column must appear immediately after `search_term` in Phytozome keyword tables, detail dialogs, Excel exports, and keyword reports. It records the actual search program or fallback used for that row.
+  - The `search_tern` display column is not sortable because group headers already define the search-term partition.
   - Keyword result short labels such as `C4H`, `CCR2`, or `ATPAL1` are `label_name`, not `protein_id`. Phytozome keyword results only expose this naming label as `label_name`; do not add a separate `protein_id` column there unless the database source actually provides an original protein accession independently of the label feature.
-  - Keyword display columns are checkbox, row count, `search_term`, `search_type`, conditional `label_name`, conditional original `protein_id` only when the source naturally provides it, `transcript`, and `description`; `search_term` is not sortable, while `search_type`, `label_name`, original `protein_id`, `transcript`, and `description` are sortable.
+  - Keyword display columns are checkbox, row count, `search_tern`, conditional `label_name`, conditional original `protein_id` only when the source naturally provides it, `transcript`, and `discripition`; `search_tern` is not sortable, while `label_name`, original `protein_id`, `transcript`, and `discripition` are sortable.
   - Keyword-mode label names are part of the main keyword review flow, not export-only data. Ask for them immediately after keyword input and before running keyword searches for both databases, so table display, View dialogs, file naming, and FASTA labels can use `label_name`.
   - Keyword and BLAST label prompts use `Auto identify (Enter)` as the primary action when the input is empty. As soon as any text is present, the same primary button becomes `Apply (Enter)`. `Skip` is shown immediately to its left in the right-side action group and uses a non-Enter Ctrl shortcut. Auto identify must produce the same label list as manual input would: for keyword mode, label trust order is user-entered `label_name`, then labels inferred from database/result data; within automatic keyword inference, prefer an explicit row `label_name`, then the first alias (for example `ATPAL1` from `ATPAL1; PAL1`), and only then gene/transcript/sequence identifiers. For lemna keyword rows with no local alias-derived label, search Phytozome Arabidopsis with an `At1g80820`-style identifier found in the row/search term and use the first result's first alias as `label_name`. For BLAST automatic label inference, label trust order is user-entered `label_name`, then a label parsed directly from the pasted/loaded FASTA header, then labels inferred through database matching/resolved source metadata. Database aliases may be kept as alias candidates for dialogs/grouping, but they must not override a higher-trust label during automatic identification. User-edited family/custom grouping after automatic identification is authoritative and must not be rewritten by these automatic label priority rules.
 - Treat the application as query-first. Search/query workflows should end at selectable result tables by default; file generation is a subordinate table action, never the default meaning of completing a table.
@@ -260,7 +179,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
     - selection/progression: `Start (Enter)`, `Select (Enter)`, `Search (Enter)`, `Run BLAST (Enter)`, `Apply (Enter)`, `Auto identify (Enter)` when it is the primary empty-input action, `Save (Enter)`, `View (Enter)`
     - export/results: `Export (Ctrl+G)`, `Export all (Ctrl+D)`
     - table selection shortcuts only, not visible buttons: `Ctrl+A` select all, `Ctrl+N` clear all, `Space` toggle current row
-    - editing/search/recovery: `Paste (Ctrl+V)`, `Wide search (Ctrl+W)` for Phytozome keyword input only, `Retry (Ctrl+R)`, `Skip (Ctrl+R)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
+    - editing/recovery: `Paste (Ctrl+V)`, `Retry (Ctrl+R)`, `Skip (Ctrl+R)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
   - identical or similar actions must use identical labels across all pages; for example export actions are always `Export` / `Export all`, not `Generate file`, `Write file`, or `Create`
   - every interactive page after the startup page should expose a Home button that returns to database/startup selection
   - every full-screen page that exposes Back must map Back to the immediately previous full-screen page in the user-visible flow
@@ -403,7 +322,6 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - ask for keyword `label_name` values in the main keyword review flow, before running the keyword search
   - preserve one-to-one ordering between keyword terms and `label_name` values
   - allow `~` to mark an intentionally blank `label_name`
-  - Phytozome keyword input exposes a left-side secondary `Wide search (Ctrl+W)` action only in the Phytozome keyword context. Pressing it sets `KeywordInputResult.WideSearch` and forces every term through `SearchKeywordRowsWide`.
 - Batch query resolution:
   - use a progress bar for batch URL resolution instead of repeating per-item spinner messages
   - keep single-query resolution feedback concise and non-duplicative
@@ -439,9 +357,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - every such modal should include a `Help (F1)` button using the shared three-language help template; remember the last help language for the current session
   - text and controls must wrap or use vertical module layout rather than overflowing horizontally; modal height should fit actual content without unnecessary dead space
 - Performance and concurrency:
-  - all new network clients must use the shared `phygoboost` domain-aware HTTP client layer; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
-  - all new ordinary batch-safe parallel loops must run through the shared `phygoboost` local execution layer so bounded worker counts, context cancellation, and first-error cancellation stay consistent
-  - recovery-aware workflow pipelines such as BLAST batch execution or export-all may keep specialized worker loops, but they must acquire `phygoboost` resources explicitly, propagate `context.Context`, cancel sibling workers on first fatal error, preserve completed results, and return a recovery error whose index resumes from the first incomplete item
+  - all new network clients must use `perf.HTTPClient()` or receive the shared workflow client; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
+  - all new ordinary batch-safe parallel loops must use `perf.ParallelFor(ctx, perf.WorkCPU|WorkDisk|WorkNetwork, total, fn)` so dynamic worker counts, context cancellation, and first-error cancellation stay consistent
+  - recovery-aware workflow pipelines such as BLAST batch execution or export-all may keep specialized worker loops, but they must use `perf` worker counts, propagate `context.Context`, cancel sibling workers on first fatal error, preserve completed results, and return a recovery error whose index resumes from the first incomplete item
   - every long-running loading/generation/analysis path must accept or derive a cancellable `context.Context`; cancellation must pause/stop the current action and return to the expected TUI recovery/back target without leaking background workers
   - prefer controlled parallelism for batch-safe stages such as keyword searches, batch query resolution, and sequence fetch preloading
   - keep all interactive prompts serialized even when background work is parallelized
@@ -451,8 +369,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - use persistent local caches for stable remote payloads when that improves later sessions without changing user-visible behavior
   - prefer atomic file writes for shared cache artifacts so background workers cannot observe partial files
   - avoid deep-copying large BLAST/keyword row slices unless crossing a mutable ownership boundary; report and export assembly should pre-size result buffers and reuse already-stable slices where behavior stays unchanged
-  - workflow code must declare real network domains for remote work instead of using a generic network-work label
-  - production-code guardrail tests for runtime control should enforce the no-ad-hoc-client and no-unreviewed-parallel-loop rules under the `phygoboost` architecture
+  - production-code guardrail tests under `internal/perf` enforce the no-ad-hoc-client and no-unreviewed-parallel-loop rules; update the allowlist only for deliberate, documented exceptions
 - Metadata and result-link semantics:
   - preserve `OriginalInputURL` and `NormalizedURL` when resolving report URLs; do not overwrite them with fetched source structs
   - keep export metadata for query-source URLs separate from row-level target links
@@ -709,13 +626,6 @@ Priority 4 (low / optional)
 - Done:
   - Startup database selection.
   - `source.DataSource` abstraction.
-  - New search-engine package for Phytozome keyword mode at `internal/searchengine/phytozomekeyword`.
-  - Phytozome keyword normal search now classifies each term, runs the selected program first, and records the selected program or wide-search fallback in `search_type`.
-  - Phytozome keyword forced wide search is available from the keyword input page through `Wide search (Ctrl+W)`.
-  - Legacy website-style Phytozome broad keyword search is integrated into the new wide-search program instead of remaining a separate UI concept.
-  - `search_type` is wired through the keyword result model, grouped result tables, View detail dialogs, Excel export, keyword reports, report samples, and column help.
-  - Curated Oryza sativa keyword mappings are implemented for the LOC_Os, RefSeq XP, OsC4H/CYP73 alias, and CYP73 family-symbol examples listed in the Phytozome keyword search-engine status section.
-  - Phytozome keyword search rows use in-memory caching, persistent JSON row caches, atomic cache writes, and `singleflight` de-duplication.
   - lemna species discovery from `download/`, with official clone marking.
   - Small lemna species lists are shown directly instead of forcing search.
   - lemna keyword search from GFF3 + AHRD with dynamic export columns.
@@ -723,8 +633,6 @@ Priority 4 (low / optional)
   - local BLAST fallback for `blastn`, `blastx`, `tblastn`, and `blastp` using the matching nucleotide/protein FASTA.
   - BLAST submission errors support retry, back to BLAST program selection, or exit.
 - Remaining:
-  - Migrate non-Phytozome-keyword search modes into the new search-engine system when their behavior changes.
-  - Continue expanding Phytozome keyword search programs only when a type can be validated against connected data sources; record unsupported types explicitly instead of inventing weak matches.
   - Robust server-side lemna result retrieval. Server form probing exists, but local BLAST remains the dependable execution path.
   - Optional integration tests against live lemna.org and local BLAST+ when available.
 

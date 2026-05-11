@@ -50,13 +50,6 @@ type StartupChoice struct {
 }
 
 func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice, error) {
-	if !inTUIWorker() {
-		var result StartupChoice
-		handled, err := runPageInWorkerIfNeeded("tui.select_startup", info, &result)
-		if handled {
-			return result, err
-		}
-	}
 	features := []Option{
 		{Value: "keyword", Label: "Keyword", Description: "search annotations, IDs, aliases, or descriptions"},
 		{Value: "blast", Label: "Blast", Description: "sequence / FASTA / URL query against one species"},
@@ -292,7 +285,7 @@ func startupRoot(app *tview.Application, info StartupInfo, featureList *tview.Li
 		SetDynamicColors(true).
 		SetTextColor(tview.Styles.PrimaryTextColor).
 		SetText(fmt.Sprintf(
-			"[white]%s helps you run keyword searches, BLAST workflows, and pathway-oriented tools across plant protein resources.\n\n[yellow]Author[white] %s\n[yellow]Repository[white] %s\n[yellow]License[white] GNU LGPL v3 or later",
+			"[white]%s helps you run keyword searches, BLAST workflows, and pathway-oriented tools across plant protein resources.\n\n[yellow]Author[white] %s\n[yellow]Repository[white] %s\n[yellow]License[white] MIT",
 			productName(info),
 			fallbackText(info.Author, "unknown"),
 			fallbackText(info.RepoURL, "unknown"),
@@ -336,7 +329,6 @@ type buttonSpec struct {
 	Action   func()
 	Visible  bool
 	Primary  bool
-	Dynamic  bool
 }
 
 func buttonRow(buttons ...buttonSpec) *buttonRowPrimitive {

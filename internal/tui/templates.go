@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -19,33 +20,10 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
+	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
 
 var ErrTaskCancelled = errors.New("task cancelled")
-
-type InputFileLoader func(context.Context, string) (string, error)
-
-var inputFileLoaderMu sync.RWMutex
-var inputFileLoader InputFileLoader
-
-func SetInputFileLoader(loader InputFileLoader) func() {
-	inputFileLoaderMu.Lock()
-	previous := inputFileLoader
-	inputFileLoader = loader
-	inputFileLoaderMu.Unlock()
-	return func() {
-		inputFileLoaderMu.Lock()
-		inputFileLoader = previous
-		inputFileLoaderMu.Unlock()
-	}
-}
-
-func currentInputFileLoader() InputFileLoader {
-	inputFileLoaderMu.RLock()
-	defer inputFileLoaderMu.RUnlock()
-	return inputFileLoader
-}
 
 type NavAction string
 
@@ -62,7 +40,6 @@ type Choice struct {
 	Value       string
 	Label       string
 	Description string
-	SearchText  string
 }
 
 type ChoicePage struct {
@@ -123,24 +100,24 @@ type TextInputResult struct {
 }
 
 type MultiLinePage struct {
-	Breadcrumb    string
-	Path          []string
-	Title         string
-	Description   string
-	Initial       string
-	AllowEmpty    bool
-	SkipWhenEmpty bool
-	AllowBack     bool
-	AllowHome     bool
-	ConfirmText   string
-	AltText       string
-	AltShortcut   string
-	AltAction     string
-	EmptyText     string
-	EmptyAction   string
-	SkipText      string
-	SkipShortcut  string
-	Hints         []string
+	Breadcrumb        string
+	Path              []string
+	Title             string
+	Description       string
+	Initial           string
+	AllowEmpty        bool
+	SkipWhenEmpty     bool
+	AllowBack         bool
+	AllowHome         bool
+	ConfirmText       string
+	EmptyText         string
+	EmptyAction       string
+	SecondaryText     string
+	SecondaryShortcut string
+	SecondaryAction   string
+	SkipText          string
+	SkipShortcut      string
+	Hints             []string
 }
 
 type MultiLineResult struct {
@@ -212,30 +189,27 @@ type TableSort struct {
 }
 
 type RowSelectionPage struct {
-	Breadcrumb    string
-	Path          []string
-	Title         string
-	Description   string
-	Columns       []TableColumn
-	Rows          []TableRow
-	Selected      []bool
-	FilterFlags   []bool
-	Sort          TableSort
-	GroupSort     bool
-	GroupLabels   []string
-	AllowFilter   bool
-	FilterText    string
-	AllowDoneAll  bool
-	AllowBack     bool
-	AllowHome     bool
-	ConfirmText   string
-	GenerateText  string
-	ExtraText     string
-	ExtraShortcut string
-	ExtraAction   string
-	DoneAllText   string
-	Hints         []string
-	State         RowSelectionState
+	Breadcrumb   string
+	Path         []string
+	Title        string
+	Description  string
+	Columns      []TableColumn
+	Rows         []TableRow
+	Selected     []bool
+	FilterFlags  []bool
+	Sort         TableSort
+	GroupSort    bool
+	GroupLabels  []string
+	AllowFilter  bool
+	FilterText   string
+	AllowDoneAll bool
+	AllowBack    bool
+	AllowHome    bool
+	ConfirmText  string
+	GenerateText string
+	DoneAllText  string
+	Hints        []string
+	State        RowSelectionState
 }
 
 type RowSelectionState struct {
@@ -762,7 +736,6 @@ type RowSelectionResult struct {
 	FilterRequested bool
 	GenerateFile    bool
 	DoneAll         bool
-	Action          string
 	Nav             NavAction
 	State           RowSelectionState
 }
@@ -771,43 +744,10 @@ type TaskPage struct {
 	Breadcrumb  string
 	Path        []string
 	Title       string
-	WindowTitle string
 	Description string
 	Initial     string
 	Total       int
 	CancelError error
-}
-
-type taskChildSlotKey struct{}
-
-type TaskChildSlotRegistrar func(slot taskProgressSlot) (func(taskProgressSlot), func())
-
-type taskProgressSlot struct {
-	Title   string
-	Status  string
-	Current int
-	Total   int
-	Active  bool
-}
-
-type TaskProgressSlot = taskProgressSlot
-
-type taskOverlaySlotState struct {
-	mu             sync.Mutex
-	title          string
-	status         string
-	current        int
-	total          int
-	active         bool
-	order          int64
-	completedOrder int64
-}
-
-type taskOverlayManager struct {
-	mu      sync.Mutex
-	nextID  int64
-	nextSeq int64
-	slots   map[int64]*taskOverlaySlotState
 }
 
 type InfoPage struct {
@@ -1113,6 +1053,7 @@ type SearchPage struct {
 	Initial     string
 	Placeholder string
 	Choices     []Choice
+	Filter      func(query string, choices []Choice) []Choice
 	AllowBack   bool
 	AllowHome   bool
 	Hints       []string
@@ -1127,13 +1068,6 @@ type SearchResult struct {
 func RunChoicePage(page ChoicePage) (ChoiceResult, error) {
 	if len(page.Choices) == 0 {
 		return ChoiceResult{}, fmt.Errorf("missing choices")
-	}
-	if !inTUIWorker() {
-		var result ChoiceResult
-		handled, err := runPageInWorkerIfNeeded("tui.choice_page", page, &result)
-		if handled {
-			return result, err
-		}
 	}
 
 	app := newApp()
@@ -1202,13 +1136,6 @@ func RunChoicePage(page ChoicePage) (ChoiceResult, error) {
 func RunGroupedChoicePage(page GroupedChoicePage) (ChoiceResult, error) {
 	if len(page.Groups) == 0 {
 		return ChoiceResult{}, fmt.Errorf("missing choice groups")
-	}
-	if !inTUIWorker() {
-		var result ChoiceResult
-		handled, err := runPageInWorkerIfNeeded("tui.grouped_choice_page", page, &result)
-		if handled {
-			return result, err
-		}
 	}
 
 	app := newApp()
@@ -1369,16 +1296,7 @@ func RunGroupedChoicePage(page GroupedChoicePage) (ChoiceResult, error) {
 }
 
 func RunTextInputPage(page TextInputPage) (TextInputResult, error) {
-	if !inTUIWorker() {
-		var result TextInputResult
-		handled, err := runPageInWorkerIfNeeded("tui.text_input_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var result TextInputResult
 	input := tview.NewInputField().
 		SetLabel(page.Label + " ").
@@ -1393,7 +1311,7 @@ func RunTextInputPage(page TextInputPage) (TextInputResult, error) {
 
 	pasteStatus := newPasteStatus(func() { app.SetFocus(input) })
 	confirm := func() {
-		text, err := resolveInputFileText(ctx, input.GetText())
+		text, err := resolveInputFileText(input.GetText())
 		if err != nil {
 			showInputFileError(pasteStatus, err)
 			return
@@ -1402,7 +1320,6 @@ func RunTextInputPage(page TextInputPage) (TextInputResult, error) {
 			return
 		}
 		result.Text = text
-		cancel()
 		app.Stop()
 	}
 	paste := func() {
@@ -1439,7 +1356,6 @@ func RunTextInputPage(page TextInputPage) (TextInputResult, error) {
 	app.SetFocus(inputFrame)
 	installInputCapture(app, navCapture(app, page.AllowBack, page.AllowHome, func(nav NavAction) {
 		result.Nav = nav
-		cancel()
 		app.Stop()
 	}, keyBinding{Key: tcell.KeyCtrlV, Action: paste}))
 
@@ -1450,16 +1366,7 @@ func RunTextInputPage(page TextInputPage) (TextInputResult, error) {
 }
 
 func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
-	if !inTUIWorker() {
-		var result MultiLineResult
-		handled, err := runPageInWorkerIfNeeded("tui.multi_line_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var result MultiLineResult
 	area := tview.NewTextArea().
 		SetText(page.Initial, true).
@@ -1472,7 +1379,7 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 
 	pasteStatus := newPasteStatus(func() { app.SetFocus(area) })
 	confirm := func() {
-		text, err := resolveInputFileText(ctx, area.GetText())
+		text, err := resolveInputFileText(area.GetText())
 		if err != nil {
 			showInputFileError(pasteStatus, err)
 			return
@@ -1486,13 +1393,24 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 		} else {
 			result.Action = "apply"
 		}
-		cancel()
+		app.Stop()
+	}
+	secondary := func() {
+		text, err := resolveInputFileText(area.GetText())
+		if err != nil {
+			showInputFileError(pasteStatus, err)
+			return
+		}
+		if text == "" && !page.AllowEmpty && strings.TrimSpace(page.EmptyAction) == "" {
+			return
+		}
+		result.Text = text
+		result.Action = firstNonEmptyText(page.SecondaryAction, "secondary")
 		app.Stop()
 	}
 	skip := func() {
 		result.Text = ""
 		result.Action = "skip"
-		cancel()
 		app.Stop()
 	}
 	paste := func() {
@@ -1516,23 +1434,6 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 		buttonSpec{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; app.Stop() }, Visible: page.AllowHome},
 		buttonSpec{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: paste != nil},
 	)
-	altAction := func() {
-		text, err := resolveInputFileText(ctx, area.GetText())
-		if err != nil {
-			showInputFileError(pasteStatus, err)
-			return
-		}
-		if text == "" && !page.AllowEmpty {
-			return
-		}
-		result.Text = text
-		result.Action = strings.TrimSpace(page.AltAction)
-		if result.Action == "" {
-			result.Action = "alternate"
-		}
-		cancel()
-		app.Stop()
-	}
 	if strings.TrimSpace(page.SkipText) != "" {
 		shortcut := firstNonEmptyText(page.SkipShortcut, "Ctrl+K")
 		buttons.buttons = append(buttons.buttons, buttonSpec{
@@ -1542,13 +1443,12 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 			Visible:  true,
 		})
 	}
-	if strings.TrimSpace(page.AltText) != "" {
+	if strings.TrimSpace(page.SecondaryText) != "" {
 		buttons.buttons = append(buttons.buttons, buttonSpec{
-			Label:    conciseActionLabel(page.AltText, page.AltText),
-			Shortcut: firstNonEmptyText(page.AltShortcut, "Ctrl+W"),
-			Action:   altAction,
+			Label:    page.SecondaryText,
+			Shortcut: firstNonEmptyText(page.SecondaryShortcut, "Ctrl+K"),
+			Action:   secondary,
 			Visible:  true,
-			Primary:  true,
 		})
 	}
 	buttons.buttons = append(buttons.buttons, buttonSpec{
@@ -1557,29 +1457,31 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 		Action:   confirm,
 		Visible:  true,
 		Primary:  true,
-		Dynamic:  true,
 	})
 	area.SetChangedFunc(func() {
 		buttons.setPrimaryLabel(inputConfirmText(page.ConfirmText, page.SkipWhenEmpty, page.EmptyText, area.GetText()))
-		if buttons.dynamicPrimaryButton() != nil {
-			buttons.dynamicPrimaryButton().Shortcut = primaryShortcut
+		if buttons.primaryButton() != nil {
+			buttons.primaryButton().Shortcut = primaryShortcut
 		}
 	})
 	addButtonRow(body, buttons)
-	addHints(body, append(page.Hints, "Ctrl+Enter uses the main action button. Enter inserts a new line. Paste (Ctrl+V) reads plain text from the clipboard."))
+	hints := append([]string(nil), page.Hints...)
+	if strings.TrimSpace(page.SecondaryText) != "" {
+		hints = append(hints, fmt.Sprintf("%s uses %s.", firstNonEmptyText(page.SecondaryShortcut, "Ctrl+K"), strings.ToLower(strings.TrimSpace(page.SecondaryText))))
+	}
+	addHints(body, append(hints, "Ctrl+Enter uses the main action button. Enter inserts a new line. Paste (Ctrl+V) reads plain text from the clipboard."))
 
 	root := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	setPageRoot(app, root)
 	app.SetFocus(areaFrame)
 	installInputCapture(app, navCapture(app, page.AllowBack, page.AllowHome, func(nav NavAction) {
 		result.Nav = nav
-		cancel()
 		app.Stop()
 	}, keyBinding{Key: tcell.KeyCtrlV, Action: paste}, keyBinding{Match: func(event *tcell.EventKey) bool {
 		return strings.TrimSpace(page.SkipText) != "" && shortcutMatchesEvent(firstNonEmptyText(page.SkipShortcut, "Ctrl+K"), event)
 	}, Action: skip}, keyBinding{Match: func(event *tcell.EventKey) bool {
-		return strings.TrimSpace(page.AltText) != "" && shortcutMatchesEvent(firstNonEmptyText(page.AltShortcut, "Ctrl+W"), event)
-	}, Action: altAction}, keyBinding{Match: isCtrlEnter, Action: confirm}))
+		return strings.TrimSpace(page.SecondaryText) != "" && shortcutMatchesEvent(firstNonEmptyText(page.SecondaryShortcut, "Ctrl+K"), event)
+	}, Action: secondary}, keyBinding{Match: isCtrlEnter, Action: confirm}))
 
 	if err := runApp(app); err != nil {
 		return MultiLineResult{}, err
@@ -1590,13 +1492,6 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 func RunSearchPage(page SearchPage) (SearchResult, error) {
 	if len(page.Choices) == 0 {
 		return SearchResult{}, fmt.Errorf("missing search choices")
-	}
-	if !inTUIWorker() {
-		var result SearchResult
-		handled, err := runPageInWorkerIfNeeded("tui.search_page", page, &result)
-		if handled {
-			return result, err
-		}
 	}
 
 	const pageSize = 10
@@ -1659,7 +1554,11 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		}
 	}
 	applyFilter := func() {
-		filtered = defaultChoiceFilter(query, page.Choices)
+		if page.Filter != nil {
+			filtered = page.Filter(query, page.Choices)
+		} else {
+			filtered = defaultChoiceFilter(query, page.Choices)
+		}
 		clampSearchPage()
 	}
 	var refresh func()
@@ -1860,16 +1759,16 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		}
 		filterReady = false
 		refresh()
-		querySnapshot := text
-		seq := id
-		phygoboost.GoTask(context.Background(), uiTaskSpec("filter search results"), func(context.Context) {
-			time.Sleep(phygoboost.SearchDebounce())
+		go func(querySnapshot string, seq uint64) {
+			time.Sleep(perf.SearchDebounce())
 			if filterSeq.Load() != seq {
 				return
 			}
-			next := defaultChoiceFilter(querySnapshot, page.Choices)
-			if filterSeq.Load() != seq {
-				return
+			var next []Choice
+			if page.Filter != nil {
+				next = page.Filter(querySnapshot, page.Choices)
+			} else {
+				next = defaultChoiceFilter(querySnapshot, page.Choices)
 			}
 			app.QueueUpdateDraw(func() {
 				if filterSeq.Load() != seq {
@@ -1880,7 +1779,7 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 				clampSearchPage()
 				renderSearchResults()
 			})
-		})
+		}(text, id)
 	})
 	input.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
@@ -1986,13 +1885,6 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	if len(page.Rows) == 0 {
 		return RowSelectionResult{Selected: append([]bool{}, page.Selected...)}, nil
-	}
-	if !inTUIWorker() {
-		var result RowSelectionResult
-		handled, err := runPageInWorkerIfNeeded("tui.row_selection_page", page, &result)
-		if handled {
-			return result, err
-		}
 	}
 	app := newApp()
 	selected := normalizeSelection(page.Selected, len(page.Rows), true)
@@ -2105,7 +1997,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = false
 			modalText = nil
 			if pageRoot != nil {
-				setPageRoot(app, pageRoot)
+				app.SetRoot(pageRoot, true)
 			}
 			app.SetFocus(table)
 		}
@@ -2114,7 +2006,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		if pageRoot == nil {
 			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 		}
-		setPageRoot(app, overlayRootOn(pageRoot, modalBody, width, height))
+		app.SetRoot(overlayRootOn(pageRoot, modalBody, width, height), true)
 		app.SetFocus(modalBody)
 	}
 	showHelpModal := func(pages []localizedHelpPage, width int, height int) {
@@ -2122,7 +2014,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = false
 			helpModal = nil
 			if pageRoot != nil {
-				setPageRoot(app, pageRoot)
+				app.SetRoot(pageRoot, true)
 			}
 			app.SetFocus(table)
 		}
@@ -2131,7 +2023,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		if pageRoot == nil {
 			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 		}
-		setPageRoot(app, overlayRootOn(pageRoot, helpModal.Body(), width, height))
+		app.SetRoot(overlayRootOn(pageRoot, helpModal.Body(), width, height), true)
 		app.SetFocus(helpModal.TextView())
 	}
 	updateModeText := func() {
@@ -2253,7 +2145,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				ID:       "row",
 				Header:   "row",
 				Sortable: true,
-				Help:     "EN: Row number in the current table view. This is a display helper, not a source-database biological field.\nZH: Current table row number used for display order and quick navigation.\nJA: Current table row number used for display order and quick navigation.",
+				Help:     "EN: Sequential row number in the current table view. This is not a biological field from the source database; it is a display-order helper used for quick visual navigation, export traceability, and restoring the row order currently on screen.\n中文：当前表格视图中的顺序行号。这不是原始数据库中的生物学字段，而是一个用于快速浏览、导出追踪以及恢复当前屏幕显示顺序的辅助显示列。\n日本語：現在の表ビューにおける連番です。これは元データベース由来の生物学的項目ではなく、素早い視認、エクスポートの追跡、画面上の並び順の復元に使う表示補助列です。",
 			}, true
 		}
 		if headerColumn >= len(page.Columns) {
@@ -2651,17 +2543,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.State = captureState()
 		app.Stop()
 	}
-	runExtra := func() {
-		action := strings.TrimSpace(page.ExtraAction)
-		if action == "" {
-			action = "extra"
-		}
-		result.Selected = append([]bool{}, selected...)
-		result.FilterFlags = append([]bool{}, filterFlags...)
-		result.Action = action
-		result.State = captureState()
-		app.Stop()
-	}
 	toggleCurrent := func() {
 		if controlHeaders {
 			return
@@ -2695,7 +2576,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
 		{Label: conciseActionLabel(page.DoneAllText, ButtonExportAll), Shortcut: ShortcutExportAll, Action: func() { generate(true) }, Visible: page.AllowDoneAll, Primary: true},
-		{Label: conciseActionLabel(page.ExtraText, page.ExtraText), Shortcut: firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), Action: runExtra, Visible: strings.TrimSpace(page.ExtraText) != "", Primary: true},
 		{Label: conciseActionLabel(page.GenerateText, ButtonExport), Shortcut: ShortcutExport, Action: func() { generate(false) }, Visible: true, Primary: true},
 		{Label: conciseActionLabel(page.ConfirmText, ButtonView), Shortcut: ShortcutConfirm, Action: viewCurrent, Visible: true, Primary: true},
 	}
@@ -2787,11 +2667,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		case tcell.KeyCtrlG:
 			generate(false)
 			return nil
-		case tcell.KeyCtrlB:
-			if strings.TrimSpace(page.ExtraText) != "" {
-				runExtra()
-				return nil
-			}
 		case tcell.KeyEnter:
 			if controlHeaders {
 				viewCurrentHeader()
@@ -2871,13 +2746,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 }
 
 func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResult, error) {
-	if !inTUIWorker() {
-		var result BlastRunSelectionResult
-		handled, err := runPageInWorkerIfNeeded("tui.blast_run_selection_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result BlastRunSelectionResult
 	if len(page.Items) == 0 {
@@ -3101,7 +2969,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			if pageRoot != nil {
-				setPageRoot(app, pageRoot)
+				app.SetRoot(pageRoot, true)
 			}
 			if controlMode == 2 {
 				app.SetFocus(list)
@@ -3111,7 +2979,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		}
 		addButtonRow(modalBody, modalButtons(nil, true, ButtonOK, "Enter", func(nav NavAction) {}, closeModal))
 		modalOpen = true
-		setPageRoot(app, overlayRootOn(pageRoot, modalBody, width, height))
+		app.SetRoot(overlayRootOn(pageRoot, modalBody, width, height), true)
 		app.SetFocus(modalBody)
 	}
 	showHelpModal := func(pages []localizedHelpPage, width int, height int) {
@@ -3120,7 +2988,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			helpModal = nil
 			if pageRoot != nil {
-				setPageRoot(app, pageRoot)
+				app.SetRoot(pageRoot, true)
 			}
 			if controlMode == 2 {
 				app.SetFocus(list)
@@ -3129,7 +2997,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			}
 		}
 		modalOpen = true
-		setPageRoot(app, overlayRootOn(pageRoot, helpModal.Body(), width, height))
+		app.SetRoot(overlayRootOn(pageRoot, helpModal.Body(), width, height), true)
 		app.SetFocus(helpModal.TextView())
 	}
 	currentRowDetail := func(originalRow int) string {
@@ -3160,7 +3028,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				ID:       "row",
 				Header:   "row",
 				Sortable: true,
-				Help:     "EN: Row number in the current table view. This is a display helper, not a source-database biological field.\nZH: Current table row number used for display order and quick navigation.\nJA: Current table row number used for display order and quick navigation.",
+				Help:     "EN: Sequential row number in the current table view. This is not a biological field from the source database; it is a display-order helper used for quick visual navigation, export traceability, and restoring the row order currently on screen.\n中文：当前表格视图中的顺序行号。这不是原始数据库中的生物学字段，而是一个用于快速浏览、导出追踪以及恢复当前屏幕显示顺序的辅助显示列。\n日本語：現在の表ビューにおける連番です。これは元データベース由来の生物学的項目ではなく、素早い視認、エクスポートの追跡、画面上の並び順の復元に使う表示補助列です。",
 			}, true
 		}
 		item := currentItem()
@@ -3684,284 +3552,6 @@ func taskCancelError(page TaskPage) error {
 	return ErrTaskCancelled
 }
 
-func initialTaskStatus(page TaskPage) string {
-	status := strings.TrimSpace(page.Initial)
-	if status == "" {
-		status = strings.TrimSpace(page.Description)
-	}
-	if status == "" {
-		status = strings.TrimSpace(page.Title)
-	}
-	if status == "" {
-		status = "Working..."
-	}
-	return status
-}
-
-func taskTitle(page TaskPage) string {
-	title := strings.TrimSpace(page.WindowTitle)
-	if title == "" {
-		title = strings.TrimSpace(page.Title)
-	}
-	if title == "" {
-		title = strings.TrimSpace(page.Initial)
-	}
-	if title == "" {
-		title = "Task"
-	}
-	return title
-}
-
-func taskSubtitle(page TaskPage) string {
-	subtitle := strings.TrimSpace(page.Title)
-	if subtitle == "" {
-		subtitle = strings.TrimSpace(page.Description)
-	}
-	if subtitle == "" {
-		subtitle = "Background activity"
-	}
-	return subtitle
-}
-
-func taskProgressRender(current int, total int, width int) string {
-	current, total = normalizeTaskProgress(current, total)
-	if total <= 0 {
-		return ""
-	}
-	if width < 8 {
-		width = 8
-	}
-	ratio := float64(current) / float64(total)
-	if ratio < 0 {
-		ratio = 0
-	}
-	if ratio > 1 {
-		ratio = 1
-	}
-	filled := int(ratio * float64(width))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > width {
-		filled = width
-	}
-	return fmt.Sprintf("[deepskyblue]%s[white]%s  %d/%d (%3.0f%%)",
-		strings.Repeat("#", filled),
-		strings.Repeat("-", width-filled),
-		current,
-		total,
-		ratio*100,
-	)
-}
-
-func taskProgressSlotHeight(slot taskProgressSlot) int {
-	height := 3
-	if strings.TrimSpace(slot.Title) != "" {
-		height++
-	}
-	if slot.Total > 0 {
-		height++
-	}
-	return height
-}
-
-func taskModalHeightForSlots(page TaskPage, slots []taskProgressSlot) int {
-	rows := 4
-	if strings.TrimSpace(page.Description) != "" {
-		rows += 2
-	}
-	if len(slots) == 0 {
-		rows += 4
-	}
-	for _, slot := range slots {
-		rows += taskProgressSlotHeight(slot)
-	}
-	rows += 3
-	return modalHeightForContent(rows, 16, 34)
-}
-
-func clampTaskProgressSlots(slots []taskProgressSlot, limit int) []taskProgressSlot {
-	if limit <= 0 || len(slots) <= limit {
-		return append([]taskProgressSlot(nil), slots...)
-	}
-	out := make([]taskProgressSlot, 0, limit)
-	active := make([]taskProgressSlot, 0, limit)
-	idle := make([]taskProgressSlot, 0, len(slots))
-	for _, slot := range slots {
-		if slot.Active {
-			active = append(active, slot)
-		} else {
-			idle = append(idle, slot)
-		}
-	}
-	out = append(out, active...)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	for _, slot := range idle {
-		if len(out) >= limit {
-			break
-		}
-		out = append(out, slot)
-	}
-	return out
-}
-
-var sharedTaskOverlay taskOverlayManager
-
-func (m *taskOverlayManager) register(slot taskProgressSlot) (int64, func(taskProgressSlot), func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.slots == nil {
-		m.slots = map[int64]*taskOverlaySlotState{}
-	}
-	m.nextID++
-	m.nextSeq++
-	id := m.nextID
-	m.slots[id] = &taskOverlaySlotState{
-		title:   slot.Title,
-		status:  slot.Status,
-		current: slot.Current,
-		total:   slot.Total,
-		active:  slot.Active,
-		order:   m.nextSeq,
-	}
-	update := func(next taskProgressSlot) {
-		m.update(id, next)
-	}
-	remove := func() {
-		m.remove(id)
-	}
-	return id, update, remove
-}
-
-func (m *taskOverlayManager) update(id int64, slot taskProgressSlot) {
-	m.mu.Lock()
-	state := m.slots[id]
-	if state == nil {
-		m.mu.Unlock()
-		return
-	}
-	m.nextSeq++
-	seq := m.nextSeq
-	m.mu.Unlock()
-
-	state.mu.Lock()
-	state.title = slot.Title
-	state.status = slot.Status
-	state.current = slot.Current
-	state.total = slot.Total
-	state.active = slot.Active
-	if slot.Active {
-		state.order = seq
-	} else {
-		state.completedOrder = seq
-	}
-	state.mu.Unlock()
-}
-
-func (m *taskOverlayManager) remove(id int64) {
-	m.mu.Lock()
-	delete(m.slots, id)
-	m.mu.Unlock()
-}
-
-func (m *taskOverlayManager) snapshot(limit int, currentID int64, fallback taskProgressSlot) []taskProgressSlot {
-	type snapshotSlot struct {
-		id             int64
-		slot           taskProgressSlot
-		order          int64
-		completedOrder int64
-	}
-
-	m.mu.Lock()
-	states := make([]snapshotSlot, 0, len(m.slots)+1)
-	for id, state := range m.slots {
-		if state == nil {
-			continue
-		}
-		state.mu.Lock()
-		copySlot := snapshotSlot{
-			id: id,
-			slot: taskProgressSlot{
-				Title:   state.title,
-				Status:  state.status,
-				Current: state.current,
-				Total:   state.total,
-				Active:  state.active,
-			},
-			order:          state.order,
-			completedOrder: state.completedOrder,
-		}
-		state.mu.Unlock()
-		states = append(states, copySlot)
-	}
-	m.mu.Unlock()
-
-	foundCurrent := false
-	for _, state := range states {
-		if state.id == currentID {
-			foundCurrent = true
-			break
-		}
-	}
-	if !foundCurrent {
-		states = append(states, snapshotSlot{id: currentID, slot: fallback, order: 1 << 60})
-	}
-
-	sort.SliceStable(states, func(i, j int) bool {
-		left := states[i]
-		right := states[j]
-		if left.id == currentID && right.id != currentID {
-			return true
-		}
-		if right.id == currentID && left.id != currentID {
-			return false
-		}
-		if left.slot.Active != right.slot.Active {
-			return left.slot.Active
-		}
-		if left.slot.Active {
-			if left.order != right.order {
-				return left.order > right.order
-			}
-		} else if left.completedOrder != right.completedOrder {
-			return left.completedOrder > right.completedOrder
-		}
-		return left.order > right.order
-	})
-
-	out := make([]taskProgressSlot, 0, len(states))
-	for _, state := range states {
-		out = append(out, state.slot)
-	}
-	return clampTaskProgressSlots(out, limit)
-}
-
-func renderTaskProgressSlots(frame string, slots []taskProgressSlot) string {
-	lines := make([]string, 0, len(slots)*5)
-	for _, item := range slots {
-		title := strings.TrimSpace(item.Title)
-		status := strings.TrimSpace(item.Status)
-		if title != "" {
-			titleLine := fmt.Sprintf("[yellow]%s[white] [::b]%s[::-]", frame, title)
-			if !item.Active {
-				titleLine = fmt.Sprintf("[gray]%s[white] %s", frame, title)
-			}
-			lines = append(lines, titleLine)
-		}
-		if status == "" {
-			status = "Working..."
-		}
-		lines = append(lines, status)
-		if bar := taskProgressRender(item.Current, item.Total, 28); bar != "" {
-			lines = append(lines, bar)
-		}
-		lines = append(lines, "")
-	}
-	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
 func RunTaskValueContext[T any](page TaskPage, task func(ctx context.Context, update func(string)) (T, error)) (T, error) {
 	return runTaskValue(page, task)
 }
@@ -3970,31 +3560,7 @@ func RunProgressTaskValueContext[T any](page TaskPage, task func(ctx context.Con
 	return runProgressTaskValue(page, task)
 }
 
-func taskChildRegistrarFromContext(ctx context.Context) TaskChildSlotRegistrar {
-	if ctx == nil {
-		return nil
-	}
-	registrar, _ := ctx.Value(taskChildSlotKey{}).(TaskChildSlotRegistrar)
-	return registrar
-}
-
-func RegisterTaskChildSlot(ctx context.Context, slot taskProgressSlot) (func(taskProgressSlot), func(), bool) {
-	registrar := taskChildRegistrarFromContext(ctx)
-	if registrar == nil {
-		return nil, nil, false
-	}
-	update, remove := registrar(slot)
-	return update, remove, true
-}
-
 func RunInfoPage(page InfoPage) (InfoResult, error) {
-	if !inTUIWorker() {
-		var result InfoResult
-		handled, err := runPageInWorkerIfNeeded("tui.info_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result InfoResult
 	confirm := func() {
@@ -4013,7 +3579,7 @@ func RunInfoPage(page InfoPage) (InfoResult, error) {
 	}, confirm))
 	addHints(modalBody, page.Hints)
 
-	setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18))
+	app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18), true)
 	app.SetFocus(modalBody)
 	installInputCapture(app, navCapture(app, page.AllowBack, page.AllowHome, func(nav NavAction) {
 		result.Nav = nav
@@ -4026,13 +3592,6 @@ func RunInfoPage(page InfoPage) (InfoResult, error) {
 }
 
 func RunActionModalPage(page ActionModalPage) (ActionModalResult, error) {
-	if !inTUIWorker() {
-		var result ActionModalResult
-		handled, err := runPageInWorkerIfNeeded("tui.action_modal_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result ActionModalResult
 	choose := func(value string) {
@@ -4082,7 +3641,7 @@ func RunActionModalPage(page ActionModalPage) (ActionModalResult, error) {
 		app.Stop()
 	}, confirm))
 
-	setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18))
+	app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18), true)
 	app.SetFocus(modalBody)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -4136,13 +3695,6 @@ func RunRecoveryModalPage(page RecoveryModalPage) (ActionModalResult, error) {
 func RunChoiceModalPage(page ChoiceModalPage) (ChoiceResult, error) {
 	if len(page.Choices) == 0 {
 		return ChoiceResult{}, fmt.Errorf("missing choices")
-	}
-	if !inTUIWorker() {
-		var result ChoiceResult
-		handled, err := runPageInWorkerIfNeeded("tui.choice_modal_page", page, &result)
-		if handled {
-			return result, err
-		}
 	}
 	choices := choiceModalOptions(page)
 
@@ -4198,7 +3750,7 @@ func RunChoiceModalPage(page ChoiceModalPage) (ChoiceResult, error) {
 		},
 	))
 
-	setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18))
+	app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 90, 18), true)
 	app.SetFocus(list)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
@@ -4251,13 +3803,6 @@ func choiceModalOptions(page ChoiceModalPage) []Choice {
 }
 
 func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, error) {
-	if !inTUIWorker() {
-		var result ExportSettingsResult
-		handled, err := runPageInWorkerIfNeeded("tui.export_settings_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result ExportSettingsResult
 	fileLabel := firstNonEmptyText(page.FileLabel, "File name")
@@ -4426,7 +3971,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 
 	height := contentHeight + 2
 	width := 118
-	setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, width, height))
+	app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, width, height), true)
 	focusCurrent()
 	fileInput.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
@@ -4483,13 +4028,6 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 }
 
 func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceResult, error) {
-	if !inTUIWorker() {
-		var result ExternalReferenceResult
-		handled, err := runPageInWorkerIfNeeded("tui.external_reference_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result ExternalReferenceResult
 	useUniProt := page.UniProtInitial
@@ -4693,12 +4231,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			})
 		}
 		helpModal.SetLanguage(app, int(helpLanguageIndex.Load()))
-		setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40))
+		app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40), true)
 		app.SetFocus(helpModal.TextView())
 	}
 	closeHelp = func() {
 		helpVisible = false
-		setPageRoot(app, mainRoot)
+		app.SetRoot(mainRoot, true)
 		setTopFocus(topIndex)
 	}
 
@@ -4725,7 +4263,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	externalReferenceHeight := modalHeightForContent(messageHeight+3+2+2+3+len(settingBoxes)+1+2+1+5+1+4, 36, 46)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
-	setPageRoot(app, mainRoot)
+	app.SetRoot(mainRoot, true)
 	setTopFocus(0)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		if helpVisible {
@@ -4798,13 +4336,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 }
 
 func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
-	if !inTUIWorker() {
-		var result FamilyBlastResult
-		handled, err := runPageInWorkerIfNeeded("tui.family_blast_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result FamilyBlastResult
 	settings := normalizeTUIFamilyBlastSettings(page.Settings)
@@ -4965,12 +4496,12 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			})
 		}
 		helpModal.SetLanguage(app, int(helpLanguageIndex.Load()))
-		setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40))
+		app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40), true)
 		app.SetFocus(helpModal.TextView())
 	}
 	closeHelp = func() {
 		helpVisible = false
-		setPageRoot(app, mainRoot)
+		app.SetRoot(mainRoot, true)
 		setFocusAt(focusIndex)
 	}
 
@@ -5017,7 +4548,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	contentRows := maxInt(18, settingsRows+2)
 	height := modalHeightForContent(messageHeight+referenceHeight+buttonHeight+hintsHeight+bodyBorderHeight+framePaddingHeight+contentRows, 34, 48)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 144, height)
-	setPageRoot(app, mainRoot)
+	app.SetRoot(mainRoot, true)
 	setFocusAt(focusIndex)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		if helpVisible {
@@ -5409,7 +4940,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			restore: restore,
 			focus:   focus,
 		})
-		setPageRoot(app, root)
+		app.SetRoot(root, true)
 		if focus != nil {
 			app.SetFocus(focus)
 		}
@@ -5420,7 +4951,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		top := modalStack[len(modalStack)-1]
 		modalStack = modalStack[:len(modalStack)-1]
-		setPageRoot(app, currentRoot())
+		app.SetRoot(currentRoot(), true)
 		if top.restore != nil {
 			top.restore()
 		} else if len(modalStack) > 0 && modalStack[len(modalStack)-1].focus != nil {
@@ -6102,7 +5633,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	refreshGroupedList()
 	refreshRightList()
 	refreshStatus()
-	setPageRoot(app, mainRoot)
+	app.SetRoot(mainRoot, true)
 	setPaneFocus(0)
 	modal.root = mainRoot
 	modal.groupedList = groupedList
@@ -6190,13 +5721,6 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 }
 
 func RunFamilyBlastCustomizeModal(page FamilyBlastCustomizePage) (FamilyBlastResult, error) {
-	if !inTUIWorker() {
-		var result FamilyBlastResult
-		handled, err := runPageInWorkerIfNeeded("tui.family_blast_customize_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result FamilyBlastResult
 	buildFamilyBlastCustomizeModal(page, app, &result)
@@ -6220,13 +5744,6 @@ func splitSidebarLines(value string) []string {
 }
 
 func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
-	if !inTUIWorker() {
-		var result BlastFilterResult
-		handled, err := runPageInWorkerIfNeeded("tui.blast_filter_page", page, &result)
-		if handled {
-			return result, err
-		}
-	}
 	app := newApp()
 	var result BlastFilterResult
 	settings := normalizeTUIBlastFilterSettings(page.Settings)
@@ -6738,12 +6255,12 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 			})
 		}
 		helpModal.SetLanguage(app, int(helpLanguageIndex.Load()))
-		setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40))
+		app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40), true)
 		app.SetFocus(helpModal.TextView())
 	}
 	closeHelp = func() {
 		helpVisible = false
-		setPageRoot(app, mainRoot)
+		app.SetRoot(mainRoot, true)
 		setModuleFocus(moduleIndex)
 	}
 
@@ -6760,7 +6277,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	}
 	filterContentRows += 2
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), module, 148, modalHeightForContent(filterContentRows, 50, 58))
-	setPageRoot(app, mainRoot)
+	app.SetRoot(mainRoot, true)
 	setActivePage(activePage)
 	setModuleFocus(moduleIndex)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
@@ -7013,102 +6530,943 @@ func normalizeTUIFamilyBlastSettings(settings FamilyBlastSettings) FamilyBlastSe
 }
 
 func familyBlastHelpPages() []localizedHelpPage {
-	text := strings.TrimSpace(`Family BLAST is for grouped query sets such as NAME1, NAME2, NAME3, and NAME4 where several proteins represent one functional family.
-
-The BLAST jobs still run per query, but review and export can be grouped by detected family prefix.
-
-Enable Family BLAST mode turns this grouped workflow on. If it is off, the batch behaves like normal multi-file BLAST and each query remains separate.
-
-Group queries by detected family prefix derives a family name from the query label without changing the original label.
-
-Ignore suffix after member number before grouping is on by default and helps labels such as IRX10-like group with IRX10 and other IRX members.
-
-Strip Arabidopsis At/AT prefix only for family_name is off by default and is only for cases where ATPAL should group as PAL.
-
-Merge grouped result rows by target protein/gene removes duplicate targets inside one family.
-
-Keep best BLAST hit chooses the strongest row for duplicated targets.
-
-minimum queries per group controls how many query members must share a family prefix before Family BLAST is offered. The default is 2.
-
-This mode does not require UniProt or InterPro, but external references still make grouped review and filtering more useful.`)
 	return []localizedHelpPage{
 		{
 			Label:    "English",
 			Shortcut: "1",
 			Title:    "Family BLAST help",
-			Text:     text,
+			Text: strings.TrimSpace(`Family BLAST is for query sets where several proteins represent one functional gene family, such as NAME1, NAME2, NAME3, and NAME4. The BLAST jobs still run per query, but the review/export unit becomes the detected family.
+
+Enable Family BLAST mode keeps the detected grouped workflow active. If it is off, the batch behaves like normal multi-file BLAST and each query remains separate.
+
+Group queries by detected family prefix derives a family name from the query label without changing the original label_name. For example, NAME1/NAME2/NAME3/NAME4 becomes NAME, ATNAME1/ATNAME2 becomes ATNAME, and GROUP.1/GROUP2 becomes GROUP.
+
+Ignore suffix after member number before grouping is on by default. Labels shaped like prefix + number + suffix, such as IRX10-like or IRX10_like, are grouped by the part through the number before normal member-number stripping. This makes IRX9, IRX14, IRX10, and IRX10-like group together as IRX.
+
+Strip Arabidopsis At/AT prefix only for family_name is off by default. Turn it on only when you deliberately want Arabidopsis-style aliases such as ATPAL1/ATPAL2 to group as PAL instead of ATPAL. This never rewrites the original label_name.
+
+Merge grouped result rows by target protein/gene removes duplicate target candidates inside a family. If the same target protein is hit by several grouped queries, it is counted once as one family candidate.
+
+Keep best BLAST hit chooses the strongest row for a duplicated target, preferring lower E-value, then higher identity, query coverage, and bitscore.
+
+minimum queries per group controls how many query members must share a detected family prefix before the modal offers Family BLAST. The default is 2.
+
+This mode does not require UniProt or InterPro to run. External references still make the grouped result much more useful, and the automatic filter remains available only when all required external references are present.`),
 		},
 		{
-			Label:    "Chinese",
+			Label:    "中文",
 			Shortcut: "2",
-			Title:    "Family BLAST help",
-			Text:     text,
+			Title:    "Family BLAST 帮助",
+			Text: strings.TrimSpace(`Family BLAST 用于多个蛋白共同代表一个功能基因家族的情况，例如 NAME1、NAME2、NAME3、NAME4。BLAST 仍然按每条 query 分别执行，但查看和导出的单位会变成检测到的 family。
+
+Enable Family BLAST mode 用来开启这个分组流程。关闭后，多文件 BLAST 会回到普通模式，每个 query 仍然是独立结果和独立文件。
+
+Group queries by detected family prefix 会从 query label 推断 family 名，但不会修改原始 label_name。例如 NAME1/NAME2/NAME3/NAME4 会变成 NAME，ATNAME1/ATNAME2 会变成 ATNAME，GROUP.1/GROUP2 会变成 GROUP。
+
+Ignore suffix after member number before grouping 默认开启。像 IRX10-like 或 IRX10_like 这种“前缀 + 数字 + 后缀”的 label，会先只保留到数字为止，再做普通的成员编号去除。因此 IRX9、IRX14、IRX10、IRX10-like 会一起分到 IRX。
+
+Strip Arabidopsis At/AT prefix only for family_name 默认关闭。只有当你明确希望把 ATPAL1/ATPAL2 这类 Arabidopsis-style alias 按 PAL 而不是 ATPAL 分组时才打开。它永远不会改写原始 label_name。
+
+Merge grouped result rows by target protein/gene 会在 family 内按目标蛋白或基因去重。同一个目标蛋白如果同时被多个同组 query 命中，只算一个 family candidate。
+
+Keep best BLAST hit 会在重复 target 中选择证据最强的一行，优先看更低 E-value，然后看 identity、query coverage 和 bitscore。
+
+minimum queries per group 控制至少多少条 query 共享同一个 family 前缀才弹出 Family BLAST。默认是 2。
+
+这个模式本身不要求 UniProt 或 InterPro 才能运行。外部参考器会让合并结果更有判断价值，而自动筛选器仍然只在必要外部参考器都存在时可用。`),
 		},
 		{
-			Label:    "Japanese",
+			Label:    "日本語",
 			Shortcut: "3",
-			Title:    "Family BLAST help",
-			Text:     text,
+			Title:    "Family BLAST ヘルプ",
+			Text: strings.TrimSpace(`Family BLAST は、NAME1、NAME2、NAME3、NAME4 のように複数のタンパク質が一つの機能的遺伝子ファミリーを代表する場合に使います。BLAST 実行は各 query ごとに行いますが、確認と出力の単位は検出された family になります。
+
+Enable Family BLAST mode は、このグループ化ワークフローを有効にします。無効にすると、通常の複数ファイル BLAST と同じく各 query が独立した結果になります。
+
+Group queries by detected family prefix は元の label_name を変更せず、query label から family 名を推定します。たとえば NAME1/NAME2/NAME3/NAME4 は NAME、ATNAME1/ATNAME2 は ATNAME、GROUP.1/GROUP2 は GROUP になります。
+
+Ignore suffix after member number before grouping は既定でオンです。IRX10-like や IRX10_like のような「prefix + number + suffix」形式の label は、通常のメンバー番号除去の前に数字までを使います。そのため IRX9、IRX14、IRX10、IRX10-like は IRX として同じグループになります。
+
+Strip Arabidopsis At/AT prefix only for family_name は既定でオフです。ATPAL1/ATPAL2 のような Arabidopsis-style alias を ATPAL ではなく PAL としてグループ化したい場合だけオンにします。元の label_name は変更しません。
+
+Merge grouped result rows by target protein/gene は family 内で target protein/gene を重複除去します。同じ target protein が複数の同じグループの query にヒットした場合、family candidate として一つだけ数えます。
+
+Keep best BLAST hit は重複 target の中から最も強い行を選びます。低い E-value、高い identity、query coverage、bitscore を優先します。
+
+minimum queries per group は、同じ family prefix を共有する query が何本以上なら Family BLAST を提案するかを決めます。既定値は 2 です。
+
+このモード自体は UniProt や InterPro がなくても実行できます。ただし外部参照がある方が grouped result の判断は強くなり、自動フィルターは必要な外部参照が揃っている場合だけ利用できます。`),
 		},
 	}
 }
+
 func blastFilterHelpPages() []localizedHelpPage {
-	text := strings.TrimSpace(`The BLAST filter is an automatic uncheck suggestion for result tables. It does not delete rows and it does not lock the selection.
+	return []localizedHelpPage{
+		{
+			Label:    "English",
+			Shortcut: "1",
+			Title:    "BLAST filter help",
+			Text: strings.TrimSpace(`The BLAST filter is an automatic uncheck suggestion for result tables. It does not delete rows and it does not lock the selection. After applying it, rows suggested for removal are unchecked and their row numbers are shown in red, so you can still manually re-check anything that looks biologically meaningful.
 
 The filter is available only when all external references are enabled for the BLAST run, because the default judgment depends on the original BLAST columns plus UniProt and InterPro evidence.
 
-min identity (%), min align/query coverage (%), and max E-value are optional hard thresholds that can be enabled when you want stricter follow-up filtering.
+min identity (%) is an optional extra hard rule for removing weak local similarity. The default is 0, meaning identity does not reject rows by itself. Set a value such as 30% when you want BLAST similarity strength to become a hard cutoff in addition to reference evidence.
 
-target_length / UniProt canonical length range checks whether the original database target length is plausible relative to the UniProt canonical reference.
+min align/query coverage (%) is an optional extra hard rule for removing hits that align only a small part of the query. The default is 0, meaning query coverage does not reject rows by itself. Turn it on when you specifically want to remove short local alignments before manual review.
 
-Require UniProt accession, Prefer UniProt reviewed entries, Reject UniProt fragment entries, and Reject UniProt sequence cautions control how UniProt evidence participates in filtering.
+max E-value is an optional extra hard rule for removing statistically weak BLAST hits. The default is 0, meaning E-value does not reject rows by itself. A strict value such as 1e-30 can be enabled for narrower follow-up passes, and it remains generic rather than tied to any species, pathway, or gene family.
 
-InterPro conserved region status is the most important external evidence for preserved conserved sequence or domain support. By default, present and partial are kept while missing, uncertain, and blank status are suggested for removal.
+target_length / UniProt canonical length range checks whether the original database target protein length is plausible compared with the UniProt canonical reference. The default 70-130% range is meant to catch clearly truncated or overly extended mappings without forcing every isoform to be exactly the same length. Require length ratio data is on by default, so rows without a UniProt canonical length ratio are treated as insufficiently supported instead of unknown-pass.
 
-min InterPro coverage (%) is optional and can act as an additional hard threshold.
+Require UniProt accession is off by default. Turn it on only when missing UniProt mapping should be treated as a failure in your current dataset.
 
-Keep best isoform per target gene collapses transcript isoforms for the same target gene and keeps the strongest row.
+Prefer UniProt reviewed entries adds positive score for Swiss-Prot reviewed records. It is not a hard default rejection, because many plant proteins are valid but still unreviewed.
 
-Keep only top hits per query limits the number of surviving candidates after scoring.
+Reject UniProt fragment entries removes rows mapped to UniProt fragment records. This helps avoid sequences that look homologous only because the reference itself is incomplete.
 
-Use soft evidence score turns on weighted scoring in addition to hard rules.
+Reject UniProt sequence cautions removes rows with UniProt sequence caution text. It is off by default because caution notes need manual interpretation.
 
-The score and ranking controls expose the internal weights and tie-break order used by the filter.
+InterPro conserved region status is the most important external evidence for preserved conserved sequence/domain support. By default, conserved-region evidence is required: present and partial are kept, while missing, uncertain, and blank status are suggested for removal.
 
-A practical default interpretation is: remove rows with missing or abnormal canonical-length evidence, UniProt fragment warnings, or missing/uncertain/blank InterPro conserved-region evidence; keep present or partial conserved-domain rows visible for manual review.`)
-	return []localizedHelpPage{
-		{Label: "English", Shortcut: "1", Title: "BLAST filter help", Text: text},
-		{Label: "Chinese", Shortcut: "2", Title: "BLAST filter help", Text: text},
-		{Label: "Japanese", Shortcut: "3", Title: "BLAST filter help", Text: text},
+min InterPro coverage (%) is optional. Leave it at 0 to avoid using a numeric coverage cutoff; set it when you want InterPro coverage to act as an extra hard threshold. Require InterPro coverage when used controls the missing-data behavior for that threshold: if it is on, rows without a numeric InterPro coverage value fail once the coverage threshold is enabled.
+
+Keep best isoform per target gene collapses transcript isoforms for the same target gene and keeps the strongest row by external-reference evidence, identity, coverage, and E-value. This is on by default because homolog review is usually clearer at the gene-candidate level before you inspect individual transcript isoforms.
+
+Keep only top hits per query limits the number of surviving candidates after scoring. It is useful for very large BLAST tables but is off by default because gene-family expansion and recent duplication are often biologically meaningful.
+
+Use soft evidence score turns on a weighted score in addition to hard rules. The default workflow uses hard rules only; enable scoring when you want reviewed status, annotation richness, and InterPro strength to contribute to a combined confidence threshold.
+
+The score and ranking controls expose every internal value used by the filter. Soft-score weights set how much identity, query coverage, length ratio, InterPro present/partial/coverage, reviewed UniProt, annotation richness, fragments, and sequence cautions contribute when soft scoring is enabled. Reference-score controls set how duplicate isoforms and top-hit limiting rank otherwise similar rows, including InterPro status scores, coverage divisor, UniProt evidence scores, fragment/caution penalty multipliers, and length-distance bands. The tie-break order field accepts comma-separated items: score, identity, coverage, reference, evalue, bitscore. The matching checkboxes decide whether each item is active.
+
+A practical default interpretation for pathway-family work is: remove rows with missing or abnormal canonical-length evidence, UniProt fragment warnings, or missing/uncertain/blank InterPro conserved-region evidence; keep present/partial conserved-domain rows visible for manual review. Identity, query coverage, and E-value remain available as optional stricter follow-up filters.`),
+		},
+		{
+			Label:    "中文",
+			Shortcut: "2",
+			Title:    "BLAST 筛选器帮助",
+			Text: strings.TrimSpace(`BLAST 筛选器是结果表格里的“自动取消勾选建议”。它不会删除行，也不会锁定选择状态。应用后，被建议移除的行会自动取消勾选，行号显示为红色；你仍然可以手动把任何看起来有生物学意义的行重新勾选回来。
+
+只有 BLAST 运行启用了全部外部参考器时，筛选器才可用，因为默认判断依赖原始 BLAST 列、UniProt 证据和 InterPro 证据一起判断。
+
+min identity (%) 是可选的额外硬阈值，用来去掉局部相似性太弱的命中。默认是 0，表示 identity 不会单独导致取消勾选。需要让 BLAST 相似性强度也变成硬筛选时，可以设成 30% 之类的值。
+
+min align/query coverage (%) 是可选的额外硬阈值，用来去掉只覆盖 query 很小一部分的命中。默认是 0，表示 query coverage 不会单独导致取消勾选。需要在人工检查前先去掉短局部比对时再开启。
+
+max E-value 是可选的额外硬阈值，用来去掉统计显著性不够强的 BLAST 命中。默认是 0，表示 E-value 不会单独导致取消勾选。需要更窄的后续筛选时可以设成 1e-30 之类的严格值；这个阈值仍然是通用的，不绑定任何物种、通路或基因家族。
+
+target_length / UniProt canonical length range 用来判断原始数据库里的目标蛋白长度相对 UniProt canonical 参考是否合理。默认 70-130%，目的是抓住明显截短或明显过长的映射，同时不强迫所有 isoform 都完全等长。Require length ratio data 默认开启，所以没有 UniProt canonical length ratio 的行会被视为证据不足，而不是 unknown 后默认通过。
+
+Require UniProt accession 默认关闭。只有在你的当前数据集中，缺少 UniProt 映射本身就应该被视为失败时，才建议打开。
+
+Prefer UniProt reviewed entries 会给 Swiss-Prot reviewed 条目加分。它默认不是硬性剔除，因为很多植物蛋白是可信的，但仍然处于 unreviewed 状态。
+
+Reject UniProt fragment entries 会移除映射到 UniProt fragment 记录的行。这有助于避免参考记录本身不完整导致的假阳性。
+
+Reject UniProt sequence cautions 会移除带有 UniProt sequence caution 文本的行。默认关闭，因为 caution 的具体含义通常需要人工解释。
+
+InterPro conserved region status 是判断保存配列、保守结构域或保守家族证据是否保留的最重要外部证据。默认要求必须有保守区域证据：present 和 partial 保留，missing、uncertain 和空状态都会建议移除。
+
+min InterPro coverage (%) 是可选项。保持 0 表示不用数值覆盖度作为硬阈值；如果希望 InterPro coverage 也参与硬筛选，可以设置一个具体比例。Require InterPro coverage when used 控制这个阈值开启后的缺失数据处理：打开时，没有数值型 InterPro coverage 的行会直接不通过这个阈值。
+
+Keep best isoform per target gene 会把同一目标基因的多个转录本 isoform 折叠为一条最佳行，优先保留外部参考证据、identity、coverage 和 E-value 最强的记录。默认开启，因为同源候选的第一轮检查通常先看基因候选层面，再回头检查具体转录本 isoform。
+
+Keep only top hits per query 会在打分后限制每个 query 保留的候选数。它适合非常大的 BLAST 表，但默认关闭，因为基因家族扩张和近期复制经常有真实生物学意义。
+
+Use soft evidence score 会在硬规则之外启用加权评分。默认流程只使用硬规则；当你希望 reviewed 状态、注释丰富度和 InterPro 强度组成一个综合置信度阈值时，可以打开评分。
+
+Score 和 ranking 控制项会暴露筛选器内部用到的全部数值。Soft-score weights 决定开启软评分后 identity、query coverage、长度比例、InterPro present/partial/coverage、UniProt reviewed、注释丰富度、fragment 和 sequence caution 各自怎样加分或扣分。Reference-score 控制项决定同一目标基因 isoform 去重和 top-hit 限制时，类似记录之间如何排序，包括 InterPro 状态分、coverage divisor、UniProt 证据分、fragment/caution 惩罚倍率、以及长度距离分段。tie-break order 输入框接受逗号分隔的项目：score, identity, coverage, reference, evalue, bitscore。旁边的复选框决定每一项是否启用。
+
+对功能通路家族研究来说，默认理解可以是：移除缺少或异常的 canonical length 证据、UniProt fragment 警告、或 InterPro 保存区域证据 missing/uncertain/空的行；present/partial 的保守结构域行保留下来人工检查。identity、query coverage 和 E-value 仍然可以作为后续更严格筛选的可选条件。`),
+		},
+		{
+			Label:    "日本語",
+			Shortcut: "3",
+			Title:    "BLAST フィルターヘルプ",
+			Text: strings.TrimSpace(`BLAST フィルターは、結果表で使う「自動チェック解除の提案」です。行を削除せず、選択状態を固定するものでもありません。適用後、除外候補の行は自動的にチェック解除され、行番号が赤で表示されます。その後でも、生物学的に意味がありそうな行は手動で再チェックできます。
+
+このフィルターは、BLAST 実行で外部参照がすべて有効な場合だけ使えます。既定の判定が、元の BLAST 列、UniProt 証拠、InterPro 証拠を合わせて使うためです。
+
+min identity (%) は、局所類似性が弱いヒットを除くための任意の追加 hard rule です。既定値は 0 で、identity だけでは行を除外しません。BLAST similarity の強さも硬い条件にしたい場合に、30% などの値を設定します。
+
+min align/query coverage (%) は、query の一部だけにしかアラインしないヒットを除くための任意の追加 hard rule です。既定値は 0 で、query coverage だけでは行を除外しません。短い局所アラインメントを手動確認の前に落としたい場合に有効にします。
+
+max E-value は、統計的に弱い BLAST ヒットを除くための任意の追加 hard rule です。既定値は 0 で、E-value だけでは行を除外しません。1e-30 のような厳しい値は、より狭い follow-up pass で有効にできます。この閾値も特定の種、経路、遺伝子ファミリーには結び付きません。
+
+target_length / UniProt canonical length range は、元データベースのターゲットタンパク質長が UniProt canonical 参照と比べて妥当かを確認します。既定の 70-130% は、明らかな短縮や過度な延長を検出しつつ、すべての isoform に完全な同長性を要求しないための範囲です。Require length ratio data は既定で有効なので、UniProt canonical length ratio がない行は unknown-pass ではなく証拠不足として扱います。
+
+Require UniProt accession は既定で無効です。現在のデータセットで UniProt マッピング欠如そのものを失敗扱いにしたい場合だけ有効にしてください。
+
+Prefer UniProt reviewed entries は Swiss-Prot reviewed レコードに加点します。これは既定では硬い除外条件ではありません。植物タンパク質には妥当でも unreviewed のままのものが多いためです。
+
+Reject UniProt fragment entries は UniProt fragment レコードに対応する行を除きます。参照自体が不完全なために生じる紛らわしいヒットを減らします。
+
+Reject UniProt sequence cautions は UniProt の sequence caution テキストを持つ行を除きます。caution の意味は個別確認が必要なことが多いため、既定では無効です。
+
+InterPro conserved region status は、保存配列、保存ドメイン、保存ファミリーの証拠が残っているかを見る最重要の外部証拠です。既定では保存領域証拠を必須とし、present と partial を残し、missing、uncertain、空状態は除外候補にします。
+
+min InterPro coverage (%) は任意項目です。0 のままなら数値 coverage を硬い閾値にしません。InterPro coverage も厳密に使いたい場合に値を設定します。Require InterPro coverage when used は、この閾値を有効にしたときの欠損データ処理を決めます。有効な場合、数値 InterPro coverage がない行はこの閾値を満たさないものとして扱われます。
+
+Keep best isoform per target gene は、同じターゲット遺伝子の複数 transcript isoform を 1 つにまとめ、外部参照証拠、identity、coverage、E-value が最も強い行を残します。ホモログ候補の一次確認では、まず gene candidate レベルで整理してから各 transcript isoform を確認する方が扱いやすいため、既定で有効です。
+
+Keep only top hits per query は、スコアリング後に query ごとの残存候補数を制限します。非常に大きな BLAST 表では便利ですが、遺伝子ファミリー拡大や最近の重複が生物学的に重要なことがあるため、既定では無効です。
+
+Use soft evidence score は硬いルールに加えて加重スコアを使います。既定ワークフローは硬いルール中心です。reviewed 状態、注釈量、InterPro 証拠の強さを総合的な信頼度閾値にしたい場合に有効にします。
+
+Score と ranking のコントロールは、フィルター内部で使うすべての数値を公開します。Soft-score weights は、soft scoring 有効時に identity、query coverage、length ratio、InterPro present/partial/coverage、UniProt reviewed、annotation richness、fragment、sequence caution がどれだけ加点または減点されるかを決めます。Reference-score controls は、同一ターゲット遺伝子 isoform の整理や top-hit 制限で似た行を並べ替えるための値です。InterPro status score、coverage divisor、UniProt evidence score、fragment/caution penalty multiplier、length-distance band を含みます。tie-break order 欄には、score, identity, coverage, reference, evalue, bitscore をカンマ区切りで指定できます。対応するチェックボックスで各項目を有効または無効にします。
+
+機能経路ファミリー研究での実用的な既定解釈は、canonical length 証拠がないまたは異常、UniProt fragment 警告がある、または InterPro 保存領域証拠が missing/uncertain/空の行を除外候補にし、present/partial の保存ドメイン行を人が確認できるよう残す、というものです。identity、query coverage、E-value は、より厳しい後続フィルターとして任意に使えます。`),
+		},
 	}
 }
+
 func interProParameterHelpPages() []localizedHelpPage {
-	text := strings.TrimSpace(`InterPro conserved region status is an external-reference judgment used to mark whether a BLAST hit still carries conserved-region evidence expected from the query protein or, when no query template is available, whether the hit itself has credible conserved-domain evidence.
-
-Use Pfam accession match gives the strongest evidence weight.
-
-Use InterPro accession match compares integrated InterPro entry accessions such as IPR identifiers.
-
-Use member signature accession match compares the underlying member-database signatures reported by InterPro.
-
-Use entry type agreement requires compatible InterPro entry types when scoring matches.
-
-Use entry name agreement adds a weak supporting check using the InterPro entry name.
-
-Use coverage thresholds makes present and partial depend on how much conserved-region span is covered.
-
-Use match-region evidence adds support when both query and hit have actual InterPro coordinate regions.
-
-present min coverage (%) and partial min coverage (%) define the coverage thresholds for present and partial status.
-
-present min matched items and partial min matched items define the minimum number of conserved evidence items required for those states.`)
 	return []localizedHelpPage{
-		{Label: "English", Shortcut: "1", Title: "InterPro parameter help", Text: text},
-		{Label: "Chinese", Shortcut: "2", Title: "InterPro parameter help", Text: text},
-		{Label: "Japanese", Shortcut: "3", Title: "InterPro parameter help", Text: text},
+		{
+			Label:    "English",
+			Shortcut: "1",
+			Title:    "InterPro parameter help",
+			Text: strings.TrimSpace(`InterPro conserved region status is an external-reference judgment used to mark whether a BLAST hit still carries conserved-region evidence expected from the query protein or, when no query template is available, whether the hit itself has credible conserved-domain evidence. It is a reference column, not a filter; it helps you decide whether a hit is biologically plausible before exporting or running follow-up searches.
+
+Use Pfam accession match gives the strongest evidence weight. Pfam accessions are stable member-database identifiers for protein families and domains. When a query match and a hit match share a Pfam accession, the hit is very likely to preserve the same conserved family/domain signal.
+
+Use InterPro accession match compares InterPro entry accessions such as IPR identifiers. This is broader than Pfam because InterPro integrates multiple member databases, and it can confirm that two proteins belong to the same integrated domain, family, repeat, site, or homologous superfamily entry.
+
+Use member signature accession match compares the underlying member-database signatures reported by InterPro. This helps when the integrated InterPro accession is absent or broad, but the same HMM/signature evidence is still present.
+
+Use entry type agreement requires compatible InterPro entry types when scoring matches. The accepted conserved types are domain, family, homologous_superfamily, repeat, and site; this reduces false support from unrelated annotation categories.
+
+Use entry name agreement adds a weak supporting check using the InterPro entry name. It is disabled by default because names can be broad, edited over time, or shared by related but not identical functional groups.
+
+Use coverage thresholds makes present and partial depend on how much conserved-region span is covered. With a query template, coverage is calculated against matched query conserved-region span. Without a query template, the best conserved match coverage on the hit is used.
+
+Use match-region evidence adds support when both query and hit have actual InterPro coordinate regions. It is a weak evidence item, but it helps distinguish real localized conserved regions from accession-only annotations.
+
+present min coverage (%) is the minimum conserved-region coverage required for present. The default is 70, meaning the hit must preserve most of the expected conserved span before it is treated as present.
+
+partial min coverage (%) is the minimum conserved-region coverage required for partial. The default is 25, allowing weaker but still meaningful conserved evidence to be marked as partial instead of missing.
+
+present min matched items is the minimum number of conserved evidence items required for present. The default is 1 because many pathway enzymes have one dominant conserved family/domain that is sufficient for a first-pass reference judgment.
+
+partial min matched items is the minimum number of conserved evidence items required for partial. The default is 1, so a single credible but incomplete conserved match can remain visible as partial for manual review.`),
+		},
+		{
+			Label:    "中文",
+			Shortcut: "2",
+			Title:    "InterPro 参数帮助",
+			Text: strings.TrimSpace(`InterPro conserved region status 是一个外部参考判断，用来标记 BLAST 命中蛋白是否仍然带有 query 蛋白预期的保守区域证据；如果没有可用的 query 模板，就保守地判断命中蛋白自身是否有可信的保守结构域证据。它是参考列，不是筛选器；用途是在导出或继续搜索前帮助判断命中是否具有生物学可信度。
+
+Use Pfam accession match 是权重最高的证据项。Pfam accession 是蛋白家族和结构域的稳定成员数据库编号。如果 query 与 hit 共享同一个 Pfam accession，通常说明 hit 保留了相同的保守家族或结构域信号。
+
+Use InterPro accession match 会比较 InterPro 条目 accession，例如 IPR 编号。它比 Pfam 更宽，因为 InterPro 整合多个成员数据库；如果两个蛋白共享同一个 InterPro 条目，可以支持它们属于同一个整合后的结构域、家族、repeat、site 或同源超家族。
+
+Use member signature accession match 会比较 InterPro 返回的底层成员数据库 signature。它适合在 InterPro accession 缺失或过宽时使用，只要相同的 HMM/signature 证据仍然存在，就能提供支持。
+
+Use entry type agreement 会在打分时要求 InterPro 条目类型相容。默认认为可用于保守区域判断的类型包括 domain、family、homologous_superfamily、repeat 和 site；这样可以减少不相关注释类型造成的误判。
+
+Use entry name agreement 会使用 InterPro 条目名称作为较弱的辅助证据。它默认关闭，因为名称可能比较宽泛、会随数据库更新调整，或者被相近但并不完全相同的功能群共享。
+
+Use coverage thresholds 会让 present 和 partial 依赖保守区域覆盖比例。有 query 模板时，覆盖度根据命中的 query 保守区域跨度计算；没有 query 模板时，会使用 hit 自身最佳保守匹配区域的覆盖度。
+
+Use match-region evidence 会在 query 和 hit 都有实际 InterPro 坐标区域时增加支持。它是较弱证据，但能帮助区分真实的局部保守区域和只有 accession 的注释。
+
+present min coverage (%) 是判定 present 所需的最低保守区域覆盖比例。默认值是 70，表示 hit 需要保留大部分预期保守区域跨度，才会被视为 present。
+
+partial min coverage (%) 是判定 partial 所需的最低保守区域覆盖比例。默认值是 25，用来把较弱但仍有意义的保守证据标记为 partial，而不是 missing。
+
+present min matched items 是判定 present 所需的最少保守证据项数量。默认值是 1，因为很多通路酶只有一个主要保守家族或结构域，对第一轮参考判断通常已经足够。
+
+partial min matched items 是判定 partial 所需的最少保守证据项数量。默认值是 1，因此一个可信但不完整的保守匹配也会以 partial 保留下来，方便人工检查。`),
+		},
+		{
+			Label:    "日本語",
+			Shortcut: "3",
+			Title:    "InterPro パラメータヘルプ",
+			Text: strings.TrimSpace(`InterPro conserved region status は外部参照としての判定列です。BLAST ヒットが query タンパク質で期待される保存領域の証拠を保持しているか、query テンプレートがない場合はヒット自身に信頼できる保存ドメイン証拠があるかを示します。これはフィルターではなく参照列であり、エクスポートや追加検索の前に生物学的に妥当なヒットかを判断するために使います。
+
+Use Pfam accession match は最も強い証拠として扱われます。Pfam accession はタンパク質ファミリーやドメインの安定したメンバーデータベース ID です。query と hit が同じ Pfam accession を共有する場合、hit は同じ保存ファミリーまたはドメインのシグナルを保持している可能性が高くなります。
+
+Use InterPro accession match は IPR などの InterPro エントリー accession を比較します。InterPro は複数のメンバーデータベースを統合しているため Pfam より広い証拠であり、2 つのタンパク質が同じ統合ドメイン、ファミリー、リピート、サイト、または相同スーパーファミリーに属することを確認できます。
+
+Use member signature accession match は InterPro が返す下位メンバーデータベースの signature を比較します。InterPro accession がない、または広すぎる場合でも、同じ HMM/signature 証拠が残っていれば補助証拠になります。
+
+Use entry type agreement はマッチを評価するときに InterPro エントリータイプの一致を考慮します。保存領域判定に使う既定タイプは domain、family、homologous_superfamily、repeat、site で、無関係な注釈カテゴリによる誤判定を減らします。
+
+Use entry name agreement は InterPro エントリー名を弱い補助証拠として使います。名称は広すぎる場合があり、更新で変わることもあり、近縁だが同一ではない機能群で共有されることもあるため、既定では無効です。
+
+Use coverage thresholds は present と partial の判定を保存領域のカバレッジに依存させます。query テンプレートがある場合は、マッチした query 保存領域の長さに対するカバレッジを使います。query テンプレートがない場合は、hit 上の最良の保存マッチのカバレッジを使います。
+
+Use match-region evidence は query と hit の両方に InterPro の座標領域がある場合に補助証拠を追加します。弱い証拠ですが、実際の局所的保存領域と accession だけの注釈を区別する助けになります。
+
+present min coverage (%) は present と判定するために必要な保存領域カバレッジの下限です。既定値は 70 で、hit が期待される保存領域の大部分を保持している場合に present とみなします。
+
+partial min coverage (%) は partial と判定するために必要な保存領域カバレッジの下限です。既定値は 25 で、弱いが意味のある保存証拠を missing ではなく partial として残します。
+
+present min matched items は present と判定するために必要な保存証拠項目数の下限です。既定値は 1 です。多くの経路酵素では主要な保存ファミリーまたはドメインが 1 つあれば、初期の参照判定として十分な場合があります。
+
+partial min matched items は partial と判定するために必要な保存証拠項目数の下限です。既定値は 1 で、信頼できるが不完全な保存マッチを partial として残し、人が確認できるようにします。`),
+		},
 	}
 }
+
+func actionCloseValue(actions []Action) string {
+	for _, action := range actions {
+		if actionLooksLikeClose(action.Label, action.Value) {
+			return action.Value
+		}
+	}
+	return ""
+}
+
+func actionLooksLikeClose(label string, value string) bool {
+	label = strings.ToLower(strings.TrimSpace(label))
+	value = strings.ToLower(strings.TrimSpace(value))
+	return label == "close" || value == "close"
+}
+
+func RunTaskValue[T any](page TaskPage, task func(update func(string)) (T, error)) (T, error) {
+	return runTaskValue(page, func(ctx context.Context, update func(string)) (T, error) {
+		return task(update)
+	})
+}
+
+func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update func(string)) (T, error)) (T, error) {
+	app := newApp()
+	var zero T
+	var result T
+	var taskErr error
+	var cancelled atomic.Bool
+	var stopped atomic.Bool
+	taskCtx, cancelTaskContext := context.WithCancel(context.Background())
+	defer cancelTaskContext()
+
+	status := strings.TrimSpace(page.Initial)
+	if status == "" {
+		status = strings.TrimSpace(page.Description)
+	}
+	if status == "" {
+		status = strings.TrimSpace(page.Title)
+	}
+
+	statusView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetTextColor(tview.Styles.PrimaryTextColor)
+	statusView.SetText(status)
+
+	modalBody := tview.NewFlex().SetDirection(tview.FlexRow)
+	modalBody.SetBorder(true)
+	modalBody.SetTitle(" " + trimColon(page.Title) + " ")
+	modalBody.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(modalBody.Box, true)
+	attachFocusBorder(modalBody.Box)
+	if strings.TrimSpace(page.Description) != "" {
+		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
+	}
+	modalBody.AddItem(statusView, 0, 1, true)
+	cancelTask := func() {
+		if cancelled.CompareAndSwap(false, true) {
+			cancelTaskContext()
+			if stopped.CompareAndSwap(false, true) {
+				app.Stop()
+			}
+		}
+	}
+	addButtonRow(modalBody, buttonRow(buttonSpec{
+		Label:    ButtonCancel,
+		Shortcut: ShortcutCancel,
+		Action:   cancelTask,
+		Visible:  true,
+	}))
+	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
+	app.SetFocus(modalBody)
+	taskReady := make(chan struct{})
+	var taskReadyOnce sync.Once
+	afterDraw := app.GetAfterDrawFunc()
+	app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if afterDraw != nil {
+			afterDraw(screen)
+		}
+		taskReadyOnce.Do(func() {
+			close(taskReady)
+		})
+	})
+
+	var mu sync.Mutex
+	lastDraw := time.Time{}
+	setStatus := func(text string) {
+		if cancelled.Load() {
+			return
+		}
+		now := time.Now()
+		mu.Lock()
+		status = strings.TrimSpace(text)
+		if now.Sub(lastDraw) < perf.UIThrottle() {
+			mu.Unlock()
+			return
+		}
+		lastDraw = now
+		mu.Unlock()
+		app.QueueUpdateDraw(func() {
+			if cancelled.Load() {
+				return
+			}
+			statusView.SetText(status)
+		})
+	}
+
+	done := make(chan struct{})
+	var stopAnimation sync.Once
+	stop := func() {
+		stopAnimation.Do(func() {
+			close(done)
+		})
+	}
+	go func() {
+		select {
+		case <-taskReady:
+		case <-taskCtx.Done():
+			return
+		}
+		frames := []string{"|", "/", "-", "\\"}
+		ticker := time.NewTicker(perf.UIAnimationTick())
+		defer ticker.Stop()
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				text := status
+				mu.Unlock()
+				app.QueueUpdateDraw(func() {
+					if cancelled.Load() {
+						return
+					}
+					statusView.SetText(fmt.Sprintf("[yellow]%s[white] %s", frames[frame%len(frames)], text))
+				})
+				frame++
+			}
+		}
+	}()
+
+	go func() {
+		select {
+		case <-taskReady:
+		case <-taskCtx.Done():
+			return
+		}
+		result, taskErr = task(taskCtx, setStatus)
+		app.QueueUpdateDraw(func() {
+			if stopped.CompareAndSwap(false, true) {
+				app.Stop()
+			}
+		})
+	}()
+
+	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			cancelTask()
+			return nil
+		}
+		return event
+	})
+	if err := runApp(app); err != nil {
+		stop()
+		return zero, err
+	}
+	stop()
+	if cancelled.Load() {
+		return zero, taskCancelError(page)
+	}
+	if taskErr != nil {
+		return zero, taskErr
+	}
+	return result, nil
+}
+
+func RunProgressTaskValue[T any](page TaskPage, task func(update func(current int, message string)) (T, error)) (T, error) {
+	return runProgressTaskValue(page, func(ctx context.Context, update func(current int, message string)) (T, error) {
+		return task(update)
+	})
+}
+
+func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, update func(current int, message string)) (T, error)) (T, error) {
+	app := newApp()
+	var zero T
+	var result T
+	var taskErr error
+	var cancelled atomic.Bool
+	var stopped atomic.Bool
+	taskCtx, cancelTaskContext := context.WithCancel(context.Background())
+	defer cancelTaskContext()
+	current := 0
+	status := strings.TrimSpace(page.Initial)
+	if status == "" {
+		status = strings.TrimSpace(page.Description)
+	}
+	if status == "" {
+		status = strings.TrimSpace(page.Title)
+	}
+	total := page.Total
+
+	statusView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetTextColor(tview.Styles.PrimaryTextColor)
+
+	render := func(frame string) string {
+		if total <= 0 {
+			return fmt.Sprintf("[yellow]%s[white] %s", frame, status)
+		}
+		ratio := float64(current) / float64(total)
+		if ratio < 0 {
+			ratio = 0
+		}
+		if ratio > 1 {
+			ratio = 1
+		}
+		width := 32
+		filled := int(ratio * float64(width))
+		return fmt.Sprintf("[yellow]%s[white] %s\n\n[deepskyblue]%s[white]%s  %d/%d (%3.0f%%)",
+			frame,
+			status,
+			strings.Repeat("#", filled),
+			strings.Repeat("-", width-filled),
+			current,
+			total,
+			ratio*100,
+		)
+	}
+	statusView.SetText(render("|"))
+
+	modalBody := tview.NewFlex().SetDirection(tview.FlexRow)
+	modalBody.SetBorder(true)
+	modalBody.SetTitle(" " + trimColon(page.Title) + " ")
+	modalBody.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(modalBody.Box, true)
+	attachFocusBorder(modalBody.Box)
+	if strings.TrimSpace(page.Description) != "" {
+		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
+	}
+	modalBody.AddItem(statusView, 0, 1, true)
+	cancelTask := func() {
+		if cancelled.CompareAndSwap(false, true) {
+			cancelTaskContext()
+			if stopped.CompareAndSwap(false, true) {
+				app.Stop()
+			}
+		}
+	}
+	addButtonRow(modalBody, buttonRow(buttonSpec{
+		Label:    ButtonCancel,
+		Shortcut: ShortcutCancel,
+		Action:   cancelTask,
+		Visible:  true,
+	}))
+	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
+	app.SetFocus(modalBody)
+	taskReady := make(chan struct{})
+	var taskReadyOnce sync.Once
+	afterDraw := app.GetAfterDrawFunc()
+	app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if afterDraw != nil {
+			afterDraw(screen)
+		}
+		taskReadyOnce.Do(func() {
+			close(taskReady)
+		})
+	})
+
+	var mu sync.Mutex
+	lastDraw := time.Time{}
+	updateStatus := func(next int, message string) {
+		if cancelled.Load() {
+			return
+		}
+		now := time.Now()
+		mu.Lock()
+		current = next
+		if strings.TrimSpace(message) != "" {
+			status = strings.TrimSpace(message)
+		}
+		if now.Sub(lastDraw) < perf.UIThrottle() && next < total {
+			mu.Unlock()
+			return
+		}
+		lastDraw = now
+		mu.Unlock()
+		app.QueueUpdateDraw(func() {
+			if cancelled.Load() {
+				return
+			}
+			statusView.SetText(render("|"))
+		})
+	}
+
+	done := make(chan struct{})
+	var stopAnimation sync.Once
+	stop := func() {
+		stopAnimation.Do(func() {
+			close(done)
+		})
+	}
+	go func() {
+		select {
+		case <-taskReady:
+		case <-taskCtx.Done():
+			return
+		}
+		frames := []string{"|", "/", "-", "\\"}
+		ticker := time.NewTicker(perf.UIAnimationTick())
+		defer ticker.Stop()
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				text := render(frames[frame%len(frames)])
+				mu.Unlock()
+				app.QueueUpdateDraw(func() {
+					if cancelled.Load() {
+						return
+					}
+					statusView.SetText(text)
+				})
+				frame++
+			}
+		}
+	}()
+
+	go func() {
+		select {
+		case <-taskReady:
+		case <-taskCtx.Done():
+			return
+		}
+		result, taskErr = task(taskCtx, updateStatus)
+		app.QueueUpdateDraw(func() {
+			if stopped.CompareAndSwap(false, true) {
+				app.Stop()
+			}
+		})
+	}()
+
+	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape {
+			cancelTask()
+			return nil
+		}
+		return event
+	})
+	if err := runApp(app); err != nil {
+		stop()
+		return zero, err
+	}
+	stop()
+	if cancelled.Load() {
+		return zero, taskCancelError(page)
+	}
+	if taskErr != nil {
+		return zero, taskErr
+	}
+	return result, nil
+}
+
+func pageBreadcrumb(fallback string, path []string) string {
+	if len(path) == 0 {
+		return fallback
+	}
+	return strings.Join(path, " > ")
+}
+
+func setFocusBorder(box *tview.Box, focused bool) {
+	if box == nil {
+		return
+	}
+	if focused {
+		box.SetBorderColor(colorAction)
+		box.SetTitleColor(colorAction)
+		return
+	}
+	box.SetBorderColor(tview.Styles.BorderColor)
+	box.SetTitleColor(tview.Styles.TitleColor)
+}
+
+func attachFocusBorder(box *tview.Box) {
+	if box == nil {
+		return
+	}
+	box.SetFocusFunc(func() {
+		setFocusBorder(box, true)
+	})
+	box.SetBlurFunc(func() {
+		setFocusBorder(box, false)
+	})
+}
+
+func normalizeSelection(values []bool, size int, defaultValue bool) []bool {
+	out := make([]bool, size)
+	for i := range out {
+		out[i] = defaultValue
+	}
+	copy(out, values)
+	return out
+}
+
+func cloneBoolMatrix(values [][]bool) [][]bool {
+	out := make([][]bool, len(values))
+	for i := range values {
+		out[i] = append([]bool(nil), values[i]...)
+	}
+	return out
+}
+
+func setAll(values []bool, value bool) {
+	for i := range values {
+		values[i] = value
+	}
+}
+
+func rowSelectionGroups(rows []TableRow, labels []string) []rowSelectionGroup {
+	groups := make([]rowSelectionGroup, 0)
+	groupIndex := map[string]int{}
+	for _, label := range labels {
+		label = strings.TrimSpace(label)
+		if label == "" {
+			continue
+		}
+		if _, ok := groupIndex[label]; ok {
+			continue
+		}
+		groupIndex[label] = len(groups)
+		groups = append(groups, rowSelectionGroup{Label: label, Explicit: true})
+	}
+	for i, row := range rows {
+		label := strings.TrimSpace(row.Group)
+		if label == "" {
+			continue
+		}
+		index, ok := groupIndex[label]
+		if !ok {
+			index = len(groups)
+			groupIndex[label] = index
+			groups = append(groups, rowSelectionGroup{Label: label})
+		}
+		groups[index].Rows = append(groups[index].Rows, i)
+	}
+	return groups
+}
+
+func compareRowOrder(rows []TableRow, leftIndex int, rightIndex int, sortState TableSort) int {
+	var cmp int
+	if sortState.Column == -1 {
+		cmp = leftIndex - rightIndex
+	} else {
+		left, right := "", ""
+		if sortState.Column < len(rows[leftIndex].Cells) {
+			left = rows[leftIndex].Cells[sortState.Column]
+		}
+		if sortState.Column < len(rows[rightIndex].Cells) {
+			right = rows[rightIndex].Cells[sortState.Column]
+		}
+		cmp = compareTableValues(left, right)
+		if cmp == 0 {
+			cmp = leftIndex - rightIndex
+		}
+	}
+	if sortState.Direction == SortDescending {
+		cmp = -cmp
+	}
+	return cmp
+}
+
+func (t *rowSelectionTable) Draw(screen tcell.Screen) {
+	t.normalizeHorizontalOffset(screen)
+	t.Table.Draw(screen)
+	t.drawHeaderDivider(screen)
+}
+
+func (t *rowSelectionTable) normalizeHorizontalOffset(screen tcell.Screen) {
+	columns := t.GetColumnCount()
+	if columns <= rowSelectionFirstDataColumn {
+		return
+	}
+	_, columnOffset := t.GetOffset()
+	if columnOffset < 0 {
+		rowOffset, _ := t.GetOffset()
+		t.SetOffset(rowOffset, 0)
+		columnOffset = 0
+	}
+	maxOffset := columns - rowSelectionFirstDataColumn - 1
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if columnOffset > maxOffset {
+		rowOffset, _ := t.GetOffset()
+		t.SetOffset(rowOffset, maxOffset)
+	}
+}
+
+func (t *rowSelectionTable) drawHeaderDivider(screen tcell.Screen) {
+	innerX, innerY, innerWidth, _ := t.GetInnerRect()
+	if innerWidth <= 0 {
+		return
+	}
+	dividerRow := t.dividerRow
+	if dividerRow <= 0 {
+		dividerRow = rowSelectionDividerRow
+	}
+	dividerY := innerY + dividerRow
+	_, screenHeight := screen.Size()
+	if dividerY < 0 || dividerY >= screenHeight {
+		return
+	}
+	style := tcell.StyleDefault.Foreground(colorInactiveText).Background(tview.Styles.PrimitiveBackgroundColor)
+	for x := innerX; x < innerX+innerWidth; x++ {
+		screen.SetContent(x, dividerY, tview.Borders.Horizontal, nil, style)
+	}
+}
+
+func (t *rowSelectionTable) tableColumnWidth(column int) int {
+	if t != nil && column >= 0 && column < len(t.columnWidths) && t.columnWidths[column] > 0 {
+		return t.columnWidths[column]
+	}
+	if t == nil {
+		return 0
+	}
+	return tableColumnWidth(t.Table, column)
+}
+
+func tableColumnWidth(table *tview.Table, column int) int {
+	width := 0
+	rows := table.GetRowCount()
+	for row := 0; row < rows; row++ {
+		for _, line := range strings.Split(table.GetCell(row, column).Text, "\n") {
+			cellWidth := tview.TaggedStringWidth(line)
+			if cellWidth > width {
+				width = cellWidth
+			}
+		}
+	}
+	return width
+}
+
+func rowSelectionColumnWidths(columns []TableColumn, rows []TableRow, layout rowSelectionLayout, includeGroups bool) []int {
+	widths := make([]int, len(columns)+rowSelectionFirstDataColumn)
+	widths[0] = taggedPaddedWidth("[x]")
+	widths[1] = taggedPaddedWidth("row" + rowSelectionSortArrow(SortDescending))
+	if maxRowWidth := taggedPaddedWidth(strconv.Itoa(len(rows))); maxRowWidth > widths[1] {
+		widths[1] = maxRowWidth
+	}
+	if layout.headerTwoLine {
+		widths[0] = maxInt(widths[0], taggedPaddedWidth(""))
+		widths[1] = maxInt(widths[1], taggedPaddedWidth(""))
+	}
+	for i, column := range columns {
+		width := 0
+		header, subheader := tableHeaderLines(firstNonEmptyText(column.Header, column.ID))
+		for _, value := range []string{header + rowSelectionSortArrow(SortDescending), subheader} {
+			if w := taggedPaddedWidth(value); w > width {
+				width = w
+			}
+		}
+		if column.Width > 0 && column.Width+4 > width {
+			width = column.Width + 4
+		}
+		widths[i+rowSelectionFirstDataColumn] = width
+	}
+	for _, row := range rows {
+		for i, value := range row.Cells {
+			column := i + rowSelectionFirstDataColumn
+			if column >= len(widths) {
+				break
+			}
+			if width := taggedPaddedWidth(value); width > widths[column] {
+				widths[column] = width
+			}
+		}
+		if includeGroups && strings.TrimSpace(row.Group) != "" && rowSelectionFirstDataColumn < len(widths) {
+			if width := taggedPaddedWidth(row.Group); width > widths[rowSelectionFirstDataColumn] {
+				widths[rowSelectionFirstDataColumn] = width
+			}
+		}
+	}
+	for i := range widths {
+		if widths[i] <= 0 {
+			widths[i] = taggedPaddedWidth("")
+		}
+	}
+	return widths
+}
+
+func taggedPaddedWidth(text string) int {
+	return tview.TaggedStringWidth("  " + text + "  ")
+}
+
+func textViewLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(strings.ReplaceAll(text, "\r\n", "\n"), "\n") + 1
+}
+
+func paddedTableCell(text string) *tview.TableCell {
+	return tview.NewTableCell("  " + text + "  ")
+}
+
+func tableHeaderText(text string) string {
+	text = strings.TrimSpace(text)
+	return text
+}
+
+func tableHeaderLines(text string) (string, string) {
+	text = tableHeaderText(text)
+	parts := strings.SplitN(text, "\n", 2)
+	first := strings.TrimSpace(parts[0])
+	if len(parts) == 1 {
+		return first, ""
+	}
+	return first, strings.TrimSpace(parts[1])
+}
+
+func tableCellColor(column TableColumn, value string) tcell.Color {
+	if column.ID == "uniprot_reviewed" {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "reviewed":
+			return colorSelectionOn
+		case "unreviewed":
+			return colorMuted
+		}
+	}
+	if column.ID == "interpro_conserved_region_status" {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "present":
+			return colorSelectionOn
+		case "partial":
+			return colorMuted
+		case "missing":
+			return colorSelectionOff
+		case "uncertain":
+			return colorAction
+		}
+	}
+	return tview.Styles.PrimaryTextColor
+}
+
+func tableHeaderStyle(column TableColumn) tcell.Style {
+	switch {
+	case strings.EqualFold(column.Reference, "uniprot"):
+		return tcell.StyleDefault.Foreground(colorMuted).Bold(true)
+	case strings.EqualFold(column.Reference, "interpro"):
+		return tcell.StyleDefault.Foreground(colorAccent).Bold(true)
+	default:
+		return tcell.StyleDefault.Foreground(tview.Styles.PrimaryTextColor).Bold(true)
+	}
+}
+
 func columnHelpPages(column TableColumn) []localizedHelpPage {
 	name := firstNonEmptyText(column.Header, column.ID)
 	en, zh, ja := splitTrilingualHelp(column.Help)
@@ -7116,15 +7474,15 @@ func columnHelpPages(column TableColumn) []localizedHelpPage {
 		en = fmt.Sprintf("Column `%s` in the current table. This column is shown so you can inspect the data at a glance, compare it across rows, and decide whether the current hit is worth closer review, export, or follow-up analysis.", name)
 	}
 	if strings.TrimSpace(zh) == "" {
-		zh = fmt.Sprintf("Column `%s` in the current table. This text is shown in the Chinese help slot.", name)
+		zh = fmt.Sprintf("当前表格中的 `%s` 列。显示这一列是为了让你快速查看数据、比较不同行之间的差异，并判断这个结果是否值得进一步检查、导出或继续分析。", name)
 	}
 	if strings.TrimSpace(ja) == "" {
-		ja = fmt.Sprintf("Column `%s` in the current table. This text is shown in the Japanese help slot.", name)
+		ja = fmt.Sprintf("現在の表にある `%s` 列です。この列は、データを一目で確認し、行どうしを比較し、現在の結果をさらに確認・出力・追加解析する価値があるか判断するために表示されます。", name)
 	}
 	return []localizedHelpPage{
 		{Label: "English", Shortcut: "1", Title: "Column details", Text: columnHelpPageText("Column", name, column.ID, column.Reference, en)},
-		{Label: "Chinese", Shortcut: "2", Title: "Column details", Text: columnHelpPageText("Column", name, column.ID, column.Reference, zh)},
-		{Label: "Japanese", Shortcut: "3", Title: "Column details", Text: columnHelpPageText("Column", name, column.ID, column.Reference, ja)},
+		{Label: "中文", Shortcut: "2", Title: "列标题详细信息", Text: columnHelpPageText("列", name, column.ID, column.Reference, zh)},
+		{Label: "日本語", Shortcut: "3", Title: "列見出しの詳細", Text: columnHelpPageText("列", name, column.ID, column.Reference, ja)},
 	}
 }
 
@@ -7150,10 +7508,10 @@ func splitTrilingualHelp(help string) (string, string, string) {
 		prefix string
 	}{
 		{"en", "EN:"},
-		{"zh", "ZH:"},
-		{"zh", "Chinese:"},
-		{"ja", "JA:"},
-		{"ja", "Japanese:"},
+		{"zh", "中文："},
+		{"zh", "中文:"},
+		{"ja", "日本語："},
+		{"ja", "日本語:"},
 	}
 	type match struct {
 		key    string
@@ -7297,7 +7655,7 @@ func newLocalizedHelpModal(app *tview.Application, pages []localizedHelpPage, cl
 	languageButtons = append(languageButtons, buttonSpec{Label: ButtonOK, Shortcut: "Enter", Action: close, Visible: true, Primary: true})
 	modal.helpButtons = buttonRow(languageButtons...)
 	addButtonRow(modal.helpBody, modal.helpButtons)
-	addHints(modal.helpBody, []string{"1/2/3 switch English, 涓枃, and 鏃ユ湰瑾? Up/Down scroll. PageUp/PageDown scroll faster. Enter, Esc, or F1 closes help."})
+	addHints(modal.helpBody, []string{"1/2/3 switch English, 中文, and 日本語. Up/Down scroll. PageUp/PageDown scroll faster. Enter, Esc, or F1 closes help."})
 	modal.SetLanguage(app, modal.index)
 	return modal
 }
@@ -7306,8 +7664,8 @@ func normalizeLocalizedHelpPages(pages []localizedHelpPage) []localizedHelpPage 
 	out := append([]localizedHelpPage(nil), pages...)
 	defaults := []localizedHelpPage{
 		{Label: "English", Shortcut: "1", Title: "Help", Text: "No help text is available."},
-		{Label: "Chinese", Shortcut: "2", Title: "Help", Text: "No help text is available."},
-		{Label: "Japanese", Shortcut: "3", Title: "Help", Text: "No help text is available."},
+		{Label: "中文", Shortcut: "2", Title: "帮助", Text: "没有可用的帮助内容。"},
+		{Label: "日本語", Shortcut: "3", Title: "ヘルプ", Text: "利用できるヘルプはありません。"},
 	}
 	for len(out) < len(defaults) {
 		out = append(out, defaults[len(out)])
@@ -7526,7 +7884,7 @@ func defaultChoiceFilter(query string, choices []Choice) []Choice {
 	}
 	out := make([]Choice, 0, len(choices))
 	for _, choice := range choices {
-		haystack := strings.ToLower(strings.Join([]string{choice.Label, choice.Description, choice.Value, choice.SearchText}, " "))
+		haystack := strings.ToLower(choice.Label + " " + choice.Description + " " + choice.Value)
 		if strings.Contains(haystack, query) {
 			out = append(out, choice)
 		}
@@ -7661,7 +8019,7 @@ func inputButtons(allowBack bool, allowHome bool, confirmText string, confirmSho
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { nav(NavBack) }, Visible: allowBack},
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { nav(NavHome) }, Visible: allowHome},
 		{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: paste != nil},
-		{Label: conciseActionLabel(confirmText, ButtonApply), Shortcut: confirmShortcut, Action: confirm, Visible: true, Primary: true, Dynamic: true},
+		{Label: conciseActionLabel(confirmText, ButtonApply), Shortcut: confirmShortcut, Action: confirm, Visible: true, Primary: true},
 	}
 	return buttonRow(buttons...)
 }
@@ -7982,12 +8340,6 @@ func (b *buttonRowPrimitive) InputHandler() func(event *tcell.EventKey, setFocus
 			return
 		}
 		for _, button := range b.buttons {
-			if button.Visible && button.Primary && button.Dynamic && button.Action != nil {
-				button.Action()
-				return
-			}
-		}
-		for _, button := range b.buttons {
 			if button.Visible && button.Primary && button.Action != nil {
 				button.Action()
 				return
@@ -8005,44 +8357,15 @@ func (b *buttonRowPrimitive) InputHandler() func(event *tcell.EventKey, setFocus
 func (b *buttonRowPrimitive) setPrimaryLabel(label string) {
 	label = conciseActionLabel(label, label)
 	for i := range b.buttons {
-		if b.buttons[i].Primary && (b.buttons[i].Dynamic || !b.hasDynamicPrimary()) {
+		if b.buttons[i].Primary {
 			b.buttons[i].Label = label
 		}
 	}
 }
 
-func (b *buttonRowPrimitive) dynamicPrimaryButton() *buttonSpec {
-	if b == nil {
-		return nil
-	}
-	for i := range b.buttons {
-		if b.buttons[i].Primary && b.buttons[i].Dynamic {
-			return &b.buttons[i]
-		}
-	}
-	return b.primaryButton()
-}
-
-func (b *buttonRowPrimitive) hasDynamicPrimary() bool {
-	if b == nil {
-		return false
-	}
-	for i := range b.buttons {
-		if b.buttons[i].Primary && b.buttons[i].Dynamic {
-			return true
-		}
-	}
-	return false
-}
-
 func (b *buttonRowPrimitive) primaryButton() *buttonSpec {
 	if b == nil {
 		return nil
-	}
-	for i := range b.buttons {
-		if b.buttons[i].Primary && b.buttons[i].Dynamic {
-			return &b.buttons[i]
-		}
 	}
 	for i := range b.buttons {
 		if b.buttons[i].Primary {
@@ -8480,7 +8803,7 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 	if status.focus != nil {
 		status.focus()
 	}
-	phygoboost.GoTask(context.Background(), uiTaskSpec("read clipboard inline paste"), func(context.Context) {
+	go func() {
 		text, err := readClipboardText()
 		if err == nil {
 			text, err = sanitizePastedText(text)
@@ -8503,10 +8826,10 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 				status.focus()
 			}
 		})
-	})
+	}()
 }
 
-func resolveInputFileText(ctx context.Context, text string) (string, error) {
+func resolveInputFileText(text string) (string, error) {
 	text = strings.TrimSpace(text)
 	path, ok, err := pastedFilePath(text)
 	if err != nil {
@@ -8515,15 +8838,11 @@ func resolveInputFileText(ctx context.Context, text string) (string, error) {
 	if !ok {
 		return text, nil
 	}
-	loader := currentInputFileLoader()
-	if loader == nil {
-		return "", fmt.Errorf("no background file loader is available")
-	}
-	data, err := loader(ctx, path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
-	fileText, err := sanitizePastedText(data)
+	fileText, err := sanitizePastedText(string(data))
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", filepath.Base(path), err)
 	}
@@ -8560,9 +8879,6 @@ func pastedFilePath(text string) (string, bool, error) {
 	if path == "" {
 		return "", false, nil
 	}
-	if runtime.GOOS == "windows" && len(path) >= 3 && path[1] == ':' {
-		path = strings.ToUpper(path[:1]) + path[1:]
-	}
 	if strings.HasPrefix(strings.ToLower(path), "file://") {
 		u, err := url.Parse(path)
 		if err != nil {
@@ -8578,8 +8894,15 @@ func pastedFilePath(text string) (string, bool, error) {
 	}
 	path = filepath.Clean(filepath.FromSlash(path))
 	looksLikePath := quoted || filepath.IsAbs(path) || strings.ContainsAny(path, `\/`)
-	if !looksLikePath {
-		return "", false, nil
+	info, err := os.Stat(path)
+	if err != nil {
+		if !looksLikePath && (os.IsNotExist(err) || os.IsPermission(err)) {
+			return "", false, nil
+		}
+		return path, true, err
+	}
+	if info.IsDir() {
+		return "", false, fmt.Errorf("dropped path is a folder, not a text file")
 	}
 	return path, true, nil
 }

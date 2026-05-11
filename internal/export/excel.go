@@ -1,7 +1,6 @@
-﻿package export
+package export
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,7 +8,6 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 )
 
@@ -343,7 +341,7 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 		return fmt.Errorf("freeze header row: %w", err)
 	}
 
-	if err := saveExcelFile(path, file); err != nil {
+	if err := file.SaveAs(path); err != nil {
 		return fmt.Errorf("save excel file: %w", err)
 	}
 
@@ -669,20 +667,11 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 		return fmt.Errorf("freeze keyword header row: %w", err)
 	}
 
-	if err := saveExcelFile(path, file); err != nil {
+	if err := file.SaveAs(path); err != nil {
 		return fmt.Errorf("save keyword excel file: %w", err)
 	}
 
 	return nil
-}
-
-func saveExcelFile(path string, file *excelize.File) error {
-	if file == nil {
-		return fmt.Errorf("excel file is nil")
-	}
-	return phygoboost.RunDisk(context.Background(), func(ctx context.Context) error {
-		return file.SaveAs(path)
-	})
 }
 
 func keywordExportValue(id string, row model.KeywordResultRow, rowNumber int) any {
@@ -776,4 +765,3 @@ func sourceDatabaseForKeywordRows(rows []model.KeywordResultRow) string {
 	}
 	return "phytozome"
 }
-

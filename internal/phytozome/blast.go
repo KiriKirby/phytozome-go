@@ -3,6 +3,7 @@ package phytozome
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -16,10 +17,7 @@ import (
 	"time"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/searchengine/phytozomekeyword"
-	"github.com/goccy/go-json"
-	"github.com/valyala/bytebufferpool"
 )
 
 const (
@@ -31,8 +29,6 @@ var (
 	ecNumberLikeLabelPattern      = regexp.MustCompile(`^(?:EC[:\-]?)?[A-Za-z]?\d+(?:\.\d+){2,3}$`)
 	arabidopsisGeneIDLabelPattern = regexp.MustCompile(`(?i)^AT[1-5MC]G\d{5}(?:\.\d+)?$`)
 	lemnaGeneIDLabelPattern       = regexp.MustCompile(`(?i)^SP\d{4}D\d{3}G\d{6}(?:_T\d+)?$`)
-	keywordPlusQualifierPattern   = regexp.MustCompile(`\s+\+`)
-	keywordWhitespacePattern      = regexp.MustCompile(`\s+`)
 )
 
 type submitResponse struct {
@@ -50,7 +46,6 @@ type resultsResponse struct {
 		Results     string `json:"results"`
 		Hash        string `json:"hash"`
 		ZUID        string `json:"zuid"`
-		ErrorNotes  string `json:"errorNotes"`
 	} `json:"data"`
 }
 
@@ -119,27 +114,14 @@ type proteinSequenceResponse []struct {
 
 type esSearchResponse struct {
 	Hits struct {
-		Total int `json:"total"`
-		Hits  []struct {
+		Hits []struct {
 			Source geneRecord `json:"_source"`
 		} `json:"hits"`
 	} `json:"hits"`
 }
 
 func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "submit phytozome blast",
-	}, func(runCtx context.Context) (model.BlastJob, error) {
-		return c.submitBlast(runCtx, req)
-	})
-}
-
-func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	body := bytebufferpool.Get()
-	defer bytebufferpool.Put(body)
-	body.Reset()
+	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
 	fields := map[string]string{
@@ -165,7 +147,7 @@ func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model
 		return model.BlastJob{}, fmt.Errorf("close multipart writer: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, blastSubmitURL, bytes.NewReader(body.Bytes()))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, blastSubmitURL, body)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("create blast submit request: %w", err)
 	}
@@ -175,7 +157,7 @@ func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("submit blast: %w", err)
 	}
-	defer phygoboost.DrainAndClose(resp.Body)
+	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -197,23 +179,13 @@ func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model
 }
 
 func (c *Client) WaitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "wait phytozome blast results",
-	}, func(runCtx context.Context) (model.BlastResult, error) {
-		return c.waitForBlastResults(runCtx, jobID, pollInterval, timeout)
-	})
-}
-
-func (c *Client) waitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
 	if pollInterval <= 0 {
 		pollInterval = 3 * time.Second
 	}
 	waitCtx := ctx
 	var cancel context.CancelFunc
 	if timeout > 0 {
-		waitCtx, cancel = phygoboost.TimeoutContext(ctx, timeout)
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 
@@ -247,7 +219,7 @@ func (c *Client) fetchBlastResult(ctx context.Context, jobID string) (model.Blas
 	if err != nil {
 		return model.BlastResult{}, false, fmt.Errorf("get blast results: %w", err)
 	}
-	defer phygoboost.DrainAndClose(resp.Body)
+	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -266,10 +238,6 @@ func (c *Client) fetchBlastResult(ctx context.Context, jobID string) (model.Blas
 		return model.BlastResult{JobID: jobID, Message: results.Message}, false, nil
 	}
 	if results.Code != http.StatusOK {
-		details := strings.TrimSpace(results.Data.ErrorNotes)
-		if details != "" {
-			return model.BlastResult{}, false, fmt.Errorf("blast results: code %d message %s details %s", results.Code, results.Message, details)
-		}
 		return model.BlastResult{}, false, fmt.Errorf("blast results: code %d message %s", results.Code, results.Message)
 	}
 
@@ -438,70 +406,30 @@ func writeSequenceField(writer *multipart.Writer, sequence string) error {
 }
 
 func (c *Client) FetchGeneByProtein(ctx context.Context, proteomeID int, proteinID string) (geneRecord, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome gene by protein",
-	}, func(runCtx context.Context) (geneRecord, error) {
-		requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?protein=%s", proteomeID, url.QueryEscape(strings.TrimSpace(proteinID)))
-		return c.fetchGeneRecord(runCtx, requestURL, fmt.Sprintf("protein %s in proteome %d", proteinID, proteomeID))
-	})
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?protein=%s", proteomeID, url.QueryEscape(strings.TrimSpace(proteinID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("protein %s in proteome %d", proteinID, proteomeID))
 }
 
 func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome uniprot accessions",
-	}, func(runCtx context.Context) ([]string, error) {
-		return c.fetchUniProtAccessions(runCtx, targetID, proteinID)
-	})
-}
-
-func (c *Client) fetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
-	proteinID = strings.TrimSpace(proteinID)
-	if proteinID == "" {
-		return nil, nil
+	gene, err := c.FetchGeneByProtein(ctx, targetID, proteinID)
+	if err != nil {
+		return nil, err
 	}
-	fetchers := []func(context.Context, int, string) (geneRecord, error){
-		c.FetchGeneByProtein,
-		c.FetchGeneByTranscript,
-		c.FetchGeneByGeneID,
-	}
-	var lastErr error
-	for _, fetch := range fetchers {
-		gene, err := fetch(ctx, targetID, proteinID)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if out := extractUniProtAccessionsFromGene(gene, proteinID); len(out) > 0 {
-			return out, nil
-		}
-		if out := extractUniProtAccessionsFromGene(gene, ""); len(out) > 0 {
-			return out, nil
-		}
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, nil
-}
-
-func extractUniProtAccessionsFromGene(gene geneRecord, matchID string) []string {
-	matchID = strings.TrimSpace(matchID)
 	out := make([]string, 0, 2)
 	seen := make(map[string]struct{})
 	for _, transcript := range gene.Transcripts {
-		if matchID != "" &&
-			!strings.EqualFold(strings.TrimSpace(transcript.Protein), matchID) &&
-			!strings.EqualFold(strings.TrimSpace(transcript.PrimaryIdentifier), matchID) &&
-			!strings.EqualFold(strings.TrimSpace(transcript.SecondaryIdentifier), matchID) &&
-			!strings.EqualFold(strings.TrimSpace(gene.PrimaryIdentifier), matchID) {
+		if strings.TrimSpace(proteinID) != "" && !strings.EqualFold(strings.TrimSpace(transcript.Protein), strings.TrimSpace(proteinID)) && !strings.EqualFold(strings.TrimSpace(transcript.PrimaryIdentifier), strings.TrimSpace(proteinID)) {
 			continue
 		}
 		for _, value := range transcript.Uniprot {
-			value = normalizeUniProtAccessionValue(value)
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if idx := strings.LastIndex(value, ":"); idx >= 0 {
+				value = strings.TrimSpace(value[idx+1:])
+			}
+			value = strings.Trim(value, ";, ")
 			if value == "" {
 				continue
 			}
@@ -513,41 +441,40 @@ func extractUniProtAccessionsFromGene(gene geneRecord, matchID string) []string 
 			out = append(out, value)
 		}
 	}
-	return out
-}
-
-func normalizeUniProtAccessionValue(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
+	if len(out) == 0 {
+		for _, transcript := range gene.Transcripts {
+			for _, value := range transcript.Uniprot {
+				value = strings.TrimSpace(value)
+				if value == "" {
+					continue
+				}
+				if idx := strings.LastIndex(value, ":"); idx >= 0 {
+					value = strings.TrimSpace(value[idx+1:])
+				}
+				value = strings.Trim(value, ";, ")
+				if value == "" {
+					continue
+				}
+				key := strings.ToUpper(value)
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, value)
+			}
+		}
 	}
-	if idx := strings.LastIndex(value, ":"); idx >= 0 {
-		value = strings.TrimSpace(value[idx+1:])
-	}
-	value = strings.Trim(value, ";, ")
-	return value
+	return out, nil
 }
 
 func (c *Client) FetchGeneByGeneID(ctx context.Context, proteomeID int, geneID string) (geneRecord, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome gene by gene id",
-	}, func(runCtx context.Context) (geneRecord, error) {
-		requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?gene=%s", proteomeID, url.QueryEscape(strings.TrimSpace(geneID)))
-		return c.fetchGeneRecord(runCtx, requestURL, fmt.Sprintf("gene %s in proteome %d", geneID, proteomeID))
-	})
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?gene=%s", proteomeID, url.QueryEscape(strings.TrimSpace(geneID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("gene %s in proteome %d", geneID, proteomeID))
 }
 
 func (c *Client) FetchGeneByTranscript(ctx context.Context, proteomeID int, transcriptID string) (geneRecord, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome gene by transcript",
-	}, func(runCtx context.Context) (geneRecord, error) {
-		requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?transcript=%s", proteomeID, url.QueryEscape(strings.TrimSpace(transcriptID)))
-		return c.fetchGeneRecord(runCtx, requestURL, fmt.Sprintf("transcript %s in proteome %d", transcriptID, proteomeID))
-	})
+	requestURL := fmt.Sprintf("https://phytozome-next.jgi.doe.gov/api/db/gene_%d?transcript=%s", proteomeID, url.QueryEscape(strings.TrimSpace(transcriptID)))
+	return c.fetchGeneRecord(ctx, requestURL, fmt.Sprintf("transcript %s in proteome %d", transcriptID, proteomeID))
 }
 
 func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, description string) (geneRecord, error) {
@@ -587,7 +514,7 @@ func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, descrip
 		if err != nil {
 			return geneRecord{}, fmt.Errorf("fetch gene record for %s: %w", description, err)
 		}
-		defer phygoboost.DrainAndClose(resp.Body)
+		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNoContent {
 			return geneRecord{}, fmt.Errorf("no gene record for %s", description)
@@ -619,16 +546,6 @@ func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, descrip
 }
 
 func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome protein sequence",
-	}, func(runCtx context.Context) (string, error) {
-		return c.fetchProteinSequence(runCtx, targetID, sequenceID)
-	})
-}
-
-func (c *Client) fetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
 	sequenceID = strings.TrimSpace(sequenceID)
 	if sequenceID == "" {
 		return "", fmt.Errorf("empty protein sequence id")
@@ -647,16 +564,6 @@ func (c *Client) fetchProteinSequence(ctx context.Context, targetID int, sequenc
 }
 
 func (c *Client) FetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome protein query sequence",
-	}, func(runCtx context.Context) (*model.QuerySequenceSource, error) {
-		return c.fetchProteinQuerySequence(runCtx, species, proteinID)
-	})
-}
-
-func (c *Client) fetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error) {
 	gene, err := c.FetchGeneByProtein(ctx, species.ProteomeID, proteinID)
 	if err != nil {
 		return nil, err
@@ -724,7 +631,7 @@ func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcrip
 		if err != nil {
 			return "", fmt.Errorf("fetch protein sequence: %w", err)
 		}
-		defer phygoboost.DrainAndClose(resp.Body)
+		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusNoContent {
 			return "", fmt.Errorf("no protein sequence for transcript id %s", transcriptInternalID)
@@ -757,16 +664,6 @@ func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcrip
 }
 
 func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "fetch phytozome gene query sequence",
-	}, func(runCtx context.Context) (*model.QuerySequenceSource, error) {
-		return c.fetchGeneQuerySequence(runCtx, species, reportType, identifier)
-	})
-}
-
-func (c *Client) fetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	var gene model.QuerySequenceSource
 	gene.SourceDatabase = c.Name()
 	gene.SourceProteomeID = species.ProteomeID
@@ -832,278 +729,72 @@ func applyPhytozomeQueryLabels(source *model.QuerySequenceSource, gene geneRecor
 }
 
 func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome genes by keyword",
-	}, func(runCtx context.Context) ([]geneRecord, error) {
-		keyword = strings.TrimSpace(keyword)
-		if keyword == "" {
-			return nil, nil
-		}
-		if limit <= 0 {
-			limit = 20
-		}
-
-		body, err := json.Marshal(map[string]any{
-			"size": limit,
-			"query": map[string]any{
-				"bool": map[string]any{
-					"must": []any{
-						map[string]any{
-							"query_string": map[string]any{
-								"query":            keyword,
-								"default_operator": "AND",
-								"fields": []string{
-									"primaryidentifier^5",
-									"transcripts.primaryidentifier^5",
-									"transcripts.protein^4",
-									"symbols^4",
-									"synonyms^3",
-									"deflines^2",
-									"auto_defline^2",
-									"comments",
-								},
-							},
-						},
-					},
-					"filter": []any{
-						map[string]any{
-							"term": map[string]any{
-								"organism.proteome": proteomeID,
-							},
-						},
-					},
-				},
-			},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("encode keyword search body: %w", err)
-		}
-
-		req, err := http.NewRequestWithContext(runCtx, http.MethodPost, "https://phytozome-next.jgi.doe.gov/api/essearch/gene/_search/", bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("create keyword search request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := c.baseHTTP.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("search genes by keyword: %w", err)
-		}
-		defer phygoboost.DrainAndClose(resp.Body)
-
-		if resp.StatusCode != http.StatusOK {
-			payload, _ := io.ReadAll(resp.Body)
-			return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
-		}
-
-		var payload esSearchResponse
-		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-			return nil, fmt.Errorf("decode keyword search response: %w", err)
-		}
-
-		results := make([]geneRecord, 0, len(payload.Hits.Hits))
-		for _, hit := range payload.Hits.Hits {
-			if strings.TrimSpace(hit.Source.PrimaryIdentifier) == "" {
-				continue
-			}
-			results = append(results, hit.Source)
-		}
-		return results, nil
-	})
-}
-
-func (c *Client) SearchGenesByKeywordBroad(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome genes by broad keyword",
-	}, func(runCtx context.Context) ([]geneRecord, error) {
-		keyword = strings.TrimSpace(keyword)
-		if keyword == "" {
-			return nil, nil
-		}
-		if limit <= 0 {
-			limit = 10000
-		}
-
-		bodies := phytozomeKeywordSearchBodies(keyword, proteomeID, limit)
-		firstBody := bodies.narrow
-		if bodies.plusQualified {
-			firstBody = bodies.plusDummy
-		}
-		searchOrder := []struct {
-			name string
-			body map[string]any
-		}{
-			{name: "narrow", body: firstBody},
-			{name: "phrase", body: bodies.phrase},
-			{name: "broad", body: bodies.broad},
-		}
-
-		var last []geneRecord
-		for i, search := range searchOrder {
-			matches, err := c.searchGenesWithBody(runCtx, search.body, "web-style keyword "+search.name)
-			if err != nil {
-				return nil, err
-			}
-			last = matches
-			if i == 0 && len(matches) > 0 {
-				return matches, nil
-			}
-			if search.name == "phrase" && bodies.multiWord && len(matches) > 0 {
-				return matches, nil
-			}
-		}
-		return last, nil
-	})
-}
-
-type keywordSearchBodies struct {
-	narrow        map[string]any
-	plusDummy     map[string]any
-	phrase        map[string]any
-	broad         map[string]any
-	plusQualified bool
-	multiWord     bool
-}
-
-func phytozomeKeywordSearchBodies(keyword string, proteomeID int, limit int) keywordSearchBodies {
-	terms := phytozomeKeywordTerms(keyword)
-	plusQualified := phytozomeKeywordHasPlusQualifier(keyword)
-	proteomeFilters := []any{map[string]any{"term": map[string]any{"proteome": proteomeID}}}
-	wildcardTerms := make([]any, 0, len(terms))
-	for _, term := range terms {
-		if plusQualified {
-			wildcardTerms = append(wildcardTerms, map[string]any{"match": map[string]any{"custom_all": term}})
-			continue
-		}
-		wildcardTerms = append(wildcardTerms, []any{
-			map[string]any{"wildcard": map[string]any{"custom_all": term + "*"}},
-			map[string]any{"wildcard": map[string]any{"primaryidentifier": term + "*"}},
-		})
-	}
-
-	return keywordSearchBodies{
-		plusDummy: map[string]any{
-			"size":  int(float64(limit) / 2.0),
-			"query": map[string]any{"bool": map[string]any{"must": map[string]any{"match": map[string]any{"proteome": -1}}}},
-		},
-		narrow: map[string]any{
-			"size": limit,
-			"query": map[string]any{
-				"function_score": map[string]any{
-					"random_score": map[string]any{},
-					"query": map[string]any{
-						"bool": map[string]any{
-							"must": []any{
-								map[string]any{"bool": map[string]any{
-									"should": []any{
-										map[string]any{"nested": map[string]any{"path": "annotation_definitions", "query": map[string]any{"multi_match": map[string]any{
-											"query": keyword, "analyzer": "firstpass_keyword_search", "fields": []string{"annotation_definitions.accession", "annotation_definitions.signatures"},
-										}}}},
-										map[string]any{"nested": map[string]any{"path": "transcripts", "query": map[string]any{"multi_match": map[string]any{
-											"query": keyword, "analyzer": "firstpass_keyword_search", "fields": []string{"transcripts.primaryidentifier", "transcripts.secondaryidentifier", "transcripts.uniprot"},
-										}}}},
-										map[string]any{"multi_match": map[string]any{
-											"query": keyword, "analyzer": "firstpass_keyword_search", "fields": []string{"primaryidentifier", "secondaryidentifier", "reference_locus_id", "old_transcript_ids"},
-										}},
-									},
-									"minimum_should_match": 1,
-								}},
-								map[string]any{"bool": map[string]any{"should": proteomeFilters, "minimum_should_match": 1}},
-							},
-						},
-					},
-				},
-			},
-		},
-		phrase: map[string]any{
-			"size": limit,
-			"query": map[string]any{
-				"function_score": map[string]any{
-					"random_score": map[string]any{},
-					"query": map[string]any{"bool": map[string]any{
-						"must": map[string]any{"bool": map[string]any{
-							"should":               map[string]any{"match_phrase": map[string]any{"custom_all": strings.ToLower(strings.TrimSpace(keyword))}},
-							"minimum_should_match": 1,
-						}},
-						"should":               proteomeFilters,
-						"minimum_should_match": 1,
-					}},
-				},
-			},
-			"_source": []string{"primaryidentifier", "organism", "deflines", "auto_defline", "symbols", "synonyms"},
-		},
-		broad: map[string]any{
-			"size": limit,
-			"query": map[string]any{
-				"function_score": map[string]any{
-					"random_score": map[string]any{},
-					"query": map[string]any{"bool": map[string]any{
-						"must":                 map[string]any{"bool": keywordBroadMustClause(plusQualified, wildcardTerms)},
-						"should":               proteomeFilters,
-						"minimum_should_match": 1,
-					}},
-				},
-			},
-			"_source": []string{"primaryidentifier", "organism", "deflines", "auto_defline", "symbols", "synonyms"},
-		},
-		plusQualified: plusQualified,
-		multiWord:     len(terms) > 1,
-	}
-}
-
-func keywordBroadMustClause(plusQualified bool, wildcardTerms []any) map[string]any {
-	if plusQualified {
-		return map[string]any{"must": wildcardTerms}
-	}
-	return map[string]any{"should": wildcardTerms, "minimum_should_match": 1}
-}
-
-func phytozomeKeywordHasPlusQualifier(keyword string) bool {
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
-	return strings.HasPrefix(keyword, "+") || keywordPlusQualifierPattern.MatchString(keyword)
-}
-
-func phytozomeKeywordTerms(keyword string) []string {
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
-	keyword = strings.TrimLeft(keyword, "+")
-	keyword = keywordPlusQualifierPattern.ReplaceAllString(keyword, " ")
-	keyword = keywordWhitespacePattern.ReplaceAllString(keyword, " ")
+	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
-		return nil
+		return nil, nil
 	}
-	return strings.Split(keyword, " ")
-}
+	if limit <= 0 {
+		limit = 20
+	}
 
-func (c *Client) searchGenesWithBody(ctx context.Context, body map[string]any, description string) ([]geneRecord, error) {
-	encoded, err := json.Marshal(body)
+	body, err := json.Marshal(map[string]any{
+		"size": limit,
+		"query": map[string]any{
+			"bool": map[string]any{
+				"must": []any{
+					map[string]any{
+						"query_string": map[string]any{
+							"query":            keyword,
+							"default_operator": "AND",
+							"fields": []string{
+								"primaryidentifier^5",
+								"transcripts.primaryidentifier^5",
+								"transcripts.protein^4",
+								"symbols^4",
+								"synonyms^3",
+								"deflines^2",
+								"auto_defline^2",
+								"comments",
+							},
+						},
+					},
+				},
+				"filter": []any{
+					map[string]any{
+						"term": map[string]any{
+							"organism.proteome": proteomeID,
+						},
+					},
+				},
+			},
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("encode %s search body: %w", description, err)
+		return nil, fmt.Errorf("encode keyword search body: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://phytozome-next.jgi.doe.gov/api/essearch/gene/_search?scroll=1m", bytes.NewReader(encoded))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://phytozome-next.jgi.doe.gov/api/essearch/gene/_search/", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create %s search request: %w", description, err)
+		return nil, fmt.Errorf("create keyword search request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.baseHTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s search: %w", description, err)
+		return nil, fmt.Errorf("search genes by keyword: %w", err)
 	}
-	defer phygoboost.DrainAndClose(resp.Body)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%s search: status %s body %s", description, resp.Status, strings.TrimSpace(string(payload)))
+		return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
 	}
 
 	var payload esSearchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode %s search response: %w", description, err)
+		return nil, fmt.Errorf("decode keyword search response: %w", err)
 	}
+
 	results := make([]geneRecord, 0, len(payload.Hits.Hits))
 	for _, hit := range payload.Hits.Hits {
 		if strings.TrimSpace(hit.Source.PrimaryIdentifier) == "" {
@@ -1115,108 +806,17 @@ func (c *Client) searchGenesWithBody(ctx context.Context, body map[string]any, d
 }
 
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome keyword rows",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.keywordSearchEngine().SearchKeywordRows(runCtx, species, keyword)
-	})
+	if c.keywordEngine == nil {
+		c.keywordEngine = phytozomekeyword.New(c)
+	}
+	return c.keywordEngine.SearchKeywordRows(ctx, species, keyword)
 }
 
 func (c *Client) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome keyword rows wide",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.keywordSearchEngine().SearchKeywordRowsWide(runCtx, species, keyword)
-	})
-}
-
-func (c *Client) SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
-		Level:       phygoboost.ExecHeavy,
-		Domain:      "phytozome-next.jgi.doe.gov",
-		Description: "search phytozome keyword rows broad",
-	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
-		return c.SearchKeywordRowsWide(runCtx, species, keyword)
-	})
-}
-
-func buildKeywordResultRow(searchTerm string, species model.SpeciesCandidate, gene geneRecord) (model.KeywordResultRow, error) {
-	transcript, err := gene.PrimaryTranscript("")
-	if err != nil {
-		return model.KeywordResultRow{}, err
+	if c.keywordEngine == nil {
+		c.keywordEngine = phytozomekeyword.New(c)
 	}
-
-	geneID := strings.TrimSpace(gene.PrimaryIdentifier)
-	internalID := strings.TrimSpace(gene.ID)
-	geneIdentifier := geneID
-	if internalID != "" {
-		geneIdentifier += " (" + internalID + ")"
-	}
-
-	aliases := dedupePreserveOrder(append(copyStringSlice(gene.Symbols), gene.Synonyms...))
-	labelName := bestAlias(strings.Join(aliases, "; "))
-	uniprotValues := make([]string, 0, len(transcript.Uniprot))
-	for _, value := range transcript.Uniprot {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		uniprotValues = append(uniprotValues, transcript.PrimaryIdentifier+": "+value)
-	}
-
-	return model.KeywordResultRow{
-		SourceDatabase:      "phytozome",
-		SearchTerm:          searchTerm,
-		LabelName:           labelName,
-		ProteinID:           strings.TrimSpace(transcript.Protein),
-		TranscriptID:        strings.TrimSpace(transcript.PrimaryIdentifier),
-		GeneIdentifier:      geneIdentifier,
-		Genome:              formatKeywordGenome(gene),
-		Location:            formatKeywordLocation(gene),
-		Aliases:             strings.Join(aliases, "; "),
-		UniProt:             strings.Join(uniprotValues, "; "),
-		Description:         firstNonEmpty(gene.Deflines...),
-		Comments:            strings.Join(gene.Comments, "\n"),
-		AutoDefine:          strings.TrimSpace(gene.AutoDefline),
-		GeneReportURL:       fmt.Sprintf("https://phytozome-next.jgi.doe.gov/report/gene/%s/%s", species.JBrowseName, geneID),
-		SequenceHeaderLabel: strings.TrimSpace(gene.Organism.OrganismName + " " + gene.Organism.AnnotationVersion),
-		SequenceID:          strings.TrimSpace(transcript.SecondaryIdentifier),
-	}, nil
-}
-
-func formatKeywordGenome(gene geneRecord) string {
-	organism := strings.TrimSpace(gene.Organism.OrganismName)
-	annotation := strings.TrimSpace(gene.Organism.AnnotationVersion)
-	proteome := gene.Organism.Proteome
-	taxID := strings.TrimSpace(gene.Organism.TaxID)
-
-	parts := make([]string, 0, 2)
-	if organism != "" || annotation != "" {
-		parts = append(parts, strings.TrimSpace(organism+" "+annotation))
-	}
-	details := make([]string, 0, 2)
-	if proteome != 0 {
-		details = append(details, fmt.Sprintf("Phytozome genome ID: %d", proteome))
-	}
-	if taxID != "" {
-		details = append(details, "NCBI taxonomy ID: "+taxID)
-	}
-	if len(details) > 0 {
-		parts = append(parts, "("+strings.Join(details, " 路 ")+")")
-	}
-	return strings.Join(parts, " ")
-}
-
-func formatKeywordLocation(gene geneRecord) string {
-	strand := "forward"
-	if strings.TrimSpace(gene.Strand) == "-1" {
-		strand = "reverse"
-	}
-	return fmt.Sprintf("%s:%s..%s %s", strings.TrimSpace(gene.Scaffold), strings.TrimSpace(gene.Start), strings.TrimSpace(gene.End), strand)
+	return c.keywordEngine.SearchKeywordRowsWide(ctx, species, keyword)
 }
 
 func looksLikeSpecificGeneIdentifier(value string) bool {
@@ -1229,18 +829,6 @@ func phytozomeGeneReportKeyword(value string) (reportType string, identifier str
 
 func specificIdentifierVariants(value string) []string {
 	return phytozomekeyword.SpecificIdentifierVariants(value)
-}
-
-func nonEmptyPathSegments(path string) []string {
-	parts := strings.Split(path, "/")
-	segments := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			segments = append(segments, part)
-		}
-	}
-	return segments
 }
 
 func dedupePreserveOrder(values []string) []string {
@@ -1294,31 +882,7 @@ func bestAlias(value string) string {
 }
 
 func bestQuerySourceLabel(aliases string, autoDefine string) string {
-	candidates := querySourceAliasCandidates(aliases)
-	if label := labelFromAutoDefine(autoDefine); label != "" {
-		candidates = append(candidates, label)
-	}
-	best := ""
-	bestScore := -1
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate == "" || looksLikeECNumberLabel(candidate) || looksLikeDatabaseIdentifierLabel(candidate) {
-			continue
-		}
-		score := aliasPreferenceScore(candidate) + querySourceLabelPreferenceBonus(candidate)
-		score -= lowercaseCount(candidate) * 6
-		if strings.Contains(candidate, ".") {
-			score -= strings.Count(candidate, ".") * 8
-		}
-		if score > bestScore || (score == bestScore && len(candidate) < len(best)) {
-			best = candidate
-			bestScore = score
-		}
-	}
-	if bestScore < 22 {
-		return ""
-	}
-	return best
+	return phytozomekeyword.BestQuerySourceLabel(aliases, autoDefine)
 }
 
 func querySourceAliasCandidates(value string) []string {

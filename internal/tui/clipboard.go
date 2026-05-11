@@ -8,34 +8,27 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 )
 
 func readClipboardText() (string, error) {
-	var name string
-	var args []string
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
 		script := "try { Get-Clipboard -Raw -ErrorAction Stop } catch { Add-Type -AssemblyName System.Windows.Forms; [Windows.Forms.Clipboard]::GetText() }"
 		if path, err := exec.LookPath("pwsh"); err == nil {
-			name = path
+			cmd = exec.Command(path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 		} else {
-			name = "powershell"
+			cmd = exec.Command("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 		}
-		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script}
 	case "darwin":
-		name = "pbpaste"
+		cmd = exec.Command("pbpaste")
 	default:
 		if _, err := exec.LookPath("wl-paste"); err == nil {
-			name = "wl-paste"
-			args = []string{"--no-newline"}
+			cmd = exec.Command("wl-paste", "--no-newline")
 		} else if _, err := exec.LookPath("xclip"); err == nil {
-			name = "xclip"
-			args = []string{"-selection", "clipboard", "-out"}
+			cmd = exec.Command("xclip", "-selection", "clipboard", "-out")
 		} else if _, err := exec.LookPath("xsel"); err == nil {
-			name = "xsel"
-			args = []string{"--clipboard", "--output"}
+			cmd = exec.Command("xsel", "--clipboard", "--output")
 		} else {
 			return "", fmt.Errorf("no supported clipboard command found")
 		}
@@ -43,15 +36,12 @@ func readClipboardText() (string, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var stdout bytes.Buffer
+	if cmd.Path != "" {
+		cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	}
 	var stderr bytes.Buffer
-	err := phygoboost.RunProcess(ctx, phygoboost.ProcessSpec{
-		Name:   name,
-		Args:   args,
-		Task:   uiTaskSpec("read clipboard"),
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("read clipboard: %w", ctx.Err())
@@ -62,32 +52,28 @@ func readClipboardText() (string, error) {
 		}
 		return "", fmt.Errorf("read clipboard: %w", err)
 	}
-	return strings.TrimRight(stdout.String(), "\r\n"), nil
+	return strings.TrimRight(string(out), "\r\n"), nil
 }
 
 func writeClipboardText(text string) error {
-	var name string
-	var args []string
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
 		script := "Set-Clipboard -Value ([Console]::In.ReadToEnd())"
 		if path, err := exec.LookPath("pwsh"); err == nil {
-			name = path
+			cmd = exec.Command(path, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 		} else {
-			name = "powershell"
+			cmd = exec.Command("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 		}
-		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script}
 	case "darwin":
-		name = "pbcopy"
+		cmd = exec.Command("pbcopy")
 	default:
 		if _, err := exec.LookPath("wl-copy"); err == nil {
-			name = "wl-copy"
+			cmd = exec.Command("wl-copy")
 		} else if _, err := exec.LookPath("xclip"); err == nil {
-			name = "xclip"
-			args = []string{"-selection", "clipboard", "-in"}
+			cmd = exec.Command("xclip", "-selection", "clipboard", "-in")
 		} else if _, err := exec.LookPath("xsel"); err == nil {
-			name = "xsel"
-			args = []string{"--clipboard", "--input"}
+			cmd = exec.Command("xsel", "--clipboard", "--input")
 		} else {
 			return fmt.Errorf("no supported clipboard command found")
 		}
@@ -95,15 +81,13 @@ func writeClipboardText(text string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if cmd.Path != "" {
+		cmd = exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	}
+	cmd.Stdin = strings.NewReader(text)
 	var stderr bytes.Buffer
-	if err := phygoboost.RunProcess(ctx, phygoboost.ProcessSpec{
-		Name:   name,
-		Args:   args,
-		Stdin:  strings.NewReader(text),
-		Task:   uiTaskSpec("write clipboard"),
-		Stdout: &bytes.Buffer{},
-		Stderr: &stderr,
-	}); err != nil {
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return fmt.Errorf("write clipboard: %w", ctx.Err())
 		}

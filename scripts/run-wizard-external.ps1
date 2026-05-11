@@ -1,19 +1,22 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$exePath = Join-Path $repoRoot "bin\phytozome-go-dev.exe"
+$exePath = Join-Path $repoRoot "bin\phytozome-go-debug.exe"
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $exePath) | Out-Null
 
 Push-Location $repoRoot
 try {
-    go build -trimpath -ldflags="-X main.version=dev" -o $exePath .\cmd\phytozome-go
+    go build -o $exePath .\cmd\phytozome-go
 } finally {
     Pop-Location
 }
 
+$appArgs = @("blast", "wizard")
+
 $quotedExe = '"' + $exePath + '"'
-$command = "cd /d `"$repoRoot`" && $quotedExe"
+$quotedArgs = ($appArgs | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
+$command = "cd /d `"$repoRoot`" && $quotedExe $quotedArgs"
 
 # This opens a real external Windows console host according to the user's
 # Windows default terminal setting. Set Windows Terminal > Default terminal
