@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package workflow
 
 import (
@@ -1016,6 +1023,118 @@ func replayFamilyFromStrings(settings model.FamilyBlastSettings, values ...strin
 		}
 	}
 	return ""
+}
+
+func TestLiveKeywordRice4CLWorkflowAutoLabels(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live keyword workflow replay in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run live keyword workflow replay")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+
+	phySpecies := model.SpeciesCandidate{
+		ProteomeID:  323,
+		JBrowseName: "Osativa_v7_0",
+		GenomeLabel: "Oryza sativa v7.0",
+	}
+	lemSpecies := model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		IsOfficial:  true,
+	}
+
+	phyCases := []struct {
+		name      string
+		keywords  []string
+		forceWide bool
+		minRows   int
+	}{
+		{"phy-aliases", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, 5},
+		{"phy-locuses", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, 5},
+		{"phy-xp", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, 5},
+		{"phy-mixed", []string{"Os4CL1", "Os02g46970.1", "XP_015625716.1", "Os4CL4", "XP_015650830.1"}, false, 5},
+		{"phy-wide", []string{"4CL"}, true, 1},
+	}
+	for _, tc := range phyCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewBlastWizard(os.Stdout)
+			w.source = phytozome.NewClient(w.httpClient)
+			groups, err := w.searchKeywordGroupsWithProgress(ctx, phySpecies, tc.keywords, nil, tc.forceWide, nil)
+			if err != nil {
+				t.Fatalf("searchKeywordGroupsWithProgress: %v", err)
+			}
+			labels, err := w.autoIdentifyKeywordLabelsWithProgress(ctx, phySpecies, groups)
+			if err != nil {
+				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
+			}
+			if len(labels) != len(tc.keywords) {
+				t.Fatalf("labels=%d, want %d", len(labels), len(tc.keywords))
+			}
+			totalRows := 0
+			for i, group := range groups {
+				totalRows += len(group.Rows)
+				if len(group.Rows) == 0 {
+					t.Fatalf("group %d keyword=%q returned no rows", i, group.SearchTerm)
+				}
+				if strings.TrimSpace(labels[i]) == "" {
+					t.Fatalf("group %d keyword=%q auto label is empty", i, group.SearchTerm)
+				}
+			}
+			if totalRows < tc.minRows {
+				t.Fatalf("total rows=%d, want >= %d", totalRows, tc.minRows)
+			}
+		})
+	}
+
+	lemCases := []struct {
+		name           string
+		keywords       []string
+		forceWide      bool
+		expectNonEmpty bool
+	}{
+		{"lem-aliases", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, true},
+		{"lem-mixed-aliases", []string{"Os4CL1", "os4cl2", "Os4CL3", "os4cl4", "Os4CL5"}, false, true},
+		{"lem-wide-4cl", []string{"4CL"}, true, true},
+		{"lem-locus-controlled-zero", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, false},
+		{"lem-xp", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, true},
+	}
+	for _, tc := range lemCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewBlastWizard(os.Stdout)
+			w.source = lemna.NewClient(w.httpClient)
+			groups, err := w.searchKeywordGroupsWithProgress(ctx, lemSpecies, tc.keywords, nil, tc.forceWide, nil)
+			if err != nil {
+				t.Fatalf("searchKeywordGroupsWithProgress: %v", err)
+			}
+			labels, err := w.autoIdentifyKeywordLabelsWithProgress(ctx, lemSpecies, groups)
+			if err != nil {
+				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
+			}
+			if len(labels) != len(tc.keywords) {
+				t.Fatalf("labels=%d, want %d", len(labels), len(tc.keywords))
+			}
+			for i, group := range groups {
+				if tc.expectNonEmpty {
+					if len(group.Rows) == 0 {
+						t.Fatalf("group %d keyword=%q returned no rows", i, group.SearchTerm)
+					}
+					if strings.TrimSpace(labels[i]) == "" {
+						t.Fatalf("group %d keyword=%q auto label is empty", i, group.SearchTerm)
+					}
+				} else if len(group.Rows) != 0 {
+					t.Fatalf("group %d keyword=%q rows=%d, want controlled zero results to avoid false-positive remaps", i, group.SearchTerm, len(group.Rows))
+				}
+			}
+		})
+	}
 }
 
 func logReplayResult(t *testing.T, result replayScenarioResult, targets map[string]int) {

@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package prompt
 
 import (
@@ -72,6 +79,25 @@ func TestParseKeywordIdentityValues(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected value at %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestKeywordWideSearchContextSupportsPhytozomeAndLemna(t *testing.T) {
+	tests := []struct {
+		name string
+		path []string
+		want bool
+	}{
+		{name: "phytozome", path: []string{"phytozome", "Startup"}, want: true},
+		{name: "lemna", path: []string{"lemna", "Startup"}, want: true},
+		{name: "blast", path: []string{"blast", "Startup"}, want: false},
+	}
+
+	for _, tt := range tests {
+		p := &Prompter{sessionPath: tt.path}
+		if got := p.keywordWideSearchContext(); got != tt.want {
+			t.Fatalf("%s context = %v, want %v", tt.name, got, tt.want)
 		}
 	}
 }
@@ -474,4 +500,10 @@ func indexOfString(values []string, target string) int {
 		}
 	}
 	return -1
+}
+
+func TestBackNavigationSentinelRemainsStable(t *testing.T) {
+	if ErrBackToQueryInput == nil {
+		t.Fatal("ErrBackToQueryInput should remain a stable non-nil navigation sentinel")
+	}
 }

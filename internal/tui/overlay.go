@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package tui
 
 import (
@@ -12,10 +19,49 @@ var backgroundStore = struct {
 	current tview.Primitive
 }{}
 
+type backgroundCarrier interface {
+	backgroundPrimitive() tview.Primitive
+}
+
+type rememberedBackgroundRoot struct {
+	tview.Primitive
+	background tview.Primitive
+}
+
+func (r *rememberedBackgroundRoot) backgroundPrimitive() tview.Primitive {
+	if r == nil || r.background == nil {
+		return nil
+	}
+	return r.background
+}
+
+func backgroundPrimitiveFor(root tview.Primitive) tview.Primitive {
+	if carrier, ok := root.(backgroundCarrier); ok {
+		if background := carrier.backgroundPrimitive(); background != nil {
+			return background
+		}
+	}
+	return root
+}
+
+func rememberRootBackground(root tview.Primitive, background tview.Primitive) tview.Primitive {
+	if root == nil {
+		return nil
+	}
+	if background == nil {
+		background = root
+	}
+	return &rememberedBackgroundRoot{
+		Primitive:  root,
+		background: backgroundPrimitiveFor(background),
+	}
+}
+
 func rememberBackground(root tview.Primitive) {
 	if root == nil {
 		return
 	}
+	root = backgroundPrimitiveFor(root)
 	backgroundStore.Lock()
 	backgroundStore.current = root
 	backgroundStore.Unlock()
@@ -161,26 +207,29 @@ func (m *modalOverlay) PasteHandler() func(text string, setFocus func(p tview.Pr
 
 func modalRoot(page TaskPage, body tview.Primitive, width int, height int) tview.Primitive {
 	fallback := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), tview.NewBox())
+	background := currentBackground(fallback)
 	root := tview.NewPages()
-	root.AddPage("background", currentBackground(fallback), true, true)
+	root.AddPage("background", background, true, true)
 	root.AddPage("modal", newModalOverlay(body, width, height), true, true)
-	return root
+	return rememberRootBackground(root, background)
 }
 
 func taskModalRoot(page TaskPage, body tview.Primitive, width int, height int) tview.Primitive {
 	fallback := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), tview.NewBox())
+	background := currentBackground(fallback)
 	root := tview.NewPages()
-	root.AddPage("background", currentBackground(fallback), true, true)
+	root.AddPage("background", background, true, true)
 	root.AddPage("modal", newModalOverlay(body, width, height), true, true)
-	return root
+	return rememberRootBackground(root, background)
 }
 
 func infoModalRoot(page InfoPage, body tview.Primitive, width int, height int) tview.Primitive {
 	fallback := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), tview.NewBox())
+	background := currentBackground(fallback)
 	root := tview.NewPages()
-	root.AddPage("background", currentBackground(fallback), true, true)
+	root.AddPage("background", background, true, true)
 	root.AddPage("modal", newModalOverlay(body, width, height), true, true)
-	return root
+	return rememberRootBackground(root, background)
 }
 
 func overlayRootOn(background tview.Primitive, modal tview.Primitive, width int, height int) tview.Primitive {
@@ -190,5 +239,5 @@ func overlayRootOn(background tview.Primitive, modal tview.Primitive, width int,
 	root := tview.NewPages()
 	root.AddPage("background", background, true, true)
 	root.AddPage("modal", newModalOverlay(modal, width, height), true, true)
-	return root
+	return rememberRootBackground(root, background)
 }

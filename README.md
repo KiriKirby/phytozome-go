@@ -73,6 +73,38 @@ macOS Apple Silicon:
 
 The wizard starts immediately. You do not need to pass subcommands.
 
+## License
+
+This repository is licensed under the `Common Public Attribution License 1.0` (`CPAL-1.0`).
+
+The canonical license text is stored in [LICENSE](/C:/Users/wangsychn/Documents/GitHub/phytozome-batch-cli/LICENSE) and the in-app startup screen and CLI metadata are expected to display the same license identifier.
+
+## Windows Build And Debug
+
+The Windows development flow can use the same bundled `WezTerm` terminal client as the packaged app instead of launching the CLI directly in the host console.
+
+Useful commands:
+
+```powershell
+# Build the Windows WezTerm bundle without zipping it
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-wezterm-dev.ps1
+
+# Package the Windows WezTerm bundle and zip it
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-wezterm.ps1 -BuildVersion dev
+
+# Launch the debug bundle in the bundled WezTerm terminal
+powershell -ExecutionPolicy Bypass -File .\scripts\run-wizard-external.ps1
+```
+
+What these scripts do:
+
+- `scripts\prepare-windows-wezterm.ps1` downloads and prepares the selected WezTerm Windows runtime under `bin\tooling\windows-wezterm\`
+- `scripts\package-windows-wezterm.ps1` stages a distributable bundle in `bin\phytozome-go_windows_amd64_wezterm\`
+- `scripts\run-wizard-external.ps1` starts the bundled GUI launcher, which opens `phytozome-go.bin` inside the bundled WezTerm terminal
+- `cmd\phytozome-go-winlauncher` builds the Windows GUI launcher used by that bundle
+
+This keeps Windows debugging closer to the real release environment, including the newer terminal client and its bundled configuration.
+
 ## Files The Program Creates
 
 The program keeps all runtime artifacts next to the executable so nothing is scattered around your system.

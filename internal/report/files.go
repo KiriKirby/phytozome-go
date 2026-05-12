@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package report
 
 import (
@@ -9,10 +16,40 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
+type GeneratedFileInspector struct {
+	mu    sync.RWMutex
+	cache map[string]GeneratedFile
+}
+
+func NewGeneratedFileInspector() *GeneratedFileInspector {
+	return &GeneratedFileInspector{cache: map[string]GeneratedFile{}}
+}
+
 func InspectGeneratedFile(path string, fileType string, role string, hashTime time.Time) (GeneratedFile, error) {
+	return inspectGeneratedFileCached(nil, path, fileType, role, hashTime)
+}
+
+func (i *GeneratedFileInspector) Inspect(path string, fileType string, role string, hashTime time.Time) (GeneratedFile, error) {
+	return inspectGeneratedFileCached(i, path, fileType, role, hashTime)
+}
+
+func inspectGeneratedFileCached(inspector *GeneratedFileInspector, path string, fileType string, role string, hashTime time.Time) (GeneratedFile, error) {
+	cacheKey := normalizedGeneratedFilePath(path)
+	if inspector != nil {
+		if cached, ok := inspector.cached(cacheKey); ok {
+			cached.Type = fileType
+			cached.Role = role
+			if !hashTime.IsZero() {
+				cached.HashCaptured = hashTime
+			}
+			return cached, nil
+		}
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return GeneratedFile{}, fmt.Errorf("stat generated file: %w", err)
@@ -24,7 +61,7 @@ func InspectGeneratedFile(path string, fileType string, role string, hashTime ti
 	if hashTime.IsZero() {
 		hashTime = time.Now()
 	}
-	return GeneratedFile{
+	file := GeneratedFile{
 		Name:         filepath.Base(path),
 		Type:         fileType,
 		Role:         role,
@@ -37,7 +74,11 @@ func InspectGeneratedFile(path string, fileType string, role string, hashTime ti
 		SHA1:         sha1Value,
 		MD5:          md5Value,
 		HashCaptured: hashTime,
-	}, nil
+	}
+	if inspector != nil {
+		inspector.store(cacheKey, file)
+	}
+	return file, nil
 }
 
 func PlannedReportFile(path string, generatedAt time.Time) GeneratedFile {
@@ -76,4 +117,35 @@ func hashFile(path string) (string, string, string, error) {
 		hex.EncodeToString(sha1Hash.Sum(nil)),
 		hex.EncodeToString(md5Hash.Sum(nil)),
 		nil
+}
+
+func normalizedGeneratedFilePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
+}
+
+func (i *GeneratedFileInspector) cached(key string) (GeneratedFile, bool) {
+	if i == nil || key == "" {
+		return GeneratedFile{}, false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	file, ok := i.cache[key]
+	return file, ok
+}
+
+func (i *GeneratedFileInspector) store(key string, file GeneratedFile) {
+	if i == nil || key == "" {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.cache[key] = file
 }

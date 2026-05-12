@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package phytozomekeyword
 
 import (
@@ -25,6 +32,8 @@ const (
 )
 
 const fallbackSuffix = " (fallback to wide search)"
+
+const cacheSchemaVersion = "phytozomekeyword-v3"
 
 var (
 	riceLocusPattern        = regexp.MustCompile(`(?i)^(?:LOC_)?(?:OS)?\d{2}G\d{5}(?:\.\d+)?$`)
@@ -74,6 +83,10 @@ type GeneFinder interface {
 	FetchGeneByTranscript(ctx context.Context, proteomeID int, transcriptID string) (GeneRecord, error)
 	FetchGeneByProtein(ctx context.Context, proteomeID int, proteinID string) (GeneRecord, error)
 	SearchGenesByKeyword(ctx context.Context, proteomeID int, keyword string, limit int) ([]GeneRecord, error)
+}
+
+type BroadGeneKeywordFinder interface {
+	SearchGenesByKeywordBroad(ctx context.Context, proteomeID int, keyword string, limit int) ([]GeneRecord, error)
 }
 
 type Engine struct {
@@ -190,6 +203,7 @@ func (e *Engine) selectProgram(term string) searchProgram {
 
 func (e *Engine) cacheKey(species model.SpeciesCandidate, term string, program string, mode string) string {
 	return strings.Join([]string{
+		cacheSchemaVersion,
 		strconv.Itoa(species.ProteomeID),
 		strings.TrimSpace(species.JBrowseName),
 		normalizeTermKey(term),
@@ -384,6 +398,16 @@ func (wideSearchProgram) Search(ctx context.Context, engine *Engine, species mod
 			return genes, nil
 		}
 	}
+	if broadFinder, ok := engine.finder.(BroadGeneKeywordFinder); ok {
+		found, err = broadFinder.SearchGenesByKeywordBroad(ctx, species.ProteomeID, term, 10000)
+		if err != nil {
+			return nil, err
+		}
+		add(found)
+		if len(genes) > 0 {
+			return genes, nil
+		}
+	}
 	return genes, nil
 }
 
@@ -553,6 +577,11 @@ func SpecificIdentifierVariants(value string) []string {
 	add(value)
 	add(strings.ToUpper(value))
 	add(strings.ToLower(value))
+	for _, candidate := range []string{value, strings.ToUpper(value), strings.ToLower(value)} {
+		if strings.Contains(candidate, ".") {
+			add(strings.Split(candidate, ".")[0])
+		}
+	}
 	if normalized := normalizeRiceLocusCandidate(value); normalized != "" {
 		add(normalized)
 		add("LOC_" + normalized)
@@ -598,15 +627,34 @@ func aliasesForNormalizedTerm(catalog map[string][]string, term string) []string
 
 func curatedRiceRefSeqAliasMap() map[string][]string {
 	return map[string][]string{
-		normalizeAliasKey("XP_015639656"): {"LOC_Os05g25640"},
-		normalizeAliasKey("XP_015635394"): {"LOC_Os01g60450"},
-		normalizeAliasKey("XP_015623447"): {"LOC_Os02g26770"},
-		normalizeAliasKey("XP_015626579"): {"LOC_Os02g26810"},
+		normalizeAliasKey("XP_015639656"):   {"LOC_Os05g25640"},
+		normalizeAliasKey("XP_015639656.1"): {"LOC_Os05g25640"},
+		normalizeAliasKey("XP_015635394"):   {"LOC_Os01g60450"},
+		normalizeAliasKey("XP_015635394.1"): {"LOC_Os01g60450"},
+		normalizeAliasKey("XP_015623447"):   {"LOC_Os02g26770"},
+		normalizeAliasKey("XP_015623447.1"): {"LOC_Os02g26770"},
+		normalizeAliasKey("XP_015626579"):   {"LOC_Os02g26810"},
+		normalizeAliasKey("XP_015626579.1"): {"LOC_Os02g26810"},
+		normalizeAliasKey("XP_015650724"):   {"LOC_Os08g14760"},
+		normalizeAliasKey("XP_015650724.1"): {"LOC_Os08g14760"},
+		normalizeAliasKey("XP_015624111"):   {"LOC_Os02g46970"},
+		normalizeAliasKey("XP_015624111.1"): {"LOC_Os02g46970"},
+		normalizeAliasKey("XP_015625716"):   {"LOC_Os02g08100"},
+		normalizeAliasKey("XP_015625716.1"): {"LOC_Os02g08100"},
+		normalizeAliasKey("XP_015643415"):   {"LOC_Os06g44620"},
+		normalizeAliasKey("XP_015643415.1"): {"LOC_Os06g44620"},
+		normalizeAliasKey("XP_015650830"):   {"LOC_Os08g34790"},
+		normalizeAliasKey("XP_015650830.1"): {"LOC_Os08g34790"},
 	}
 }
 
 func curatedRiceAliasMap() map[string][]string {
 	return map[string][]string{
+		normalizeAliasKey("Os4CL1"):    {"LOC_Os08g14760"},
+		normalizeAliasKey("Os4CL2"):    {"LOC_Os02g46970"},
+		normalizeAliasKey("Os4CL3"):    {"LOC_Os02g08100"},
+		normalizeAliasKey("Os4CL4"):    {"LOC_Os06g44620"},
+		normalizeAliasKey("Os4CL5"):    {"LOC_Os08g34790"},
 		normalizeAliasKey("OsC4H1"):    {"LOC_Os05g25640"},
 		normalizeAliasKey("CYP73A35p"): {"LOC_Os01g60450"},
 		normalizeAliasKey("OsC4H2a"):   {"LOC_Os02g26770"},

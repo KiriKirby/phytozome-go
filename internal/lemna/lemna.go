@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package lemna
 
 import (
@@ -22,7 +29,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
+	"github.com/KiriKirby/phytozome-go/internal/searchengine/lemnakeyword"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -39,7 +46,8 @@ var (
 )
 
 type Client struct {
-	baseHTTP *http.Client
+	baseHTTP      *http.Client
+	keywordEngine *lemnakeyword.Engine
 
 	mu                     sync.RWMutex
 	speciesCandidates      []model.SpeciesCandidate
@@ -49,7 +57,9 @@ type Client struct {
 	fastaIndexCache        map[string]map[string]fastaEntry
 	proteinReleaseCache    map[string]map[string]string
 	proteinSequenceCache   map[string]string
+	keywordIndexCache      map[string]lemnaKeywordIndex
 	keywordRowsCache       map[string][]model.KeywordResultRow
+	keywordRowsByGFFCache  map[string][]model.KeywordResultRow
 	blastCapabilitiesCache map[string]BlastCapability
 	localResultsCache      map[string]model.BlastResult
 	textCache              map[string]string
@@ -112,6 +122,16 @@ type ahrdRecord struct {
 	HumanReadableDescription string
 	Interpro                 string
 	GeneOntologyTerm         string
+}
+
+type lemnaKeywordIndex struct {
+	Release          releaseInfo              `json:"release"`
+	Species          model.SpeciesCandidate   `json:"species"`
+	Rows             []model.KeywordResultRow `json:"rows"`
+	ByIdentifier     map[string][]int         `json:"by_identifier"`
+	ByAlias          map[string][]int         `json:"by_alias"`
+	BySearchToken    map[string][]int         `json:"by_search_token"`
+	ByNormalizedText map[string][]int         `json:"by_normalized_text"`
 }
 
 // BlastCapability describes detected BLAST capabilities for a release/species.
@@ -240,6 +260,28 @@ func (c *Client) cachedProteinTranscriptMaps(ctx context.Context, release releas
 			c.proteinTranscriptCache[cacheKey] = proteinTranscriptMaps{protToTrans: protCopy, transToGene: transCopy}
 			c.mu.Unlock()
 			return proteinTranscriptMaps{protToTrans: protCopy, transToGene: transCopy}, nil
+		}
+
+		c.mu.RLock()
+		cachedRows := cloneKeywordRows(c.keywordRowsByGFFCache[cacheKey])
+		c.mu.RUnlock()
+		if len(cachedRows) > 0 {
+			protToTrans, transToGene := deriveProteinTranscriptMapsFromRows(cachedRows)
+			if len(protToTrans) > 0 || len(transToGene) > 0 {
+				storedProt := cloneStringMap(protToTrans)
+				storedTrans := cloneStringMap(transToGene)
+				c.mu.Lock()
+				if c.proteinTranscriptCache == nil {
+					c.proteinTranscriptCache = make(map[string]proteinTranscriptMaps)
+				}
+				c.proteinTranscriptCache[cacheKey] = proteinTranscriptMaps{protToTrans: storedProt, transToGene: storedTrans}
+				c.mu.Unlock()
+				writeCachedJSON("protein-transcript", cacheKey, proteinTranscriptDisk{
+					ProtToTrans: storedProt,
+					TransToGene: storedTrans,
+				})
+				return proteinTranscriptMaps{protToTrans: storedProt, transToGene: storedTrans}, nil
+			}
 		}
 
 		protToTrans, transToGene, err := c.buildProteinTranscriptMap(ctx, release)
@@ -634,9 +676,9 @@ var officialClones = []officialClone{
 
 func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = perf.HTTPClient()
+		httpClient = defaultHTTPClient()
 	}
-	return &Client{
+	client := &Client{
 		baseHTTP:               httpClient,
 		releasesByJBrowseName:  make(map[string]releaseInfo),
 		ahrdCache:              make(map[string]map[string]ahrdRecord),
@@ -644,11 +686,15 @@ func NewClient(httpClient *http.Client) *Client {
 		fastaIndexCache:        make(map[string]map[string]fastaEntry),
 		proteinReleaseCache:    make(map[string]map[string]string),
 		proteinSequenceCache:   make(map[string]string),
+		keywordIndexCache:      make(map[string]lemnaKeywordIndex),
 		keywordRowsCache:       make(map[string][]model.KeywordResultRow),
+		keywordRowsByGFFCache:  make(map[string][]model.KeywordResultRow),
 		blastCapabilitiesCache: make(map[string]BlastCapability),
 		localResultsCache:      make(map[string]model.BlastResult),
 		textCache:              make(map[string]string),
 	}
+	client.keywordEngine = lemnakeyword.New(client)
+	return client
 }
 
 func (c *Client) Name() string {
@@ -680,7 +726,7 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 
 		rootJobs := make(chan downloadDir)
 		rootResults := make(chan speciesMetaResult, len(rootDirs))
-		workerCount := perf.NetworkWorkers(len(rootDirs))
+		workerCount := networkWorkerCount(len(rootDirs))
 
 		var workers sync.WaitGroup
 		for range workerCount {
@@ -1007,28 +1053,41 @@ func (c *Client) loadBlastResultFromCache(jobID string) (model.BlastResult, erro
 	if strings.TrimSpace(jobID) == "" {
 		return model.BlastResult{}, fmt.Errorf("empty job id")
 	}
-	cacheRoot, err := appfs.CacheDir("lemna")
-	if err != nil {
-		return model.BlastResult{}, err
+	found := ""
+	if indexPath, err := localBlastResultIndexPath(jobID); err == nil {
+		if data, readErr := os.ReadFile(indexPath); readErr == nil {
+			candidate := strings.TrimSpace(string(data))
+			if candidate != "" {
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					found = candidate
+				}
+			}
+		}
 	}
-	var found string
-	// Walk cache tree to find jobID+".tsv"
-	_ = filepath.Walk(cacheRoot, func(pathStr string, info os.FileInfo, err error) error {
-		if err != nil {
-			// ignore and continue walking
-			return nil
-		}
-		if info.IsDir() {
-			return nil
-		}
-		if info.Name() == jobID+".tsv" {
-			found = pathStr
-			return fmt.Errorf("found") // short-circuit
-		}
-		return nil
-	})
 	if found == "" {
-		return model.BlastResult{}, fmt.Errorf("no cached result file for job %s", jobID)
+		cacheRoot, err := appfs.CacheDir("lemna")
+		if err != nil {
+			return model.BlastResult{}, err
+		}
+		_ = filepath.Walk(cacheRoot, func(pathStr string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if info.Name() == jobID+".tsv" {
+				found = pathStr
+				return fmt.Errorf("found")
+			}
+			return nil
+		})
+		if found == "" {
+			return model.BlastResult{}, fmt.Errorf("no cached result file for job %s", jobID)
+		}
+		if indexPath, err := localBlastResultIndexPath(jobID); err == nil {
+			_ = writeAtomically(indexPath, []byte(found))
+		}
 	}
 
 	// parse simple TSV saved by saveBlastResultToCache
@@ -1130,7 +1189,7 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 	}
 	for _, row := range rows {
 		if strings.EqualFold(row.GeneIdentifier, identifier) || strings.EqualFold(row.TranscriptID, identifier) {
-			sequence, err := c.FetchProteinSequence(ctx, 0, row.SequenceID)
+			sequence, err := c.FetchProteinSequence(ctx, species.ProteomeID, row.SequenceID)
 			if err != nil {
 				return nil, err
 			}
@@ -1149,6 +1208,46 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 		}
 	}
 	return nil, fmt.Errorf("no lemna.org gene or transcript matched %q", identifier)
+}
+
+func (c *Client) ResolveQuerySequence(ctx context.Context, species model.SpeciesCandidate, input string) (*model.QuerySequenceSource, bool, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, false, nil
+	}
+	rows, err := c.SearchKeywordRows(ctx, species, input)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rows) == 0 {
+		return nil, false, nil
+	}
+	row := rows[0]
+	sequenceID := strings.TrimSpace(firstNonEmpty(row.SequenceID, row.ProteinID, row.TranscriptID, row.GeneIdentifier))
+	if sequenceID == "" {
+		return nil, false, nil
+	}
+	sequence, err := c.FetchProteinSequence(ctx, species.ProteomeID, sequenceID)
+	if err != nil {
+		return nil, false, err
+	}
+	source := &model.QuerySequenceSource{
+		Sequence:          sequence,
+		SourceDatabase:    c.Name(),
+		SourceProteomeID:  species.ProteomeID,
+		SourceJBrowseName: species.JBrowseName,
+		SourceGenomeLabel: species.GenomeLabel,
+		LabelName:         strings.TrimSpace(row.LabelName),
+		Aliases:           strings.TrimSpace(row.Aliases),
+		AutoDefine:        strings.TrimSpace(row.AutoDefine),
+		UniProtAccession:  strings.TrimSpace(row.UniProt),
+		GeneID:            strings.TrimSpace(row.GeneIdentifier),
+		TranscriptID:      strings.TrimSpace(row.TranscriptID),
+		ProteinID:         firstNonEmpty(strings.TrimSpace(row.ProteinID), strings.TrimSpace(row.SequenceID), strings.TrimSpace(row.TranscriptID)),
+		OrganismShort:     firstNonEmpty(strings.TrimSpace(row.SequenceHeaderLabel), species.SearchAlias, species.GenomeLabel),
+		Annotation:        firstNonEmpty(strings.TrimSpace(row.Description), strings.TrimSpace(row.Comments), species.GenomeLabel),
+	}
+	return source, true, nil
 }
 
 func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
@@ -1206,64 +1305,24 @@ func (c *Client) FetchUniProtAccessions(ctx context.Context, targetID int, prote
 }
 
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	keyword = strings.TrimSpace(keyword)
-	if keyword == "" {
-		return nil, nil
+	if c.keywordEngine == nil {
+		c.keywordEngine = lemnakeyword.New(c)
 	}
-	cacheKey := species.JBrowseName + "|" + strings.ToLower(keyword)
-	c.mu.RLock()
-	if cached, ok := c.keywordRowsCache[cacheKey]; ok {
-		rows := append([]model.KeywordResultRow(nil), cached...)
-		c.mu.RUnlock()
-		return rows, nil
-	}
-	c.mu.RUnlock()
-	if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
-		rows := append([]model.KeywordResultRow(nil), cached...)
-		c.mu.Lock()
-		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
-		c.mu.Unlock()
-		return rows, nil
-	}
+	return c.keywordEngine.SearchKeywordRows(ctx, species, keyword)
+}
 
-	value, err, _ := c.sf.Do("keyword-rows:"+cacheKey, func() (any, error) {
-		c.mu.RLock()
-		if cached, ok := c.keywordRowsCache[cacheKey]; ok {
-			rows := append([]model.KeywordResultRow(nil), cached...)
-			c.mu.RUnlock()
-			return rows, nil
-		}
-		c.mu.RUnlock()
-		if cached, ok := readCachedJSON[[]model.KeywordResultRow]("keyword-rows", cacheKey); ok {
-			rows := append([]model.KeywordResultRow(nil), cached...)
-			c.mu.Lock()
-			c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), cached...)
-			c.mu.Unlock()
-			return rows, nil
-		}
-
-		release, err := c.releaseForSpecies(ctx, species)
-		if err != nil {
-			return nil, err
-		}
-		if release.GFFURL == "" {
-			return nil, fmt.Errorf("no GFF3 file found for %s", species.DisplayLabel())
-		}
-
-		rows, err := c.searchGFFRows(ctx, release, species, keyword, 200)
-		if err != nil {
-			return nil, err
-		}
-		c.mu.Lock()
-		c.keywordRowsCache[cacheKey] = append([]model.KeywordResultRow(nil), rows...)
-		c.mu.Unlock()
-		writeCachedJSON("keyword-rows", cacheKey, rows)
-		return rows, nil
-	})
-	if err != nil {
-		return nil, err
+func (c *Client) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	if c.keywordEngine == nil {
+		c.keywordEngine = lemnakeyword.New(c)
 	}
-	return value.([]model.KeywordResultRow), nil
+	return c.keywordEngine.SearchKeywordRowsWide(ctx, species, keyword)
+}
+
+func (c *Client) SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	if c.keywordEngine == nil {
+		c.keywordEngine = lemnakeyword.New(c)
+	}
+	return c.keywordEngine.SearchKeywordRowsBroad(ctx, species, keyword)
 }
 
 func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
@@ -1653,51 +1712,65 @@ func (c *Client) buildProteinTranscriptMap(ctx context.Context, release releaseI
 		if !ok {
 			continue
 		}
-		// Try to discover transcript / protein relationships from attributes.
-		attr := gff.AttrMap
-		// Candidate transcript identifiers
-		transcriptID := firstNonEmpty(attr["transcript_id"], attr["ID"], attr["Name"], attr["protein_id"])
-		// Candidate gene identifier (Parent, gene, gene_id)
-		geneID := firstNonEmpty(attr["Parent"], attr["gene"], attr["gene_id"])
-		// Candidate protein accession/token
-		protID := firstNonEmpty(attr["protein_id"], attr["protein"], attr["translation"], attr["protein_accession"])
-		// Normalize and store mappings when reasonable.
-		if transcriptID != "" && geneID != "" {
-			// ensure transcript -> gene mapping
-			transcriptToGene[transcriptID] = geneID
-			for _, alias := range normalizedIdentifierCandidates(transcriptID) {
-				transcriptToGene[alias] = geneID
-			}
-		}
-		if protID != "" {
-			// Map protein token(s) to transcript, including normalized aliases.
-			for _, alias := range normalizedIdentifierCandidates(protID) {
-				proteinToTranscript[alias] = transcriptID
-			}
-		}
-		// For CDS/mRNA lines where protein_id not present but ID/Name exists, attempt to map:
-		if protID == "" && transcriptID != "" {
-			// Record transcript->gene if possible (already done above).
-			// If the feature has a protein-like ID in a different attribute, try common keys.
-			if val := firstNonEmpty(attr["Dbxref"], attr["Alias"]); val != "" {
-				// take last token as protein alias possibility
-				token := val
-				if strings.Contains(token, ":") {
-					parts := strings.Split(token, ":")
-					token = parts[len(parts)-1]
-				}
-				if token != "" {
-					for _, alias := range normalizedIdentifierCandidates(token) {
-						proteinToTranscript[alias] = transcriptID
-					}
-				}
-			}
-		}
+		applyProteinTranscriptHints(proteinToTranscript, transcriptToGene, gff)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, nil, fmt.Errorf("scan GFF3 %s: %w", release.GFFURL, err)
 	}
 	return proteinToTranscript, transcriptToGene, nil
+}
+
+func applyProteinTranscriptHints(proteinToTranscript map[string]string, transcriptToGene map[string]string, gff gffRow) {
+	attr := gff.AttrMap
+	transcriptID := firstNonEmpty(attr["transcript_id"], attr["ID"], attr["Name"], attr["protein_id"])
+	geneID := firstNonEmpty(attr["Parent"], attr["gene"], attr["gene_id"])
+	protID := firstNonEmpty(attr["protein_id"], attr["protein"], attr["translation"], attr["protein_accession"])
+	if transcriptID != "" && geneID != "" {
+		transcriptToGene[transcriptID] = geneID
+		for _, alias := range normalizedIdentifierCandidates(transcriptID) {
+			transcriptToGene[alias] = geneID
+		}
+	}
+	if transcriptID != "" && protID != "" {
+		for _, alias := range normalizedIdentifierCandidates(protID) {
+			proteinToTranscript[alias] = transcriptID
+		}
+	}
+	if transcriptID == "" || protID != "" {
+		return
+	}
+	if val := firstNonEmpty(attr["Dbxref"], attr["Alias"]); val != "" {
+		token := val
+		if strings.Contains(token, ":") {
+			parts := strings.Split(token, ":")
+			token = parts[len(parts)-1]
+		}
+		for _, alias := range normalizedIdentifierCandidates(token) {
+			proteinToTranscript[alias] = transcriptID
+		}
+	}
+}
+
+func deriveProteinTranscriptMapsFromRows(rows []model.KeywordResultRow) (map[string]string, map[string]string) {
+	protToTrans := make(map[string]string)
+	transToGene := make(map[string]string)
+	for _, row := range rows {
+		transcriptID := strings.TrimSpace(row.TranscriptID)
+		geneID := strings.TrimSpace(row.GeneIdentifier)
+		proteinID := strings.TrimSpace(row.ProteinID)
+		if transcriptID != "" && geneID != "" {
+			transToGene[transcriptID] = geneID
+			for _, alias := range normalizedIdentifierCandidates(transcriptID) {
+				transToGene[alias] = geneID
+			}
+		}
+		if transcriptID != "" && proteinID != "" {
+			for _, alias := range normalizedIdentifierCandidates(proteinID) {
+				protToTrans[alias] = transcriptID
+			}
+		}
+	}
+	return protToTrans, transToGene
 }
 
 func (c *Client) findProteinSequenceInRelease(ctx context.Context, release releaseInfo, sequenceID string) (string, bool, error) {
@@ -1725,34 +1798,58 @@ func (c *Client) cachedProteinReleaseSequences(ctx context.Context, release rele
 	c.mu.RLock()
 	if cached, ok := c.proteinReleaseCache[key]; ok {
 		c.mu.RUnlock()
-		return cached, nil
+		return cloneStringMap(cached), nil
 	}
 	c.mu.RUnlock()
+
+	if cached, ok := readCachedJSON[proteinReleaseSequencesDisk]("protein-release-sequences", key); ok && len(cached.Sequences) > 0 {
+		copyMap := cloneStringMap(cached.Sequences)
+		c.mu.Lock()
+		if c.proteinReleaseCache == nil {
+			c.proteinReleaseCache = make(map[string]map[string]string)
+		}
+		c.proteinReleaseCache[key] = copyMap
+		c.mu.Unlock()
+		return cloneStringMap(copyMap), nil
+	}
 
 	value, err, _ := c.sf.Do("protein-release-seq:"+key, func() (any, error) {
 		c.mu.RLock()
 		if cached, ok := c.proteinReleaseCache[key]; ok {
 			c.mu.RUnlock()
-			return cached, nil
+			return cloneStringMap(cached), nil
 		}
 		c.mu.RUnlock()
+
+		if cached, ok := readCachedJSON[proteinReleaseSequencesDisk]("protein-release-sequences", key); ok && len(cached.Sequences) > 0 {
+			copyMap := cloneStringMap(cached.Sequences)
+			c.mu.Lock()
+			if c.proteinReleaseCache == nil {
+				c.proteinReleaseCache = make(map[string]map[string]string)
+			}
+			c.proteinReleaseCache[key] = copyMap
+			c.mu.Unlock()
+			return cloneStringMap(copyMap), nil
+		}
 
 		sequences, err := c.loadProteinReleaseSequences(ctx, release)
 		if err != nil {
 			return nil, err
 		}
+		copyMap := cloneStringMap(sequences)
 		c.mu.Lock()
 		if c.proteinReleaseCache == nil {
 			c.proteinReleaseCache = make(map[string]map[string]string)
 		}
-		c.proteinReleaseCache[key] = sequences
+		c.proteinReleaseCache[key] = copyMap
 		c.mu.Unlock()
-		return sequences, nil
+		writeCachedJSON("protein-release-sequences", key, proteinReleaseSequencesDisk{Sequences: copyMap})
+		return cloneStringMap(copyMap), nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.(map[string]string), nil
+	return cloneStringMap(value.(map[string]string)), nil
 }
 
 func (c *Client) loadProteinReleaseSequences(ctx context.Context, release releaseInfo) (map[string]string, error) {
@@ -2416,4 +2513,15 @@ func lookupAHRDRecord(records map[string]ahrdRecord, key string) (ahrdRecord, bo
 		}
 	}
 	return ahrdRecord{}, false
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }

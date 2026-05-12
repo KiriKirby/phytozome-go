@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package workflow
 
 import (
@@ -13,7 +20,6 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -24,7 +30,8 @@ func (w *BlastWizard) renderKeywordReportForExport(ctx context.Context, rows []m
 	_ = sequenceRecords
 
 	metadataStart := time.Now()
-	generatedFiles, err := inspectKeywordGeneratedFiles(ctx, files, sequenceAudit)
+	inspector := report.NewGeneratedFileInspector()
+	generatedFiles, err := inspectKeywordGeneratedFiles(ctx, files, sequenceAudit, inspector)
 	if err != nil {
 		return "", err
 	}
@@ -116,7 +123,7 @@ func (w *BlastWizard) buildKeywordReportData(rows []model.KeywordResultRow, allR
 	}
 }
 
-func inspectKeywordGeneratedFiles(ctx context.Context, files exportFileResult, sequenceAudit report.SequenceAudit) ([]report.GeneratedFile, error) {
+func inspectKeywordGeneratedFiles(ctx context.Context, files exportFileResult, sequenceAudit report.SequenceAudit, inspector *report.GeneratedFileInspector) ([]report.GeneratedFile, error) {
 	type fileSpec struct {
 		path string
 		typ  string
@@ -139,24 +146,47 @@ func inspectKeywordGeneratedFiles(ctx context.Context, files exportFileResult, s
 	if len(filtered) == 0 {
 		return out, nil
 	}
+	type uniqueSpec struct {
+		path string
+		typ  string
+		role string
+	}
+	uniqueByPath := make(map[string]uniqueSpec, len(filtered))
+	uniqueSpecs := make([]uniqueSpec, 0, len(filtered))
+	for _, spec := range filtered {
+		key := normalizeGeneratedFileSpecPath(spec.path)
+		if _, ok := uniqueByPath[key]; ok {
+			continue
+		}
+		unique := uniqueSpec{path: spec.path, typ: spec.typ, role: spec.role}
+		uniqueByPath[key] = unique
+		uniqueSpecs = append(uniqueSpecs, unique)
+	}
 	type inspectResult struct {
 		file report.GeneratedFile
 		err  error
 	}
-	results := make([]inspectResult, len(filtered))
-	if err := perf.ParallelFor(ctx, perf.WorkDisk, len(filtered), func(_ context.Context, i int) error {
-		spec := filtered[i]
-		file, err := report.InspectGeneratedFile(spec.path, spec.typ, spec.role, time.Now())
+	results := make([]inspectResult, len(uniqueSpecs))
+	if err := runParallel(ctx, len(uniqueSpecs), clampWorkers(len(uniqueSpecs), defaultDiskWorkers()), func(_ context.Context, i int) error {
+		spec := uniqueSpecs[i]
+		file, err := inspector.Inspect(spec.path, spec.typ, spec.role, time.Now())
 		results[i] = inspectResult{file: file, err: err}
 		return err
 	}); err != nil {
 		return nil, err
 	}
-	for _, result := range results {
+	fileByPath := make(map[string]report.GeneratedFile, len(uniqueSpecs))
+	for i, result := range results {
 		if result.err != nil {
 			return nil, result.err
 		}
-		out = append(out, result.file)
+		fileByPath[normalizeGeneratedFileSpecPath(uniqueSpecs[i].path)] = result.file
+	}
+	for _, spec := range filtered {
+		file := fileByPath[normalizeGeneratedFileSpecPath(spec.path)]
+		file.Type = spec.typ
+		file.Role = spec.role
+		out = append(out, file)
 	}
 	return out, nil
 }

@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package lemna
 
 import (
@@ -11,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +25,6 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/blastplus"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
 
 type localBlastThreadsContextKey struct{}
@@ -424,7 +429,7 @@ func localBlastThreads(ctx context.Context) int {
 			return threads
 		}
 	}
-	threads := perf.CPUWorkers(runtime.NumCPU())
+	threads := defaultLocalBlastThreads()
 	if threads < 1 {
 		return 1
 	}
@@ -643,6 +648,9 @@ func saveBlastResultToCache(cacheDir string, jobID string, result model.BlastRes
 	}
 	if err := w.Flush(); err != nil {
 		return err
+	}
+	if indexPath, err := localBlastResultIndexPath(jobID); err == nil {
+		_ = writeAtomically(indexPath, []byte(outPath))
 	}
 	return nil
 }

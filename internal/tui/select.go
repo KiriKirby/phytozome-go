@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package tui
 
 import (
@@ -6,8 +13,11 @@ import (
 	"io"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -41,6 +51,8 @@ type StartupInfo struct {
 	Version     string
 	Author      string
 	RepoURL     string
+	LicenseName string
+	LicenseID   string
 }
 
 type StartupChoice struct {
@@ -67,6 +79,10 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 		"tools": {
 			{Value: "tool:pathway_search", Label: "Pathway search", Description: "pathway search entry point; implementation comes next"},
 		},
+	}
+
+	if err := runStartupCacheResetModal(info, features, subOptions); err != nil {
+		return StartupChoice{}, err
 	}
 
 	app := newApp()
@@ -197,6 +213,117 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 	return result, nil
 }
 
+func runStartupCacheResetModal(info StartupInfo, features []Option, subOptions map[string][]Option) error {
+	app := newApp()
+	featureList := optionListWithStart("Function selection:", features, 1)
+	subOptionList := optionListWithStart("Sub-option selection:", subOptions[features[0].Value], 4)
+	background := startupRoot(app, info, featureList, subOptionList, func() {})
+
+	status := "Clearing runtime cache..."
+	statusView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true).
+		SetTextColor(tview.Styles.PrimaryTextColor)
+	statusView.SetText(status)
+
+	modalBody := tview.NewFlex().SetDirection(tview.FlexRow)
+	modalBody.SetBorder(true)
+	modalBody.SetTitle(" Preparing startup ")
+	modalBody.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(modalBody.Box, true)
+	attachFocusBorder(modalBody.Box)
+	modalBody.AddItem(textBlock("The cache is being cleared for this run. Please wait until startup preparation finishes."), 2, 0, false)
+	modalBody.AddItem(statusView, 0, 1, true)
+
+	app.SetRoot(overlayRootOn(background, modalBody, 90, 14), true)
+	app.SetFocus(modalBody)
+
+	taskReady := make(chan struct{})
+	var taskReadyOnce sync.Once
+	afterDraw := app.GetAfterDrawFunc()
+	app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if afterDraw != nil {
+			afterDraw(screen)
+		}
+		taskReadyOnce.Do(func() {
+			close(taskReady)
+		})
+	})
+
+	var statusMu sync.Mutex
+	lastDraw := time.Time{}
+	setStatus := func(text string) {
+		now := time.Now()
+		statusMu.Lock()
+		status = strings.TrimSpace(text)
+		if now.Sub(lastDraw) < uiThrottleDelay() {
+			statusMu.Unlock()
+			return
+		}
+		lastDraw = now
+		statusMu.Unlock()
+		app.QueueUpdateDraw(func() {
+			statusView.SetText(status)
+		})
+	}
+
+	done := make(chan struct{})
+	var stopAnimation sync.Once
+	stop := func() {
+		stopAnimation.Do(func() {
+			close(done)
+		})
+	}
+	startedAt := time.Now()
+	const minVisible = 900 * time.Millisecond
+	go func() {
+		select {
+		case <-taskReady:
+		}
+		frames := []string{"|", "/", "-", "\\"}
+		ticker := time.NewTicker(uiAnimationDelay())
+		defer ticker.Stop()
+		frame := 0
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				statusMu.Lock()
+				text := status
+				statusMu.Unlock()
+				app.QueueUpdateDraw(func() {
+					statusView.SetText(fmt.Sprintf("[yellow]%s[white] %s", frames[frame%len(frames)], text))
+				})
+				frame++
+			}
+		}
+	}()
+
+	var taskErr error
+	go func() {
+		select {
+		case <-taskReady:
+		}
+		setStatus("Clearing runtime cache...")
+		taskErr = appfs.ResetRunCacheOnce()
+		if remaining := minVisible - time.Since(startedAt); remaining > 0 {
+			time.Sleep(remaining)
+		}
+		stop()
+		app.QueueUpdateDraw(func() {
+			app.Stop()
+		})
+	}()
+
+	if err := runApp(app); err != nil {
+		stop()
+		return err
+	}
+	stop()
+	return taskErr
+}
+
 func newApp() *tview.Application {
 	configStyles()
 	app := tview.NewApplication().EnableMouse(true).EnablePaste(true)
@@ -285,10 +412,12 @@ func startupRoot(app *tview.Application, info StartupInfo, featureList *tview.Li
 		SetDynamicColors(true).
 		SetTextColor(tview.Styles.PrimaryTextColor).
 		SetText(fmt.Sprintf(
-			"[white]%s helps you run keyword searches, BLAST workflows, and pathway-oriented tools across plant protein resources.\n\n[yellow]Author[white] %s\n[yellow]Repository[white] %s\n[yellow]License[white] MIT",
+			"[white]%s helps you run keyword searches, BLAST workflows, and pathway-oriented tools across plant protein resources.\n\n[yellow]Author[white] %s\n[yellow]Repository[white] %s\n[yellow]License[white] %s%s",
 			productName(info),
 			fallbackText(info.Author, "unknown"),
 			fallbackText(info.RepoURL, "unknown"),
+			fallbackText(info.LicenseName, "unknown"),
+			formatLicenseID(info.LicenseID),
 		))
 
 	module := newButtonFlex()
@@ -321,6 +450,14 @@ func pageFrame(breadcrumb string, body tview.Primitive) tview.Primitive {
 	frame.SetBorders(0, 0, 0, 0, 0, 0)
 	frame.AddText(elideBreadcrumb(breadcrumb, 96), true, tview.AlignLeft, tview.Styles.SecondaryTextColor)
 	return frame
+}
+
+func formatLicenseID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	return " (" + id + ")"
 }
 
 type buttonSpec struct {

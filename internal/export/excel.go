@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package export
 
 import (
@@ -301,36 +308,12 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 	dataStartRow := 2
 
 	headerIDs, headers := blastHeaderPlanForRows(rows)
-	headerStyles := map[string]int{}
-	for col, header := range headers {
-		cell, err := excelize.CoordinatesToCellName(col+1, headerRow)
-		if err != nil {
-			return fmt.Errorf("build header cell: %w", err)
-		}
-		if err := file.SetCellValue(sheet, cell, header); err != nil {
-			return fmt.Errorf("write header %q: %w", header, err)
-		}
-		applyBlastHeaderStyle(file, sheet, cell, header, headerStyles)
-	}
-
 	styleCache := map[string]int{}
-	for idx, row := range rows {
-		rowNumber := idx + 1
-		if options != nil && idx < len(options.RowNumbers) && options.RowNumbers[idx] > 0 {
-			rowNumber = options.RowNumbers[idx]
-		}
-		values := blastRowValuesForHeaderIDs(row, rowNumber-1, headerIDs)
-		cell, err := excelize.CoordinatesToCellName(1, idx+dataStartRow)
-		if err != nil {
-			return fmt.Errorf("build data row start cell: %w", err)
-		}
-		if err := file.SetSheetRow(sheet, cell, &values); err != nil {
-			return fmt.Errorf("write data row %d: %w", idx+dataStartRow, err)
-		}
-		applyBlastRowCellStyles(file, sheet, idx+dataStartRow, idx, headerIDs, row, options, styleCache)
+	stream, err := file.NewStreamWriter(sheet)
+	if err != nil {
+		return fmt.Errorf("create blast stream writer: %w", err)
 	}
-
-	if err := file.SetPanes(sheet, &excelize.Panes{
+	if err := stream.SetPanes(&excelize.Panes{
 		Freeze:      true,
 		Split:       false,
 		XSplit:      0,
@@ -339,6 +322,31 @@ func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow
 		ActivePane:  "bottomLeft",
 	}); err != nil {
 		return fmt.Errorf("freeze header row: %w", err)
+	}
+
+	headerCells := make([]interface{}, 0, len(headers))
+	for _, header := range headers {
+		headerCells = append(headerCells, excelize.Cell{
+			StyleID: blastExcelFontStyle(file, styleCache, blastExcelHeaderColor(header), true),
+			Value:   header,
+		})
+	}
+	if err := stream.SetRow("A1", headerCells); err != nil {
+		return fmt.Errorf("write blast header row: %w", err)
+	}
+
+	for idx, row := range rows {
+		rowCells := blastRowCellsForHeaderIDs(file, styleCache, row, idx, headerIDs, options)
+		cell, err := excelize.CoordinatesToCellName(1, idx+dataStartRow)
+		if err != nil {
+			return fmt.Errorf("build data row start cell: %w", err)
+		}
+		if err := stream.SetRow(cell, rowCells); err != nil {
+			return fmt.Errorf("write data row %d: %w", idx+dataStartRow, err)
+		}
+	}
+	if err := stream.Flush(); err != nil {
+		return fmt.Errorf("flush blast excel stream: %w", err)
 	}
 
 	if err := file.SaveAs(path); err != nil {
@@ -355,6 +363,28 @@ func blastRowValuesForHeaderIDs(row model.BlastResultRow, index int, headerIDs [
 		values = append(values, blastExportValue(id, row, rowNumber))
 	}
 	return values
+}
+
+func blastRowCellsForHeaderIDs(file *excelize.File, styleCache map[string]int, row model.BlastResultRow, dataIndex int, headerIDs []string, options *BlastExcelExportOptions) []interface{} {
+	rowNumber := dataIndex + 1
+	if options != nil && dataIndex < len(options.RowNumbers) && options.RowNumbers[dataIndex] > 0 {
+		rowNumber = options.RowNumbers[dataIndex]
+	}
+	originalRowIndex := originalRowIndexForExcel(options, dataIndex)
+	cells := make([]interface{}, 0, len(headerIDs))
+	for _, id := range headerIDs {
+		value := blastExportValue(id, row, rowNumber)
+		color := blastExcelCellColorByID(id, row, originalRowIndex, options)
+		if color == "" || color == excelColorDefault {
+			cells = append(cells, value)
+			continue
+		}
+		cells = append(cells, excelize.Cell{
+			StyleID: blastExcelFontStyle(file, styleCache, color, false),
+			Value:   value,
+		})
+	}
+	return cells
 }
 
 func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata) error {
@@ -399,33 +429,6 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 		}
 	}
 	return nil
-}
-
-func applyBlastRowCellStyles(file *excelize.File, sheet string, rowNum int, dataIndex int, headerIDs []string, row model.BlastResultRow, options *BlastExcelExportOptions, styleCache map[string]int) {
-	if file == nil {
-		return
-	}
-	originalRowIndex := originalRowIndexForExcel(options, dataIndex)
-	for col, id := range headerIDs {
-		color := blastExcelCellColorByID(id, row, originalRowIndex, options)
-		if color == "" || color == excelColorDefault {
-			continue
-		}
-		styleID := blastExcelFontStyle(file, styleCache, color, false)
-		cell, err := excelize.CoordinatesToCellName(col+1, rowNum)
-		if err != nil {
-			continue
-		}
-		_ = file.SetCellStyle(sheet, cell, cell, styleID)
-	}
-}
-
-func applyBlastHeaderStyle(file *excelize.File, sheet string, cell string, header string, styleCache map[string]int) {
-	if file == nil {
-		return
-	}
-	style := blastExcelFontStyle(file, styleCache, blastExcelHeaderColor(header), true)
-	_ = file.SetCellStyle(sheet, cell, cell, style)
 }
 
 func blastExcelCellColor(header string, row model.BlastResultRow, originalRowIndex int, options *BlastExcelExportOptions) string {
@@ -632,31 +635,11 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 		headers = append(headers, prompt.ColumnExportHeader(id, prompt.ColumnDisplayOptions{}))
 	}
 
-	for col, header := range headers {
-		cell, err := excelize.CoordinatesToCellName(col+1, 1)
-		if err != nil {
-			return fmt.Errorf("build keyword header cell: %w", err)
-		}
-		if err := file.SetCellValue(sheet, cell, header); err != nil {
-			return fmt.Errorf("write keyword header %q: %w", header, err)
-		}
+	stream, err := file.NewStreamWriter(sheet)
+	if err != nil {
+		return fmt.Errorf("create keyword stream writer: %w", err)
 	}
-
-	for idx, row := range rows {
-		values := make([]any, 0, len(headerIDs))
-		for _, id := range headerIDs {
-			values = append(values, keywordExportValue(id, row, idx+1))
-		}
-		cell, err := excelize.CoordinatesToCellName(1, idx+2)
-		if err != nil {
-			return fmt.Errorf("build keyword data row start cell: %w", err)
-		}
-		if err := file.SetSheetRow(sheet, cell, &values); err != nil {
-			return fmt.Errorf("write keyword row %d: %w", idx+2, err)
-		}
-	}
-
-	if err := file.SetPanes(sheet, &excelize.Panes{
+	if err := stream.SetPanes(&excelize.Panes{
 		Freeze:      true,
 		Split:       false,
 		XSplit:      0,
@@ -665,6 +648,30 @@ func WriteKeywordResultsExcel(path string, rows []model.KeywordResultRow) error 
 		ActivePane:  "bottomLeft",
 	}); err != nil {
 		return fmt.Errorf("freeze keyword header row: %w", err)
+	}
+	headerCells := make([]interface{}, 0, len(headers))
+	for _, header := range headers {
+		headerCells = append(headerCells, header)
+	}
+	if err := stream.SetRow("A1", headerCells); err != nil {
+		return fmt.Errorf("write keyword header row: %w", err)
+	}
+
+	for idx, row := range rows {
+		values := make([]interface{}, 0, len(headerIDs))
+		for _, id := range headerIDs {
+			values = append(values, keywordExportValue(id, row, idx+1))
+		}
+		cell, err := excelize.CoordinatesToCellName(1, idx+2)
+		if err != nil {
+			return fmt.Errorf("build keyword data row start cell: %w", err)
+		}
+		if err := stream.SetRow(cell, values); err != nil {
+			return fmt.Errorf("write keyword row %d: %w", idx+2, err)
+		}
+	}
+	if err := stream.Flush(); err != nil {
+		return fmt.Errorf("flush keyword excel stream: %w", err)
 	}
 
 	if err := file.SaveAs(path); err != nil {

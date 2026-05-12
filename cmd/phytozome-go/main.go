@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package main
 
 import (
@@ -100,11 +107,12 @@ func printHeader() {
 	fmt.Printf("%s %s\n", displayName, version)
 	fmt.Printf("Author: %s\n", author)
 	fmt.Printf("Repo:   %s\n", repoURL)
+	fmt.Printf("License: %s (%s)\n", licenseName, licenseID)
 }
 
 func printVersion() {
 	// A compact version output for machine-friendly calls
-	fmt.Printf("%s %s\nAuthor: %s\nRepo: %s\n", displayName, version, author, repoURL)
+	fmt.Printf("%s %s\nAuthor: %s\nRepo: %s\nLicense: %s (%s)\n", displayName, version, author, repoURL, licenseName, licenseID)
 }
 
 func workflowTUIInfo() workflow.TUIInfo {
@@ -113,5 +121,7 @@ func workflowTUIInfo() workflow.TUIInfo {
 		Version:     version,
 		Author:      author,
 		RepoURL:     repoURL,
+		LicenseName: licenseName,
+		LicenseID:   licenseID,
 	}
 }

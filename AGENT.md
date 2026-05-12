@@ -119,7 +119,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - Enter confirms
   - Esc performs Back on full-screen pages when a safe back target exists
   - Esc closes the topmost modal/overlay when a modal/overlay is open; modal input must be captured by the topmost modal/overlay before any underlying full-screen page receives keys
-  - Ctrl+B is not a navigation shortcut
+  - Ctrl+B is not a navigation shortcut; reserve it for the explicit `Run BLAST` result-table action only
   - Back has one absolute meaning: return to the full-screen page the user saw immediately before the current full-screen page
   - Close has one absolute meaning: dismiss the topmost modal/overlay and return to the underlying full-screen page
   - Back must never mean "exit the program", "close only the current modal", or "return to an arbitrary earlier workflow state"
@@ -176,7 +176,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - standard button dictionary:
     - navigation: `Back (Esc)`, `Home (Ctrl+O)`
     - modal dismissal: `Close (Esc)`, `OK (Enter)`
-    - selection/progression: `Start (Enter)`, `Select (Enter)`, `Search (Enter)`, `Run BLAST (Enter)`, `Apply (Enter)`, `Auto identify (Enter)` when it is the primary empty-input action, `Save (Enter)`, `View (Enter)`
+    - selection/progression: `Start (Enter)`, `Select (Enter)`, `Search (Enter)`, `Run BLAST (Ctrl+B)` when launched from a result table and `Run BLAST (Enter)` when it is the primary action of a dedicated BLAST start page, `Apply (Enter)`, `Auto identify (Enter)` when it is the primary empty-input action, `Save (Enter)`, `View (Enter)`
     - export/results: `Export (Ctrl+G)`, `Export all (Ctrl+D)`
     - table selection shortcuts only, not visible buttons: `Ctrl+A` select all, `Ctrl+N` clear all, `Space` toggle current row
     - editing/recovery: `Paste (Ctrl+V)`, `Retry (Ctrl+R)`, `Skip (Ctrl+R)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
@@ -211,6 +211,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - apply the same focus styling rule consistently across lists, tables, text inputs, and multi-line inputs
 - Prefer modal dialogs for small decisions:
   - use centered modal overlays for every loading state, progress state, error reminder, warning, confirmation, validation message, and small status notice
+  - hard rule for every workflow: before opening any modal, prompt, info page, recovery page, confirmation, or any other user-facing overlay, the currently running loading/progress/task page must already be stopped or unwound. Never open a prompt or modal from inside an active task/progress callback. If a running operation needs user input, return a structured recoverable result to the outer workflow, stop the task page first, and only then show the prompt.
   - keep large working contexts such as search, table selection, and multi-line editing as full-screen pages
   - modal overlays should sit on top of the current tview shell/pages instead of dumping traditional text or switching to a plain terminal prompt
   - modal overlays must reuse the most recent real full-screen page as their background; never use an empty placeholder page behind a modal unless no previous page exists, including loading/progress/status task modals

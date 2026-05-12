@@ -1,8 +1,16 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package lemna
 
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -201,5 +209,271 @@ func TestFetchUniProtAccessionsReplaySamples(t *testing.T) {
 	for _, id := range ids {
 		accs, err := client.FetchUniProtAccessions(ctx, 18, id)
 		t.Logf("%s acc=%v err=%v", id, accs, err)
+	}
+}
+
+func TestLemnaKeywordReplayLiveBySearchType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-backed lemna keyword replay in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run live lemna keyword replay")
+	}
+
+	client := NewClient(http.DefaultClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	species := model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		IsOfficial:  true,
+	}
+
+	tests := []struct {
+		name            string
+		term            string
+		wantSearchType  string
+		wantLabelPrefix string
+		minRows         int
+	}{
+		{
+			name:           "report-url-gene",
+			term:           "https://www.lemna.org/report/Sp_polyrhiza_9509/Sp9509d020g000340",
+			wantSearchType: "report URL: gene",
+			minRows:        1,
+		},
+		{
+			name:           "transcript-id",
+			term:           "Sp9509d020g000340_T001",
+			wantSearchType: "lemna transcript identifier",
+			minRows:        1,
+		},
+		{
+			name:           "gene-id",
+			term:           "Sp9509d020g000340",
+			wantSearchType: "lemna gene identifier",
+			minRows:        1,
+		},
+		{
+			name:           "transcript-id-case-insensitive",
+			term:           "sp9509d020g000340_t001",
+			wantSearchType: "lemna transcript identifier",
+			minRows:        1,
+		},
+		{
+			name:            "rice-locus-curated-fallback",
+			term:            "LOC_Os05g25640",
+			wantSearchType:  "rice LOC_Os locus",
+			wantLabelPrefix: "C4H",
+			minRows:         1,
+		},
+		{
+			name:            "refseq-curated-fallback",
+			term:            "XP_015639656",
+			wantSearchType:  "RefSeq XP protein",
+			wantLabelPrefix: "C4H",
+			minRows:         1,
+		},
+		{
+			name:            "rice-alias-curated-fallback",
+			term:            "OsC4H1",
+			wantSearchType:  "gene alias / symbol",
+			wantLabelPrefix: "C4H",
+			minRows:         1,
+		},
+		{
+			name:            "cytochrome-family-curated-fallback",
+			term:            "CYP73A38",
+			wantSearchType:  "CYP73 family symbol",
+			wantLabelPrefix: "C4H",
+			minRows:         1,
+		},
+		{
+			name:           "keyword",
+			term:           "phenylalanine ammonia lyase",
+			wantSearchType: "keyword",
+			minRows:        1,
+		},
+		{
+			name:           "keyword-case-insensitive",
+			term:           "PHENYLALANINE AMMONIA LYASE",
+			wantSearchType: "keyword",
+			minRows:        1,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := client.SearchKeywordRows(ctx, species, tt.term)
+			if err != nil {
+				t.Fatalf("SearchKeywordRows(%q): %v", tt.term, err)
+			}
+			if len(rows) < tt.minRows {
+				t.Fatalf("SearchKeywordRows(%q) rows=%d, want >= %d", tt.term, len(rows), tt.minRows)
+			}
+			if rows[0].SearchType != tt.wantSearchType {
+				t.Fatalf("SearchKeywordRows(%q) searchType=%q, want %q", tt.term, rows[0].SearchType, tt.wantSearchType)
+			}
+			if tt.wantLabelPrefix != "" && !strings.EqualFold(strings.TrimSpace(rows[0].LabelName), tt.wantLabelPrefix) {
+				t.Fatalf("SearchKeywordRows(%q) label=%q, want %q", tt.term, rows[0].LabelName, tt.wantLabelPrefix)
+			}
+		})
+	}
+}
+
+func TestLemnaKeywordWideReplayLive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-backed lemna wide replay in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run live lemna wide replay")
+	}
+
+	client := NewClient(http.DefaultClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	species := model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		IsOfficial:  true,
+	}
+
+	rows, err := client.SearchKeywordRowsWide(ctx, species, "4cl web style")
+	if err != nil {
+		t.Fatalf("SearchKeywordRowsWide: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("SearchKeywordRowsWide returned no rows")
+	}
+	if rows[0].SearchType != "wide search" {
+		t.Fatalf("wide search type = %q, want wide search", rows[0].SearchType)
+	}
+
+	mixed, err := client.SearchKeywordRows(ctx, species, "4cl web style")
+	if err != nil {
+		t.Fatalf("SearchKeywordRows mixed wide case: %v", err)
+	}
+	if len(mixed) == 0 {
+		t.Fatal("SearchKeywordRows returned no wide-fallback rows")
+	}
+	if !strings.Contains(strings.ToLower(mixed[0].SearchType), "wide search") {
+		t.Fatalf("mixed wide replay should record wide search in search type, got %q", mixed[0].SearchType)
+	}
+}
+
+func TestLemnaKeywordReplayLiveRice4CLMatrix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network-backed lemna 4CL replay in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run live lemna 4CL replay")
+	}
+
+	client := NewClient(http.DefaultClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	species := model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		IsOfficial:  true,
+	}
+
+	aliasTests := []struct {
+		name  string
+		term  string
+		label string
+	}{
+		{"alias-1", "Os4CL1", "Os4CL1"},
+		{"alias-1-lower", "os4cl1", "Os4CL1"},
+		{"alias-2", "Os4CL2", "Os4CL2"},
+		{"alias-3", "Os4CL3", "Os4CL3"},
+		{"alias-4", "Os4CL4", "Os4CL4"},
+		{"alias-5", "Os4CL5", "Os4CL5"},
+	}
+	for _, tt := range aliasTests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := client.SearchKeywordRows(ctx, species, tt.term)
+			if err != nil {
+				t.Fatalf("SearchKeywordRows(%q): %v", tt.term, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("SearchKeywordRows(%q) returned no rows", tt.term)
+			}
+			if rows[0].SearchType != "gene alias / symbol" {
+				t.Fatalf("SearchKeywordRows(%q) searchType=%q, want %q", tt.term, rows[0].SearchType, "gene alias / symbol")
+			}
+			if rows[0].LabelName != tt.label {
+				t.Fatalf("SearchKeywordRows(%q) label=%q, want %q", tt.term, rows[0].LabelName, tt.label)
+			}
+			if !strings.Contains(strings.ToLower(rows[0].Description), "4-coumarate") {
+				t.Fatalf("SearchKeywordRows(%q) description=%q, want 4-coumarate hit", tt.term, rows[0].Description)
+			}
+		})
+	}
+
+	zeroTests := []string{
+		"Os08g14760.1",
+		"os08g14760.1",
+		"Os02g46970.1",
+		"Os02g08100.1",
+		"Os06g44620.1",
+		"Os08g34790.1",
+	}
+	for _, term := range zeroTests {
+		term := term
+		t.Run("controlled-zero-"+strings.ReplaceAll(strings.ToLower(term), ".", "_"), func(t *testing.T) {
+			rows, err := client.SearchKeywordRows(ctx, species, term)
+			if err != nil {
+				t.Fatalf("SearchKeywordRows(%q): %v", term, err)
+			}
+			if len(rows) != 0 {
+				t.Fatalf("SearchKeywordRows(%q) rows=%d, want 0 to avoid false-positive remaps; first=%#v", term, len(rows), rows[0])
+			}
+		})
+	}
+
+	xpCases := []struct {
+		name  string
+		term  string
+		label string
+	}{
+		{"xp-1", "XP_015650724.1", "Os4CL1"},
+		{"xp-1-lower", "xp_015650724.1", "Os4CL1"},
+		{"xp-2", "XP_015624111.1", "Os4CL2"},
+		{"xp-3", "XP_015625716.1", "Os4CL3"},
+		{"xp-4", "XP_015643415.1", "Os4CL4"},
+		{"xp-5", "XP_015650830.1", "Os4CL5"},
+	}
+	for _, tt := range xpCases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := client.SearchKeywordRows(ctx, species, tt.term)
+			if err != nil {
+				t.Fatalf("SearchKeywordRows(%q): %v", tt.term, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("SearchKeywordRows(%q) returned no rows", tt.term)
+			}
+			if rows[0].SearchType != "RefSeq XP protein" {
+				t.Fatalf("SearchKeywordRows(%q) searchType=%q, want %q", tt.term, rows[0].SearchType, "RefSeq XP protein")
+			}
+			if rows[0].LabelName != tt.label {
+				t.Fatalf("SearchKeywordRows(%q) label=%q, want %q", tt.term, rows[0].LabelName, tt.label)
+			}
+			if !strings.Contains(strings.ToLower(rows[0].Description), "4-coumarate") {
+				t.Fatalf("SearchKeywordRows(%q) description=%q, want 4-coumarate hit", tt.term, rows[0].Description)
+			}
+		})
 	}
 }

@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package phytozome
 
 import (
@@ -29,6 +36,8 @@ var (
 	ecNumberLikeLabelPattern      = regexp.MustCompile(`^(?:EC[:\-]?)?[A-Za-z]?\d+(?:\.\d+){2,3}$`)
 	arabidopsisGeneIDLabelPattern = regexp.MustCompile(`(?i)^AT[1-5MC]G\d{5}(?:\.\d+)?$`)
 	lemnaGeneIDLabelPattern       = regexp.MustCompile(`(?i)^SP\d{4}D\d{3}G\d{6}(?:_T\d+)?$`)
+	keywordPlusQualifierPattern   = regexp.MustCompile(`\s+\+\s+`)
+	keywordWhitespacePattern      = regexp.MustCompile(`\s+`)
 )
 
 type submitResponse struct {
@@ -805,6 +814,198 @@ func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keywo
 	return results, nil
 }
 
+func (c *Client) SearchGenesByKeywordBroad(ctx context.Context, proteomeID int, keyword string, limit int) ([]geneRecord, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10000
+	}
+
+	bodies := phytozomeKeywordSearchBodies(keyword, proteomeID, limit)
+	firstBody := bodies.narrow
+	if bodies.plusQualified {
+		firstBody = bodies.plusDummy
+	}
+	searchOrder := []struct {
+		name string
+		body map[string]any
+	}{
+		{name: "narrow", body: firstBody},
+		{name: "phrase", body: bodies.phrase},
+		{name: "broad", body: bodies.broad},
+	}
+
+	var last []geneRecord
+	for i, search := range searchOrder {
+		matches, err := c.searchGenesWithBody(ctx, search.body)
+		if err != nil {
+			return nil, err
+		}
+		last = matches
+		if i == 0 && len(matches) > 0 {
+			return matches, nil
+		}
+		if search.name == "phrase" && bodies.multiWord && len(matches) > 0 {
+			return matches, nil
+		}
+	}
+	return last, nil
+}
+
+type keywordSearchBodies struct {
+	narrow        map[string]any
+	plusDummy     map[string]any
+	phrase        map[string]any
+	broad         map[string]any
+	plusQualified bool
+	multiWord     bool
+}
+
+func phytozomeKeywordSearchBodies(keyword string, proteomeID int, limit int) keywordSearchBodies {
+	terms := phytozomeKeywordTerms(keyword)
+	plusQualified := phytozomeKeywordHasPlusQualifier(keyword)
+	proteomeFilters := []any{map[string]any{"term": map[string]any{"organism.proteome": proteomeID}}}
+	wildcardTerms := make([]any, 0, len(terms))
+	for _, term := range terms {
+		if plusQualified {
+			wildcardTerms = append(wildcardTerms, map[string]any{"match": map[string]any{"custom_all": term}})
+			continue
+		}
+		wildcardTerms = append(wildcardTerms, []any{
+			map[string]any{"wildcard": map[string]any{"custom_all": term + "*"}},
+			map[string]any{"wildcard": map[string]any{"primaryidentifier": term + "*"}},
+		})
+	}
+
+	return keywordSearchBodies{
+		plusDummy: map[string]any{
+			"size":  max(1, limit/2),
+			"query": map[string]any{"bool": map[string]any{"must": map[string]any{"match": map[string]any{"organism.proteome": -1}}}},
+		},
+		narrow: map[string]any{
+			"size": limit,
+			"query": map[string]any{
+				"bool": map[string]any{
+					"must": []any{
+						map[string]any{
+							"query_string": map[string]any{
+								"query":            keyword,
+								"default_operator": "AND",
+								"fields": []string{
+									"primaryidentifier^5",
+									"transcripts.primaryidentifier^5",
+									"transcripts.protein^4",
+									"symbols^4",
+									"synonyms^3",
+									"deflines^2",
+									"auto_defline^2",
+									"comments",
+								},
+							},
+						},
+					},
+					"filter": proteomeFilters,
+				},
+			},
+		},
+		phrase: map[string]any{
+			"size": limit,
+			"query": map[string]any{
+				"bool": map[string]any{
+					"must": []any{
+						map[string]any{"match_phrase": map[string]any{"custom_all": strings.ToLower(strings.TrimSpace(keyword))}},
+					},
+					"filter": proteomeFilters,
+				},
+			},
+		},
+		broad: map[string]any{
+			"size": limit,
+			"query": map[string]any{
+				"bool": map[string]any{
+					"must": []any{
+						map[string]any{"bool": keywordBroadMustClause(plusQualified, wildcardTerms)},
+					},
+					"filter": proteomeFilters,
+				},
+			},
+		},
+		plusQualified: plusQualified,
+		multiWord:     len(terms) > 1,
+	}
+}
+
+func keywordBroadMustClause(plusQualified bool, wildcardTerms []any) map[string]any {
+	if plusQualified {
+		return map[string]any{"must": wildcardTerms}
+	}
+	flattened := make([]any, 0, len(wildcardTerms)*2)
+	for _, term := range wildcardTerms {
+		if group, ok := term.([]any); ok {
+			flattened = append(flattened, group...)
+			continue
+		}
+		flattened = append(flattened, term)
+	}
+	return map[string]any{"should": flattened, "minimum_should_match": 1}
+}
+
+func phytozomeKeywordHasPlusQualifier(keyword string) bool {
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	return strings.HasPrefix(keyword, "+") || keywordPlusQualifierPattern.MatchString(keyword)
+}
+
+func phytozomeKeywordTerms(keyword string) []string {
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	keyword = strings.TrimLeft(keyword, "+")
+	keyword = keywordPlusQualifierPattern.ReplaceAllString(keyword, " ")
+	keyword = keywordWhitespacePattern.ReplaceAllString(keyword, " ")
+	if keyword == "" {
+		return nil
+	}
+	return strings.Split(keyword, " ")
+}
+
+func (c *Client) searchGenesWithBody(ctx context.Context, body map[string]any) ([]geneRecord, error) {
+	payloadBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encode keyword search body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://phytozome-next.jgi.doe.gov/api/essearch/gene/_search/", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create keyword search request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.baseHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("search genes by keyword: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
+
+	var payload esSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode keyword search response: %w", err)
+	}
+
+	results := make([]geneRecord, 0, len(payload.Hits.Hits))
+	for _, hit := range payload.Hits.Hits {
+		if strings.TrimSpace(hit.Source.PrimaryIdentifier) == "" {
+			continue
+		}
+		results = append(results, hit.Source)
+	}
+	return results, nil
+}
+
 func (c *Client) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
 	if c.keywordEngine == nil {
 		c.keywordEngine = phytozomekeyword.New(c)
@@ -817,6 +1018,10 @@ func (c *Client) SearchKeywordRowsWide(ctx context.Context, species model.Specie
 		c.keywordEngine = phytozomekeyword.New(c)
 	}
 	return c.keywordEngine.SearchKeywordRowsWide(ctx, species, keyword)
+}
+
+func (c *Client) SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	return c.SearchKeywordRowsWide(ctx, species, keyword)
 }
 
 func looksLikeSpecificGeneIdentifier(value string) bool {

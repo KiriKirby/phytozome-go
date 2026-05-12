@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package tui
 
 import (
@@ -19,8 +26,6 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-
-	"github.com/KiriKirby/phytozome-go/internal/perf"
 )
 
 var ErrTaskCancelled = errors.New("task cancelled")
@@ -189,27 +194,30 @@ type TableSort struct {
 }
 
 type RowSelectionPage struct {
-	Breadcrumb   string
-	Path         []string
-	Title        string
-	Description  string
-	Columns      []TableColumn
-	Rows         []TableRow
-	Selected     []bool
-	FilterFlags  []bool
-	Sort         TableSort
-	GroupSort    bool
-	GroupLabels  []string
-	AllowFilter  bool
-	FilterText   string
-	AllowDoneAll bool
-	AllowBack    bool
-	AllowHome    bool
-	ConfirmText  string
-	GenerateText string
-	DoneAllText  string
-	Hints        []string
-	State        RowSelectionState
+	Breadcrumb    string
+	Path          []string
+	Title         string
+	Description   string
+	Columns       []TableColumn
+	Rows          []TableRow
+	Selected      []bool
+	FilterFlags   []bool
+	Sort          TableSort
+	GroupSort     bool
+	GroupLabels   []string
+	AllowFilter   bool
+	FilterText    string
+	AllowDoneAll  bool
+	AllowBack     bool
+	AllowHome     bool
+	ConfirmText   string
+	GenerateText  string
+	ExtraText     string
+	ExtraShortcut string
+	ExtraAction   string
+	DoneAllText   string
+	Hints         []string
+	State         RowSelectionState
 }
 
 type RowSelectionState struct {
@@ -735,6 +743,7 @@ type RowSelectionResult struct {
 	FilterFlags     []bool
 	FilterRequested bool
 	GenerateFile    bool
+	Action          string
 	DoneAll         bool
 	Nav             NavAction
 	State           RowSelectionState
@@ -747,6 +756,7 @@ type TaskPage struct {
 	Description string
 	Initial     string
 	Total       int
+	AllowCancel bool
 	CancelError error
 }
 
@@ -793,6 +803,7 @@ type RecoveryModalPage struct {
 	Title      string
 	Message    string
 	AllowSkip  bool
+	AllowBack  bool
 }
 
 type ChoiceModalPage struct {
@@ -1760,7 +1771,7 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		filterReady = false
 		refresh()
 		go func(querySnapshot string, seq uint64) {
-			time.Sleep(perf.SearchDebounce())
+			time.Sleep(searchDebounceDelay())
 			if filterSeq.Load() != seq {
 				return
 			}
@@ -2532,13 +2543,28 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.Selected = append([]bool{}, selected...)
 		result.FilterFlags = append([]bool{}, filterFlags...)
 		result.GenerateFile = true
+		result.Action = ""
 		result.DoneAll = doneAll
+		result.State = captureState()
+		app.Stop()
+	}
+	runExtraAction := func() {
+		action := strings.TrimSpace(page.ExtraAction)
+		if action == "" {
+			return
+		}
+		result.Selected = append([]bool{}, selected...)
+		result.FilterFlags = append([]bool{}, filterFlags...)
+		result.GenerateFile = false
+		result.Action = action
+		result.DoneAll = false
 		result.State = captureState()
 		app.Stop()
 	}
 	requestFilter := func() {
 		result.Selected = append([]bool{}, selected...)
 		result.FilterFlags = append([]bool{}, filterFlags...)
+		result.Action = ""
 		result.FilterRequested = true
 		result.State = captureState()
 		app.Stop()
@@ -2576,6 +2602,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
 		{Label: conciseActionLabel(page.DoneAllText, ButtonExportAll), Shortcut: ShortcutExportAll, Action: func() { generate(true) }, Visible: page.AllowDoneAll, Primary: true},
+		{Label: conciseActionLabel(page.ExtraText, ButtonRunBLAST), Shortcut: firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), Action: runExtraAction, Visible: strings.TrimSpace(page.ExtraAction) != "", Primary: true},
 		{Label: conciseActionLabel(page.GenerateText, ButtonExport), Shortcut: ShortcutExport, Action: func() { generate(false) }, Visible: true, Primary: true},
 		{Label: conciseActionLabel(page.ConfirmText, ButtonView), Shortcut: ShortcutConfirm, Action: viewCurrent, Visible: true, Primary: true},
 	}
@@ -2662,6 +2689,11 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		case tcell.KeyCtrlD:
 			if page.AllowDoneAll {
 				generate(true)
+				return nil
+			}
+		case tcell.KeyCtrlB:
+			if strings.TrimSpace(page.ExtraAction) != "" {
+				runExtraAction()
 				return nil
 			}
 		case tcell.KeyCtrlG:
@@ -3674,12 +3706,17 @@ func RunRecoveryModalPage(page RecoveryModalPage) (ActionModalResult, error) {
 	actions := []Action{
 		{Value: "retry", Label: ButtonRetry, Shortcut: ShortcutRetry},
 	}
+	if page.AllowBack {
+		actions = append([]Action{{Value: "back", Label: ButtonBack, Shortcut: ShortcutBack}}, actions...)
+	}
 	confirmText := ButtonClose
 	confirmValue := "close"
 	if page.AllowSkip {
-		actions = append([]Action{{Value: "close", Label: ButtonClose, Shortcut: ShortcutBack}}, actions...)
+		actions = append([]Action{{Value: "close", Label: ButtonClose, Shortcut: "Esc"}}, actions...)
 		confirmText = ButtonSkip
 		confirmValue = "skip"
+	} else {
+		actions = append([]Action{{Value: "close", Label: ButtonClose, Shortcut: "Esc"}}, actions...)
 	}
 	return RunActionModalPage(ActionModalPage{
 		Breadcrumb:   page.Breadcrumb,
@@ -4496,12 +4533,12 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			})
 		}
 		helpModal.SetLanguage(app, int(helpLanguageIndex.Load()))
-		app.SetRoot(infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40), true)
+		setPageRoot(app, infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, helpModal.Title()), helpModal.Body(), 118, 40))
 		app.SetFocus(helpModal.TextView())
 	}
 	closeHelp = func() {
 		helpVisible = false
-		app.SetRoot(mainRoot, true)
+		setPageRoot(app, mainRoot)
 		setFocusAt(focusIndex)
 	}
 
@@ -4548,7 +4585,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	contentRows := maxInt(18, settingsRows+2)
 	height := modalHeightForContent(messageHeight+referenceHeight+buttonHeight+hintsHeight+bodyBorderHeight+framePaddingHeight+contentRows, 34, 48)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 144, height)
-	app.SetRoot(mainRoot, true)
+	setPageRoot(app, mainRoot)
 	setFocusAt(focusIndex)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		if helpVisible {
@@ -4940,7 +4977,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			restore: restore,
 			focus:   focus,
 		})
-		app.SetRoot(root, true)
+		setPageRoot(app, root)
 		if focus != nil {
 			app.SetFocus(focus)
 		}
@@ -4951,7 +4988,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		}
 		top := modalStack[len(modalStack)-1]
 		modalStack = modalStack[:len(modalStack)-1]
-		app.SetRoot(currentRoot(), true)
+		setPageRoot(app, currentRoot())
 		if top.restore != nil {
 			top.restore()
 		} else if len(modalStack) > 0 && modalStack[len(modalStack)-1].focus != nil {
@@ -4969,7 +5006,10 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		closeModal := func() {
 			closeTopModal()
 		}
-		addButtonRow(body, modalButtons([]buttonSpec{}, true, ButtonOK, ShortcutApply, func(NavAction) {}, closeModal))
+		addButtonRow(body, buttonRow(
+			buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
+			buttonSpec{Label: ButtonOK, Shortcut: ShortcutApply, Action: closeModal, Visible: true, Primary: true},
+		))
 		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
 				return nil
@@ -5633,7 +5673,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	refreshGroupedList()
 	refreshRightList()
 	refreshStatus()
-	app.SetRoot(mainRoot, true)
+	setPageRoot(app, mainRoot)
 	setPaneFocus(0)
 	modal.root = mainRoot
 	modal.groupedList = groupedList
@@ -6530,72 +6570,43 @@ func normalizeTUIFamilyBlastSettings(settings FamilyBlastSettings) FamilyBlastSe
 }
 
 func familyBlastHelpPages() []localizedHelpPage {
+	text := strings.TrimSpace(`Family BLAST is for grouped query sets such as NAME1, NAME2, NAME3, and NAME4 where several proteins represent one functional family.
+
+The BLAST jobs still run per query, but review and export can be grouped by detected family prefix.
+
+Enable Family BLAST mode turns this grouped workflow on. If it is off, the batch behaves like normal multi-file BLAST and each query remains separate.
+
+Group queries by detected family prefix derives a family name from the query label without changing the original label.
+
+Ignore suffix after member number before grouping is on by default and helps labels such as IRX10-like group with IRX10 and other IRX members.
+
+Strip Arabidopsis At/AT prefix only for family_name is off by default and is only for cases where ATPAL should group as PAL.
+
+Merge grouped result rows by target protein/gene removes duplicate targets inside one family.
+
+Keep best BLAST hit chooses the strongest row for duplicated targets.
+
+minimum queries per group controls how many query members must share a family prefix before Family BLAST is offered. The default is 2.
+
+This mode does not require UniProt or InterPro, but external references still make grouped review and filtering more useful.`)
 	return []localizedHelpPage{
 		{
 			Label:    "English",
 			Shortcut: "1",
 			Title:    "Family BLAST help",
-			Text: strings.TrimSpace(`Family BLAST is for query sets where several proteins represent one functional gene family, such as NAME1, NAME2, NAME3, and NAME4. The BLAST jobs still run per query, but the review/export unit becomes the detected family.
-
-Enable Family BLAST mode keeps the detected grouped workflow active. If it is off, the batch behaves like normal multi-file BLAST and each query remains separate.
-
-Group queries by detected family prefix derives a family name from the query label without changing the original label_name. For example, NAME1/NAME2/NAME3/NAME4 becomes NAME, ATNAME1/ATNAME2 becomes ATNAME, and GROUP.1/GROUP2 becomes GROUP.
-
-Ignore suffix after member number before grouping is on by default. Labels shaped like prefix + number + suffix, such as IRX10-like or IRX10_like, are grouped by the part through the number before normal member-number stripping. This makes IRX9, IRX14, IRX10, and IRX10-like group together as IRX.
-
-Strip Arabidopsis At/AT prefix only for family_name is off by default. Turn it on only when you deliberately want Arabidopsis-style aliases such as ATPAL1/ATPAL2 to group as PAL instead of ATPAL. This never rewrites the original label_name.
-
-Merge grouped result rows by target protein/gene removes duplicate target candidates inside a family. If the same target protein is hit by several grouped queries, it is counted once as one family candidate.
-
-Keep best BLAST hit chooses the strongest row for a duplicated target, preferring lower E-value, then higher identity, query coverage, and bitscore.
-
-minimum queries per group controls how many query members must share a detected family prefix before the modal offers Family BLAST. The default is 2.
-
-This mode does not require UniProt or InterPro to run. External references still make the grouped result much more useful, and the automatic filter remains available only when all required external references are present.`),
+			Text:     text,
 		},
 		{
-			Label:    "中文",
+			Label:    "Chinese",
 			Shortcut: "2",
-			Title:    "Family BLAST 帮助",
-			Text: strings.TrimSpace(`Family BLAST 用于多个蛋白共同代表一个功能基因家族的情况，例如 NAME1、NAME2、NAME3、NAME4。BLAST 仍然按每条 query 分别执行，但查看和导出的单位会变成检测到的 family。
-
-Enable Family BLAST mode 用来开启这个分组流程。关闭后，多文件 BLAST 会回到普通模式，每个 query 仍然是独立结果和独立文件。
-
-Group queries by detected family prefix 会从 query label 推断 family 名，但不会修改原始 label_name。例如 NAME1/NAME2/NAME3/NAME4 会变成 NAME，ATNAME1/ATNAME2 会变成 ATNAME，GROUP.1/GROUP2 会变成 GROUP。
-
-Ignore suffix after member number before grouping 默认开启。像 IRX10-like 或 IRX10_like 这种“前缀 + 数字 + 后缀”的 label，会先只保留到数字为止，再做普通的成员编号去除。因此 IRX9、IRX14、IRX10、IRX10-like 会一起分到 IRX。
-
-Strip Arabidopsis At/AT prefix only for family_name 默认关闭。只有当你明确希望把 ATPAL1/ATPAL2 这类 Arabidopsis-style alias 按 PAL 而不是 ATPAL 分组时才打开。它永远不会改写原始 label_name。
-
-Merge grouped result rows by target protein/gene 会在 family 内按目标蛋白或基因去重。同一个目标蛋白如果同时被多个同组 query 命中，只算一个 family candidate。
-
-Keep best BLAST hit 会在重复 target 中选择证据最强的一行，优先看更低 E-value，然后看 identity、query coverage 和 bitscore。
-
-minimum queries per group 控制至少多少条 query 共享同一个 family 前缀才弹出 Family BLAST。默认是 2。
-
-这个模式本身不要求 UniProt 或 InterPro 才能运行。外部参考器会让合并结果更有判断价值，而自动筛选器仍然只在必要外部参考器都存在时可用。`),
+			Title:    "Family BLAST help",
+			Text:     text,
 		},
 		{
-			Label:    "日本語",
+			Label:    "Japanese",
 			Shortcut: "3",
-			Title:    "Family BLAST ヘルプ",
-			Text: strings.TrimSpace(`Family BLAST は、NAME1、NAME2、NAME3、NAME4 のように複数のタンパク質が一つの機能的遺伝子ファミリーを代表する場合に使います。BLAST 実行は各 query ごとに行いますが、確認と出力の単位は検出された family になります。
-
-Enable Family BLAST mode は、このグループ化ワークフローを有効にします。無効にすると、通常の複数ファイル BLAST と同じく各 query が独立した結果になります。
-
-Group queries by detected family prefix は元の label_name を変更せず、query label から family 名を推定します。たとえば NAME1/NAME2/NAME3/NAME4 は NAME、ATNAME1/ATNAME2 は ATNAME、GROUP.1/GROUP2 は GROUP になります。
-
-Ignore suffix after member number before grouping は既定でオンです。IRX10-like や IRX10_like のような「prefix + number + suffix」形式の label は、通常のメンバー番号除去の前に数字までを使います。そのため IRX9、IRX14、IRX10、IRX10-like は IRX として同じグループになります。
-
-Strip Arabidopsis At/AT prefix only for family_name は既定でオフです。ATPAL1/ATPAL2 のような Arabidopsis-style alias を ATPAL ではなく PAL としてグループ化したい場合だけオンにします。元の label_name は変更しません。
-
-Merge grouped result rows by target protein/gene は family 内で target protein/gene を重複除去します。同じ target protein が複数の同じグループの query にヒットした場合、family candidate として一つだけ数えます。
-
-Keep best BLAST hit は重複 target の中から最も強い行を選びます。低い E-value、高い identity、query coverage、bitscore を優先します。
-
-minimum queries per group は、同じ family prefix を共有する query が何本以上なら Family BLAST を提案するかを決めます。既定値は 2 です。
-
-このモード自体は UniProt や InterPro がなくても実行できます。ただし外部参照がある方が grouped result の判断は強くなり、自動フィルターは必要な外部参照が揃っている場合だけ利用できます。`),
+			Title:    "Family BLAST help",
+			Text:     text,
 		},
 	}
 }
@@ -6871,12 +6882,14 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 			}
 		}
 	}
-	addButtonRow(modalBody, buttonRow(buttonSpec{
-		Label:    ButtonCancel,
-		Shortcut: ShortcutCancel,
-		Action:   cancelTask,
-		Visible:  true,
-	}))
+	if page.AllowCancel {
+		addButtonRow(modalBody, buttonRow(buttonSpec{
+			Label:    ButtonCancel,
+			Shortcut: ShortcutCancel,
+			Action:   cancelTask,
+			Visible:  true,
+		}))
+	}
 	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
 	app.SetFocus(modalBody)
 	taskReady := make(chan struct{})
@@ -6900,7 +6913,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 		now := time.Now()
 		mu.Lock()
 		status = strings.TrimSpace(text)
-		if now.Sub(lastDraw) < perf.UIThrottle() {
+		if now.Sub(lastDraw) < uiThrottleDelay() {
 			mu.Unlock()
 			return
 		}
@@ -6928,7 +6941,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(perf.UIAnimationTick())
+		ticker := time.NewTicker(uiAnimationDelay())
 		defer ticker.Stop()
 		frame := 0
 		for {
@@ -6965,7 +6978,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 	}()
 
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
+		if page.AllowCancel && event.Key() == tcell.KeyEscape {
 			cancelTask()
 			return nil
 		}
@@ -7058,12 +7071,14 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 			}
 		}
 	}
-	addButtonRow(modalBody, buttonRow(buttonSpec{
-		Label:    ButtonCancel,
-		Shortcut: ShortcutCancel,
-		Action:   cancelTask,
-		Visible:  true,
-	}))
+	if page.AllowCancel {
+		addButtonRow(modalBody, buttonRow(buttonSpec{
+			Label:    ButtonCancel,
+			Shortcut: ShortcutCancel,
+			Action:   cancelTask,
+			Visible:  true,
+		}))
+	}
 	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
 	app.SetFocus(modalBody)
 	taskReady := make(chan struct{})
@@ -7090,7 +7105,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 		if strings.TrimSpace(message) != "" {
 			status = strings.TrimSpace(message)
 		}
-		if now.Sub(lastDraw) < perf.UIThrottle() && next < total {
+		if now.Sub(lastDraw) < uiThrottleDelay() && next < total {
 			mu.Unlock()
 			return
 		}
@@ -7118,7 +7133,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(perf.UIAnimationTick())
+		ticker := time.NewTicker(uiAnimationDelay())
 		defer ticker.Stop()
 		frame := 0
 		for {
@@ -7155,7 +7170,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 	}()
 
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyEscape {
+		if page.AllowCancel && event.Key() == tcell.KeyEscape {
 			cancelTask()
 			return nil
 		}

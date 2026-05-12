@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package tui
 
 import (
@@ -10,6 +17,20 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
+
+func resetBackgroundStoreForTest() {
+	backgroundStore.Lock()
+	backgroundStore.current = nil
+	backgroundStore.Unlock()
+}
+
+func backgroundFromRoot(root tview.Primitive) tview.Primitive {
+	carrier, ok := root.(interface{ backgroundPrimitive() tview.Primitive })
+	if !ok {
+		return nil
+	}
+	return carrier.backgroundPrimitive()
+}
 
 func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
 	externalHeight := modalHeightForContent(3+3+2+2+3+7+1+2+1+5+1+4, 36, 46)
@@ -179,6 +200,26 @@ func TestButtonRowPrimaryLabelUpdatesOnlyPrimaryButtons(t *testing.T) {
 	}
 }
 
+func TestRowSelectionPageCanExposeExtraActionButton(t *testing.T) {
+	page := RowSelectionPage{
+		Title:         "Keyword results",
+		Columns:       []TableColumn{{ID: "search_term", Header: "search_term", Sortable: false}},
+		Rows:          []TableRow{{Cells: []string{"PAL"}}},
+		Selected:      []bool{true},
+		ConfirmText:   ButtonView,
+		GenerateText:  ButtonExport,
+		ExtraText:     ButtonRunBLAST,
+		ExtraShortcut: ShortcutBlast,
+		ExtraAction:   "blast",
+	}
+	if strings.TrimSpace(page.ExtraAction) != "blast" {
+		t.Fatalf("extra action not preserved: %#v", page)
+	}
+	if page.ExtraShortcut != ShortcutBlast {
+		t.Fatalf("extra shortcut = %q, want %q", page.ExtraShortcut, ShortcutBlast)
+	}
+}
+
 func TestFamilyBlastCustomizeButtonSitsLeftOfApply(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
@@ -203,6 +244,33 @@ func TestFamilyBlastCustomizeButtonSitsLeftOfApply(t *testing.T) {
 	}
 	if customizeLeft >= applyLeft {
 		t.Fatalf("customize button should sit left of Apply, got customize x=%d apply x=%d", customizeLeft, applyLeft)
+	}
+}
+
+func TestFamilyBlastModalRootsKeepOnlyBaseBackground(t *testing.T) {
+	resetBackgroundStoreForTest()
+	base := pageFrame(pageBreadcrumb("BLAST", []string{"BLAST input"}), tview.NewBox())
+	rememberBackground(base)
+
+	familyRoot := infoModalRoot(modalFramePage("BLAST", []string{"BLAST input", "Family BLAST"}, "Family BLAST"), tview.NewBox(), 120, 30)
+	familyBackground := backgroundFromRoot(familyRoot)
+	if familyBackground != base {
+		t.Fatalf("family modal background = %#v, want base page %#v", familyBackground, base)
+	}
+
+	customizeRoot := infoModalRoot(modalFramePage("BLAST", []string{"BLAST input", "Family BLAST", "Customize groups"}, "Customize groups"), tview.NewBox(), 120, 30)
+	customizeBackground := backgroundFromRoot(customizeRoot)
+	if customizeBackground != base {
+		t.Fatalf("customize modal background = %#v, want base page %#v", customizeBackground, base)
+	}
+	if customizeBackground == familyRoot {
+		t.Fatal("customize modal should not reuse the previous family modal root as its background")
+	}
+
+	stacked := overlayRootOn(customizeRoot, tview.NewBox(), 80, 12)
+	stackedBackground := backgroundFromRoot(stacked)
+	if stackedBackground != base {
+		t.Fatalf("stacked customize overlay background = %#v, want base page %#v", stackedBackground, base)
 	}
 }
 
@@ -382,6 +450,16 @@ func TestChoiceModalOptionsPrependCloseWhenAllowed(t *testing.T) {
 	}
 	if choices[1].Value != "next" {
 		t.Fatalf("original choice shifted incorrectly: %#v", choices[1])
+	}
+}
+
+func TestRecoveryModalPageConfigurationIncludesBackAndSkip(t *testing.T) {
+	page := RecoveryModalPage{
+		AllowSkip: true,
+		AllowBack: true,
+	}
+	if !page.AllowSkip || !page.AllowBack {
+		t.Fatalf("recovery modal flags should remain set: %#v", page)
 	}
 }
 

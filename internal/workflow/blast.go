@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package workflow
 
 import (
@@ -23,7 +30,6 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/interpro"
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
-	"github.com/KiriKirby/phytozome-go/internal/perf"
 	"github.com/KiriKirby/phytozome-go/internal/phytozome"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
@@ -58,6 +64,28 @@ type BlastWizard struct {
 	speciesCandidatesMu    sync.Mutex
 	speciesCandidatesCache map[string][]model.SpeciesCandidate
 
+	keywordLabelLookupMu    sync.Mutex
+	keywordLabelLookupCache map[string]string
+
+	blastLabelLookupMu    sync.Mutex
+	blastLabelLookupCache map[string]blastAutoLabelResult
+
+	uniProtClientMu sync.Mutex
+	uniProtClient   *uniprot.Client
+
+	interProClientMu sync.Mutex
+	interProClient   *interpro.Client
+
+	rowUniProtAccessionsMu    sync.Mutex
+	rowUniProtAccessionsCache map[string][]string
+	rowUniProtAccessionsKnown map[string]bool
+
+	keywordBlastItemMu    sync.RWMutex
+	keywordBlastItemCache map[string]blastQueryItem
+
+	querySourceResolveMu    sync.RWMutex
+	querySourceResolveCache map[string]model.QuerySequenceSource
+
 	proteinSequenceMu    sync.RWMutex
 	proteinSequenceCache map[string]string
 	proteinSequenceMiss  map[string]error
@@ -72,7 +100,7 @@ const (
 	proteinFetchTimeout     = 30 * time.Second
 	maxParallelKeywordJobs  = 64
 	maxParallelQueryJobs    = 64
-	maxParallelFetchJobs    = 128
+	maxParallelFetchJobs    = 64
 	maxParallelUniProtJobs  = 96
 	maxParallelInterProJobs = 96
 )
@@ -80,6 +108,55 @@ const (
 type wideKeywordSearcher interface {
 	SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
 }
+
+type keywordSearchResult struct {
+	index   int
+	started time.Time
+	ended   time.Time
+	rows    []model.KeywordResultRow
+	err     error
+}
+
+type keywordSearchRecoveryError struct {
+	Result  keywordSearchResult
+	Keyword string
+	Index   int
+	Total   int
+	Err     error
+}
+
+func (e *keywordSearchRecoveryError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("keyword %d/%d (%s): %v", e.Index+1, e.Total, e.Keyword, e.Err)
+}
+
+func (e *keywordSearchRecoveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func isKeywordSearchControlError(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, tui.ErrTaskCancelled) ||
+		errors.Is(err, prompt.ErrBackToQueryInput) ||
+		errors.Is(err, prompt.ErrBackToSpeciesSelection) ||
+		errors.Is(err, prompt.ErrBackToModeSelection) ||
+		errors.Is(err, prompt.ErrBackToDatabaseSelection) ||
+		errors.Is(err, prompt.ErrExitRequested)
+}
+
+type recoveryDecision int
+
+const (
+	recoveryRetry recoveryDecision = iota + 1
+	recoverySkip
+	recoveryBack
+	recoveryExit
+)
 
 var (
 	ecNumberLikeLabelPattern      = regexp.MustCompile(`^(?:EC[:\-]?)?[A-Za-z]?\d+(?:\.\d+){2,3}$`)
@@ -421,13 +498,19 @@ func NewBlastWizard(out io.Writer) *BlastWizard {
 
 func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWizard {
 	return &BlastWizard{
-		httpClient:             perf.HTTPClient(),
-		prompt:                 prompt.New(os.Stdin, out),
-		out:                    out,
-		tuiInfo:                tuiInfo,
-		speciesCandidatesCache: make(map[string][]model.SpeciesCandidate),
-		proteinSequenceCache:   make(map[string]string),
-		proteinSequenceMiss:    make(map[string]error),
+		httpClient:                defaultHTTPClient(),
+		prompt:                    prompt.New(os.Stdin, out),
+		out:                       out,
+		tuiInfo:                   tuiInfo,
+		speciesCandidatesCache:    make(map[string][]model.SpeciesCandidate),
+		keywordLabelLookupCache:   make(map[string]string),
+		blastLabelLookupCache:     make(map[string]blastAutoLabelResult),
+		rowUniProtAccessionsCache: make(map[string][]string),
+		rowUniProtAccessionsKnown: make(map[string]bool),
+		keywordBlastItemCache:     make(map[string]blastQueryItem),
+		querySourceResolveCache:   make(map[string]model.QuerySequenceSource),
+		proteinSequenceCache:      make(map[string]string),
+		proteinSequenceMiss:       make(map[string]error),
 	}
 }
 
@@ -950,6 +1033,157 @@ func (w *BlastWizard) cacheSpeciesCandidates(sourceName string, candidates []mod
 	w.speciesCandidatesCache[strings.ToLower(strings.TrimSpace(sourceName))] = copyCandidates
 }
 
+func (w *BlastWizard) keywordLabelLookupKey(src source.DataSource, species model.SpeciesCandidate, term string) string {
+	sourceName := ""
+	if src != nil {
+		sourceName = src.Name()
+	}
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(sourceName)),
+		strconv.Itoa(species.ProteomeID),
+		strings.ToLower(strings.TrimSpace(species.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(species.GenomeLabel)),
+		strings.ToLower(strings.TrimSpace(term)),
+	}, "|")
+}
+
+func (w *BlastWizard) cachedKeywordLabelLookup(src source.DataSource, species model.SpeciesCandidate, term string) (string, bool) {
+	key := w.keywordLabelLookupKey(src, species, term)
+	w.keywordLabelLookupMu.Lock()
+	defer w.keywordLabelLookupMu.Unlock()
+	if w.keywordLabelLookupCache == nil {
+		w.keywordLabelLookupCache = make(map[string]string)
+	}
+	label, ok := w.keywordLabelLookupCache[key]
+	return label, ok
+}
+
+func (w *BlastWizard) storeKeywordLabelLookup(src source.DataSource, species model.SpeciesCandidate, term string, label string) {
+	key := w.keywordLabelLookupKey(src, species, term)
+	w.keywordLabelLookupMu.Lock()
+	defer w.keywordLabelLookupMu.Unlock()
+	if w.keywordLabelLookupCache == nil {
+		w.keywordLabelLookupCache = make(map[string]string)
+	}
+	w.keywordLabelLookupCache[key] = strings.TrimSpace(label)
+}
+
+func (w *BlastWizard) blastLabelLookupKey(src source.DataSource, species model.SpeciesCandidate, item blastQueryItem) string {
+	sourceName := ""
+	if src != nil {
+		sourceName = src.Name()
+	}
+	terms := blastLabelSearchTerms(item)
+	sort.Strings(terms)
+	sourceDatabase := ""
+	sourceProteomeID := 0
+	sourceJBrowseName := ""
+	sourceGenomeLabel := ""
+	if item.QuerySource != nil {
+		sourceDatabase = item.QuerySource.SourceDatabase
+		sourceProteomeID = item.QuerySource.SourceProteomeID
+		sourceJBrowseName = item.QuerySource.SourceJBrowseName
+		sourceGenomeLabel = item.QuerySource.SourceGenomeLabel
+	}
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(sourceName)),
+		strconv.Itoa(species.ProteomeID),
+		strings.ToLower(strings.TrimSpace(species.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(species.GenomeLabel)),
+		strings.ToLower(strings.TrimSpace(sourceDatabase)),
+		strconv.Itoa(sourceProteomeID),
+		strings.ToLower(strings.TrimSpace(sourceJBrowseName)),
+		strings.ToLower(strings.TrimSpace(sourceGenomeLabel)),
+		strings.Join(terms, "\x00"),
+	}, "|")
+}
+
+func (w *BlastWizard) cachedBlastLabelLookup(src source.DataSource, species model.SpeciesCandidate, item blastQueryItem) (blastAutoLabelResult, bool) {
+	key := w.blastLabelLookupKey(src, species, item)
+	w.blastLabelLookupMu.Lock()
+	defer w.blastLabelLookupMu.Unlock()
+	if w.blastLabelLookupCache == nil {
+		w.blastLabelLookupCache = make(map[string]blastAutoLabelResult)
+	}
+	result, ok := w.blastLabelLookupCache[key]
+	return result, ok
+}
+
+func (w *BlastWizard) storeBlastLabelLookup(src source.DataSource, species model.SpeciesCandidate, item blastQueryItem, result blastAutoLabelResult) {
+	key := w.blastLabelLookupKey(src, species, item)
+	w.blastLabelLookupMu.Lock()
+	defer w.blastLabelLookupMu.Unlock()
+	if w.blastLabelLookupCache == nil {
+		w.blastLabelLookupCache = make(map[string]blastAutoLabelResult)
+	}
+	result.Label = strings.TrimSpace(result.Label)
+	result.Aliases = uniqueStrings(result.Aliases)
+	w.blastLabelLookupCache[key] = result
+}
+
+func (w *BlastWizard) sharedUniProtClient() *uniprot.Client {
+	w.uniProtClientMu.Lock()
+	defer w.uniProtClientMu.Unlock()
+	if w.uniProtClient == nil {
+		w.uniProtClient = uniprot.NewClient(w.httpClient)
+	}
+	return w.uniProtClient
+}
+
+func (w *BlastWizard) sharedInterProClient() *interpro.Client {
+	w.interProClientMu.Lock()
+	defer w.interProClientMu.Unlock()
+	if w.interProClient == nil {
+		w.interProClient = interpro.NewClient(w.httpClient)
+	}
+	return w.interProClient
+}
+
+func blastRowAccessionCacheKey(row model.BlastResultRow) string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strconv.Itoa(row.TargetID),
+		strings.ToLower(strings.TrimSpace(row.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(row.UniProtAccession)),
+		strings.ToLower(strings.TrimSpace(row.Protein)),
+		strings.ToLower(strings.TrimSpace(row.SubjectID)),
+		strings.ToLower(strings.TrimSpace(row.SequenceID)),
+		strings.ToLower(strings.TrimSpace(row.TranscriptID)),
+		strings.ToLower(strings.TrimSpace(row.GeneReportURL)),
+	}
+	return strings.Join(parts, "|")
+}
+
+func (w *BlastWizard) cachedRowUniProtAccessions(row model.BlastResultRow) ([]string, bool) {
+	key := blastRowAccessionCacheKey(row)
+	w.rowUniProtAccessionsMu.Lock()
+	defer w.rowUniProtAccessionsMu.Unlock()
+	if w.rowUniProtAccessionsCache == nil {
+		w.rowUniProtAccessionsCache = make(map[string][]string)
+	}
+	if w.rowUniProtAccessionsKnown == nil {
+		w.rowUniProtAccessionsKnown = make(map[string]bool)
+	}
+	if !w.rowUniProtAccessionsKnown[key] {
+		return nil, false
+	}
+	return append([]string(nil), w.rowUniProtAccessionsCache[key]...), true
+}
+
+func (w *BlastWizard) storeRowUniProtAccessions(row model.BlastResultRow, accessions []string) {
+	key := blastRowAccessionCacheKey(row)
+	w.rowUniProtAccessionsMu.Lock()
+	defer w.rowUniProtAccessionsMu.Unlock()
+	if w.rowUniProtAccessionsCache == nil {
+		w.rowUniProtAccessionsCache = make(map[string][]string)
+	}
+	if w.rowUniProtAccessionsKnown == nil {
+		w.rowUniProtAccessionsKnown = make(map[string]bool)
+	}
+	w.rowUniProtAccessionsCache[key] = uniqueStrings(accessions)
+	w.rowUniProtAccessionsKnown[key] = true
+}
+
 func (w *BlastWizard) speciesCandidatesForSource(ctx context.Context, src source.DataSource, current []model.SpeciesCandidate) ([]model.SpeciesCandidate, error) {
 	key := strings.ToLower(strings.TrimSpace(src.Name()))
 	if key == "" {
@@ -1185,13 +1419,25 @@ keywordInputLoop:
 				}
 				continue keywordRowLoop
 			}
-			w.warmKeywordSequenceCache(ctx, groups)
+			if selection.RunBlast {
+				if err := w.runKeywordBlastMode(ctx, selected, groups, selection.Rows, reportCtx); err != nil {
+					if errors.Is(err, prompt.ErrBackToRowSelection) {
+						continue keywordRowLoop
+					}
+					if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+						return err
+					}
+					return err
+				}
+				continue keywordRowLoop
+			}
+			w.warmKeywordSequenceCache(ctx, selected, groups)
 			w.postRunBackTarget = prompt.ErrBackToRowSelection
 			if !selection.GenerateFile {
 				continue keywordRowLoop
 			}
 
-			if err := w.prepareAndExportKeywordSelection(ctx, groups, selection.Rows, reportCtx); err != nil {
+			if err := w.prepareAndExportKeywordSelection(ctx, selected, groups, selection.Rows, reportCtx); err != nil {
 				if errors.Is(err, prompt.ErrBackToRowSelection) {
 					continue keywordRowLoop
 				}
@@ -1200,6 +1446,327 @@ keywordInputLoop:
 			continue keywordRowLoop
 		}
 	}
+}
+
+func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, rows []model.KeywordResultRow, reportCtx *keywordReportRunContext) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	databaseName, err := w.prompt.ChooseBlastTargetDatabase()
+	if err != nil {
+		return err
+	}
+
+	prepared, err := w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("Keyword BLAST", "No selected keyword rows could be converted into BLAST queries.", prompt.ErrBackToRowSelection)
+	}
+	prepared, err = w.prepareKeywordBlastItems(ctx, selected, prepared)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("Keyword BLAST", "No selected keyword rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
+	}
+
+	var targetSource source.DataSource
+	switch strings.ToLower(strings.TrimSpace(databaseName)) {
+	case "phytozome":
+		targetSource = phytozome.NewClient(w.httpClient)
+	case "lemna":
+		targetSource = lemna.NewClient(w.httpClient)
+	default:
+		return fmt.Errorf("unsupported BLAST target database %q", databaseName)
+	}
+
+	previousSource := w.source
+	previousBlastProgram := w.blastProgramPath
+	previousDB := databaseDisplayName(previousSource.Name())
+	defer func() {
+		w.source = previousSource
+		w.prompt.SetDatabaseContext(previousDB)
+		w.setBlastProgramContext(previousBlastProgram)
+	}()
+
+	w.source = targetSource
+	w.prompt.SetDatabaseContext(databaseDisplayName(targetSource.Name()))
+	w.setBlastProgramContext("")
+
+	candidates, err := w.loadSpeciesCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	targetSpecies, err := w.selectSpecies(candidates)
+	if err != nil {
+		return err
+	}
+
+	w.lastKeywordGroups = cloneKeywordSearchGroups(groups)
+	if reportCtx != nil {
+		copied := *reportCtx
+		w.lastKeywordReport = &copied
+	}
+	return w.executePreparedBlast(ctx, targetSpecies, prepared, blastRequestConfig{})
+}
+
+func (w *BlastWizard) prepareKeywordBlastItems(ctx context.Context, selected model.SpeciesCandidate, items []blastQueryItem) ([]blastQueryItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	for {
+		prepared := cloneBlastQueryItems(items)
+		autoIdentifyLabels := false
+		var err error
+		if len(prepared) > 1 {
+			prepared, autoIdentifyLabels, err = w.collectBlastLabelsBeforeResolve(prepared)
+		} else {
+			prepared, err = w.collectBlastLabels(ctx, selected, prepared)
+		}
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				return nil, prompt.ErrBackToRowSelection
+			}
+			return nil, err
+		}
+
+		if autoIdentifyLabels {
+			prepared, err = w.autoIdentifyBlastLabelsWithProgress(ctx, selected, prepared)
+			if err != nil {
+				if errors.Is(err, prompt.ErrBackToQueryInput) {
+					return nil, prompt.ErrBackToRowSelection
+				}
+				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("auto identify BLAST label names: %v", err), prompt.ErrBackToRowSelection)
+				if navErr != nil {
+					return nil, navErr
+				}
+				if !retry {
+					return nil, err
+				}
+				continue
+			}
+			if !allLabelsPresent(prepared) {
+				action, actionErr := w.prompt.FetchErrorAction("auto identify BLAST label names: one or more query labels could not be identified", prompt.ErrBackToRowSelection)
+				if actionErr != nil {
+					return nil, actionErr
+				}
+				decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToRowSelection, true)
+				if navErr != nil {
+					return nil, navErr
+				}
+				switch decision {
+				case recoverySkip:
+					prepared = keepBlastItemsWithLabels(prepared)
+				case recoveryRetry:
+					continue
+				default:
+					continue
+				}
+			}
+		}
+
+		if allLabelsPresent(prepared) {
+			if keywordBlastItemsHaveReusableAliases(prepared) {
+				return prepared, nil
+			}
+			prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
+			if err != nil {
+				if errors.Is(err, prompt.ErrBackToQueryInput) {
+					return nil, prompt.ErrBackToRowSelection
+				}
+				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("read BLAST alias label names: %v", err), prompt.ErrBackToRowSelection)
+				if navErr != nil {
+					return nil, navErr
+				}
+				if !retry {
+					return nil, err
+				}
+				continue
+			}
+		}
+		return prepared, nil
+	}
+}
+
+func keywordBlastItemsHaveReusableAliases(items []blastQueryItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.QuerySource == nil {
+			return false
+		}
+		if strings.EqualFold(strings.TrimSpace(item.QuerySource.SourceDatabase), "fasta") {
+			return false
+		}
+		if strings.TrimSpace(item.QuerySource.LabelName) == "" &&
+			strings.TrimSpace(item.QuerySource.Aliases) == "" &&
+			strings.TrimSpace(item.QuerySource.AutoDefine) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func blastItemsHaveReusableAliases(items []blastQueryItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if item.QuerySource == nil {
+			return false
+		}
+		if strings.TrimSpace(item.QuerySource.LabelName) == "" &&
+			strings.TrimSpace(item.QuerySource.Aliases) == "" &&
+			strings.TrimSpace(item.QuerySource.AutoDefine) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *BlastWizard) resolveKeywordRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow) ([]blastQueryItem, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	results, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("Keyword", "BLAST", "Resolving selected rows"),
+		Title:       "Resolving keyword rows for BLAST",
+		Description: "Fetching peptide sequences for selected keyword rows using the current keyword result metadata and cache.",
+		Initial:     "Resolving keyword rows for BLAST...",
+		Total:       len(rows),
+		CancelError: prompt.ErrBackToRowSelection,
+	}, func(taskCtx context.Context, update func(int, string)) (map[string]sequenceFetchResult, error) {
+		return w.prefetchKeywordSequences(mergeContexts(ctx, taskCtx), selected, rows, update), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return w.keywordRowsToBlastItemsCached(selected, rows, results), nil
+}
+
+func (w *BlastWizard) keywordRowsToBlastItemsCached(selected model.SpeciesCandidate, rows []model.KeywordResultRow, sequences map[string]sequenceFetchResult) []blastQueryItem {
+	out := make([]blastQueryItem, 0, len(rows))
+	for _, row := range rows {
+		cacheKey := keywordBlastItemCacheKey(selected, row)
+		sequenceID := strings.TrimSpace(row.SequenceID)
+		if sequenceID == "" {
+			continue
+		}
+		sequence := ""
+		if fetched, ok := sequences[sequenceID]; ok && fetched.err == nil {
+			sequence = strings.TrimSpace(fetched.sequence)
+		}
+		if sequence == "" {
+			continue
+		}
+		if cached, ok := w.cachedKeywordBlastItem(cacheKey, sequence); ok {
+			out = append(out, cached)
+			continue
+		}
+		item := keywordRowsToBlastItems(selected, []model.KeywordResultRow{row}, sequences)
+		if len(item) == 0 {
+			continue
+		}
+		w.storeKeywordBlastItem(cacheKey, item[0])
+		out = append(out, item[0])
+	}
+	return out
+}
+
+func keywordBlastItemCacheKey(selected model.SpeciesCandidate, row model.KeywordResultRow) string {
+	return strings.Join([]string{
+		strconv.Itoa(selected.ProteomeID),
+		strings.ToLower(strings.TrimSpace(selected.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strings.TrimSpace(row.SequenceID),
+		strings.TrimSpace(row.TranscriptID),
+		strings.TrimSpace(row.GeneIdentifier),
+		strings.TrimSpace(row.ProteinID),
+		strings.TrimSpace(row.GeneReportURL),
+		strings.TrimSpace(row.LabelName),
+		strings.TrimSpace(row.Aliases),
+		strings.TrimSpace(row.AutoDefine),
+	}, "|")
+}
+
+func (w *BlastWizard) cachedKeywordBlastItem(cacheKey string, sequence string) (blastQueryItem, bool) {
+	if strings.TrimSpace(cacheKey) == "" || strings.TrimSpace(sequence) == "" {
+		return blastQueryItem{}, false
+	}
+	w.keywordBlastItemMu.RLock()
+	item, ok := w.keywordBlastItemCache[cacheKey]
+	w.keywordBlastItemMu.RUnlock()
+	if !ok || item.QuerySource == nil {
+		return blastQueryItem{}, false
+	}
+	cached := item
+	cached.Sequence = sequence
+	sourceCopy := *cached.QuerySource
+	sourceCopy.Sequence = sequence
+	cached.QuerySource = &sourceCopy
+	return cached, true
+}
+
+func (w *BlastWizard) storeKeywordBlastItem(cacheKey string, item blastQueryItem) {
+	if strings.TrimSpace(cacheKey) == "" || item.QuerySource == nil {
+		return
+	}
+	copyItem := item
+	sourceCopy := *item.QuerySource
+	copyItem.QuerySource = &sourceCopy
+	w.keywordBlastItemMu.Lock()
+	if w.keywordBlastItemCache == nil {
+		w.keywordBlastItemCache = make(map[string]blastQueryItem)
+	}
+	w.keywordBlastItemCache[cacheKey] = copyItem
+	w.keywordBlastItemMu.Unlock()
+}
+
+func keywordRowsToBlastItems(selected model.SpeciesCandidate, rows []model.KeywordResultRow, sequences map[string]sequenceFetchResult) []blastQueryItem {
+	out := make([]blastQueryItem, 0, len(rows))
+	for _, row := range rows {
+		sequenceID := strings.TrimSpace(row.SequenceID)
+		if sequenceID == "" {
+			continue
+		}
+		sequence := ""
+		if fetched, ok := sequences[sequenceID]; ok && fetched.err == nil {
+			sequence = strings.TrimSpace(fetched.sequence)
+		}
+		if sequence == "" {
+			continue
+		}
+		querySource := &model.QuerySequenceSource{
+			Sequence:          sequence,
+			SourceDatabase:    firstNonEmpty(row.SourceDatabase),
+			SourceProteomeID:  selected.ProteomeID,
+			SourceJBrowseName: selected.JBrowseName,
+			SourceGenomeLabel: selected.GenomeLabel,
+			OriginalInputURL:  strings.TrimSpace(row.GeneReportURL),
+			NormalizedURL:     strings.TrimSpace(row.GeneReportURL),
+			LabelName:         strings.TrimSpace(row.LabelName),
+			Aliases:           strings.TrimSpace(row.Aliases),
+			AutoDefine:        strings.TrimSpace(row.AutoDefine),
+			UniProtAccession:  strings.TrimSpace(row.UniProt),
+			GeneID:            strings.TrimSpace(row.GeneIdentifier),
+			TranscriptID:      strings.TrimSpace(row.TranscriptID),
+			ProteinID:         firstNonEmpty(row.ProteinID, row.TranscriptID, row.SequenceID),
+			OrganismShort:     firstNonEmpty(strings.TrimSpace(row.SequenceHeaderLabel), strings.TrimSpace(row.Genome), selected.SearchAlias, selected.GenomeLabel),
+			Annotation:        firstNonEmpty(strings.TrimSpace(row.Description), strings.TrimSpace(row.Comments), strings.TrimSpace(row.Genome), selected.GenomeLabel),
+		}
+		out = append(out, blastQueryItem{
+			RawInput:    firstNonEmpty(row.GeneReportURL, row.SequenceID, row.TranscriptID, row.GeneIdentifier),
+			LabelName:   strings.TrimSpace(row.LabelName),
+			Sequence:    sequence,
+			QuerySource: querySource,
+		})
+	}
+	return out
 }
 
 func (w *BlastWizard) runBlastMode(ctx context.Context, selected model.SpeciesCandidate, candidates []model.SpeciesCandidate) error {
@@ -1305,13 +1872,18 @@ blastInputLoop:
 					if actionErr != nil {
 						return actionErr
 					}
-					switch action {
-					case "retry", "close":
+					decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, true)
+					if navErr != nil {
+						if decision == recoveryBack || decision == recoveryExit {
+							return navErr
+						}
+						return navErr
+					}
+					switch decision {
+					case recoveryRetry:
 						continue blastInputLoop
-					case "skip":
+					case recoverySkip:
 						prepared = resolveErr.Prepared
-					case "exit":
-						return prompt.ErrExitRequested
 					default:
 						continue blastInputLoop
 					}
@@ -1349,13 +1921,18 @@ blastInputLoop:
 					if actionErr != nil {
 						return actionErr
 					}
-					switch action {
-					case "skip":
+					decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, true)
+					if navErr != nil {
+						if decision == recoveryBack || decision == recoveryExit {
+							return navErr
+						}
+						return navErr
+					}
+					switch decision {
+					case recoverySkip:
 						prepared = keepBlastItemsWithLabels(prepared)
-					case "retry", "close":
+					case recoveryRetry:
 						continue blastInputLoop
-					case "exit":
-						return prompt.ErrExitRequested
 					default:
 						continue blastInputLoop
 					}
@@ -1380,6 +1957,12 @@ blastInputLoop:
 					continue
 				}
 			}
+			if allLabelsPresent(prepared) {
+				if keywordBlastItemsHaveReusableAliases(prepared) {
+					// Auto-identify may have already populated the reusable label and alias metadata.
+					goto preparedBlastInput
+				}
+			}
 			if !autoIdentifyLabels && allLabelsPresent(prepared) {
 				prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
 				if err != nil {
@@ -1394,80 +1977,90 @@ blastInputLoop:
 				}
 			}
 		}
+	preparedBlastInput:
 		if len(prepared) == 0 {
 			return nil
 		}
-
-	batchConfigLoop:
-		for {
-			baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
-			configuredRequest := baseRequest
-			if requestConfig.Ready {
-				configuredRequest = requestConfig.Request
-				configuredRequest.Sequence = baseRequest.Sequence
-			} else {
-				var err error
-				configuredRequest, err = w.configureBlastRequest(ctx, selected, baseRequest)
-				if err != nil {
-					if errors.Is(err, prompt.ErrBackToQueryInput) {
-						continue blastInputLoop
-					}
-					if errors.Is(err, prompt.ErrBackToBlastProgram) {
-						continue batchConfigLoop
-					}
-					if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
-						return err
-					}
-					retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure BLAST request: %v", err), prompt.ErrBackToSpeciesSelection)
-					if navErr != nil {
-						return navErr
-					}
-					if !retry {
-						return err
-					}
-					continue
-				}
+		if err := w.executePreparedBlast(ctx, selected, prepared, requestConfig); err != nil {
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				continue blastInputLoop
 			}
-
-			references, refErr := w.collectExternalReferenceConfig()
-			if refErr != nil {
-				if errors.Is(refErr, prompt.ErrBackToQueryInput) {
-					continue blastInputLoop
-				}
-				if errors.Is(refErr, prompt.ErrBackToSpeciesSelection) || errors.Is(refErr, prompt.ErrBackToModeSelection) || errors.Is(refErr, prompt.ErrBackToDatabaseSelection) || errors.Is(refErr, prompt.ErrExitRequested) {
-					return refErr
-				}
-				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure external references: %v", refErr), prompt.ErrBackToQueryInput)
-				if navErr != nil {
-					return navErr
-				}
-				if !retry {
-					return refErr
-				}
-				continue
-			}
-
-			familyPlan, familyErr := w.collectFamilyBlastPlan(prepared, references)
-			if familyErr != nil {
-				if errors.Is(familyErr, prompt.ErrBackToQueryInput) {
-					continue blastInputLoop
-				}
-				if errors.Is(familyErr, prompt.ErrBackToSpeciesSelection) || errors.Is(familyErr, prompt.ErrBackToModeSelection) || errors.Is(familyErr, prompt.ErrBackToDatabaseSelection) || errors.Is(familyErr, prompt.ErrExitRequested) {
-					return familyErr
-				}
-				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure Family BLAST: %v", familyErr), prompt.ErrBackToQueryInput)
-				if navErr != nil {
-					return navErr
-				}
-				if !retry {
-					return familyErr
-				}
-				continue
-			}
-
-			w.lastBlastItems = cloneBlastQueryItems(prepared)
-			return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, configuredRequest, references, familyPlan)
+			return err
 		}
+		return nil
+	}
+}
+
+func (w *BlastWizard) executePreparedBlast(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, requestConfig blastRequestConfig) error {
+batchConfigLoop:
+	for {
+		baseRequest := buildBlastRequest(selected, prepared[0].Sequence)
+		configuredRequest := baseRequest
+		if requestConfig.Ready {
+			configuredRequest = requestConfig.Request
+			configuredRequest.Sequence = baseRequest.Sequence
+		} else {
+			var err error
+			configuredRequest, err = w.configureBlastRequest(ctx, selected, baseRequest)
+			if err != nil {
+				if errors.Is(err, prompt.ErrBackToQueryInput) {
+					return prompt.ErrBackToQueryInput
+				}
+				if errors.Is(err, prompt.ErrBackToBlastProgram) {
+					continue batchConfigLoop
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
+				retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure BLAST request: %v", err), prompt.ErrBackToSpeciesSelection)
+				if navErr != nil {
+					return navErr
+				}
+				if !retry {
+					return err
+				}
+				continue
+			}
+		}
+
+		references, refErr := w.collectExternalReferenceConfig()
+		if refErr != nil {
+			if errors.Is(refErr, prompt.ErrBackToQueryInput) {
+				return refErr
+			}
+			if errors.Is(refErr, prompt.ErrBackToSpeciesSelection) || errors.Is(refErr, prompt.ErrBackToModeSelection) || errors.Is(refErr, prompt.ErrBackToDatabaseSelection) || errors.Is(refErr, prompt.ErrExitRequested) {
+				return refErr
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure external references: %v", refErr), prompt.ErrBackToQueryInput)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return refErr
+			}
+			continue
+		}
+
+		familyPlan, familyErr := w.collectFamilyBlastPlan(prepared, references)
+		if familyErr != nil {
+			if errors.Is(familyErr, prompt.ErrBackToQueryInput) {
+				return familyErr
+			}
+			if errors.Is(familyErr, prompt.ErrBackToSpeciesSelection) || errors.Is(familyErr, prompt.ErrBackToModeSelection) || errors.Is(familyErr, prompt.ErrBackToDatabaseSelection) || errors.Is(familyErr, prompt.ErrExitRequested) {
+				return familyErr
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("configure Family BLAST: %v", familyErr), prompt.ErrBackToQueryInput)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return familyErr
+			}
+			continue
+		}
+
+		w.lastBlastItems = cloneBlastQueryItems(prepared)
+		return w.executeConfiguredBlastBatchWithReferences(ctx, selected, prepared, configuredRequest, references, familyPlan)
 	}
 }
 
@@ -1727,17 +2320,20 @@ func (w *BlastWizard) executeConfiguredBlastBatchWithReferences(ctx context.Cont
 		if actionErr != nil {
 			return actionErr
 		}
-		switch action {
-		case "retry":
+		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, true)
+		if navErr != nil {
+			if decision == recoveryBack || decision == recoveryExit {
+				return navErr
+			}
+			return navErr
+		}
+		switch decision {
+		case recoveryRetry:
 			resumeIndex = failedIndex
 			continue
-		case "skip":
+		case recoverySkip:
 			resumeIndex = failedIndex + 1
 			continue
-		case "close":
-			return prompt.ErrBackToQueryInput
-		case "exit":
-			return prompt.ErrExitRequested
 		default:
 			return fmt.Errorf("unsupported batch recovery action %q", action)
 		}
@@ -1775,7 +2371,8 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		runCtx := contextWithUpdate(ctx, progress)
 		previousSuppress := w.suppressTaskModals
 		batchMode := len(prepared) > 1
-		w.suppressTaskModals = batchMode
+		suppressTaskModals := previousSuppress || batchMode
+		w.suppressTaskModals = suppressTaskModals
 		defer func() {
 			w.suppressTaskModals = previousSuppress
 		}()
@@ -1818,7 +2415,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 				}
 				results.Rows = annotateBlastRows(results.Rows, w.source.Name(), request.Program)
 				if len(results.Rows) == 0 {
-					if !batchMode {
+					if !suppressTaskModals {
 						if err := w.showBlastResults(results); err != nil {
 							return blastQueryRun{}, err
 						}
@@ -2099,15 +2696,18 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 				if actionErr != nil {
 					return actionErr
 				}
-				switch action {
-				case "retry":
+				decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToRowSelection, true)
+				if navErr != nil {
+					if decision == recoveryBack || decision == recoveryExit {
+						return navErr
+					}
+					return navErr
+				}
+				switch decision {
+				case recoveryRetry:
 					continue
-				case "skip":
+				case recoverySkip:
 					return nil
-				case "close":
-					return prompt.ErrBackToRowSelection
-				case "exit":
-					return prompt.ErrExitRequested
 				default:
 					return fmt.Errorf("unsupported export recovery action %q", action)
 				}
@@ -2285,7 +2885,7 @@ func (w *BlastWizard) warmBlastSequenceCache(ctx context.Context, rows []model.B
 	}()
 }
 
-func (w *BlastWizard) warmKeywordSequenceCache(ctx context.Context, groups []model.KeywordSearchGroup) {
+func (w *BlastWizard) warmKeywordSequenceCache(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup) {
 	rows := flattenKeywordSearchGroups(groups)
 	if len(rows) == 0 {
 		return
@@ -2293,7 +2893,7 @@ func (w *BlastWizard) warmKeywordSequenceCache(ctx context.Context, groups []mod
 	go func() {
 		warmCtx, cancel := context.WithTimeout(ctx, proteinFetchTimeout)
 		defer cancel()
-		w.prefetchKeywordSequences(warmCtx, rows, nil)
+		w.prefetchKeywordSequences(warmCtx, selected, rows, nil)
 	}()
 }
 
@@ -2357,15 +2957,18 @@ func (w *BlastWizard) exportSingleBlastRun(ctx context.Context, selected model.S
 			if actionErr != nil {
 				return actionErr
 			}
-			switch action {
-			case "retry":
+			decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToRowSelection, true)
+			if navErr != nil {
+				if decision == recoveryBack || decision == recoveryExit {
+					return navErr
+				}
+				return navErr
+			}
+			switch decision {
+			case recoveryRetry:
 				continue
-			case "skip":
+			case recoverySkip:
 				return nil
-			case "close":
-				return prompt.ErrBackToRowSelection
-			case "exit":
-				return prompt.ErrExitRequested
 			default:
 				return fmt.Errorf("unsupported export recovery action %q", action)
 			}
@@ -2409,10 +3012,17 @@ func (w *BlastWizard) exportAllBlastRuns(ctx context.Context, selected model.Spe
 		if actionErr != nil {
 			return actionErr
 		}
-		switch action {
-		case "retry":
+		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToRowSelection, true)
+		if navErr != nil {
+			if decision == recoveryBack || decision == recoveryExit {
+				return navErr
+			}
+			return navErr
+		}
+		switch decision {
+		case recoveryRetry:
 			continue
-		case "skip":
+		case recoverySkip:
 			filteredRuns := make([]blastQueryRun, 0, len(runs))
 			for _, run := range runs {
 				if run.Index != exportErr.Run.Index {
@@ -2421,10 +3031,6 @@ func (w *BlastWizard) exportAllBlastRuns(ctx context.Context, selected model.Spe
 			}
 			runs = filteredRuns
 			continue
-		case "close":
-			return prompt.ErrBackToRowSelection
-		case "exit":
-			return prompt.ErrExitRequested
 		default:
 			return fmt.Errorf("unsupported export recovery action %q", action)
 		}
@@ -2909,7 +3515,7 @@ func (w *BlastWizard) enrichBlastRowsWithUniProt(ctx context.Context, rows []mod
 	if len(rows) == 0 {
 		return rows, nil
 	}
-	client := uniprot.NewClient(w.httpClient)
+	client := w.sharedUniProtClient()
 	out := append([]model.BlastResultRow(nil), rows...)
 	if inheritedUpdate := updateFromContext(ctx); inheritedUpdate != nil {
 		return w.enrichBlastRowsWithUniProtProgress(ctx, client, out, inheritedUpdate)
@@ -3063,12 +3669,17 @@ func uniqueStrings(values []string) []string {
 }
 
 func (w *BlastWizard) uniprotAccessionsForBlastRow(ctx context.Context, row model.BlastResultRow) []string {
+	if cached, ok := w.cachedRowUniProtAccessions(row); ok {
+		return cached
+	}
 	resolver, ok := w.source.(source.UniProtResolver)
 	if !ok {
+		w.storeRowUniProtAccessions(row, nil)
 		return nil
 	}
 	proteinID := firstNonEmpty(row.Protein, row.SubjectID, row.SequenceID, row.TranscriptID)
 	if proteinID == "" {
+		w.storeRowUniProtAccessions(row, nil)
 		return nil
 	}
 	targetID := row.TargetID
@@ -3076,14 +3687,18 @@ func (w *BlastWizard) uniprotAccessionsForBlastRow(ctx context.Context, row mode
 		targetID = w.phytozomeTargetIDForRow(ctx, row)
 	}
 	if targetID == 0 {
+		w.storeRowUniProtAccessions(row, nil)
 		return nil
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	accessions, err := resolver.FetchUniProtAccessions(fetchCtx, targetID, proteinID)
 	if err != nil {
+		w.storeRowUniProtAccessions(row, nil)
 		return nil
 	}
+	accessions = uniqueStrings(accessions)
+	w.storeRowUniProtAccessions(row, accessions)
 	return accessions
 }
 
@@ -3163,7 +3778,7 @@ func (w *BlastWizard) enrichBlastRowsWithInterPro(ctx context.Context, item blas
 		return rows, nil
 	}
 	settings = normalizeInterProConservedRegionSettings(settings)
-	client := interpro.NewClient(w.httpClient)
+	client := w.sharedInterProClient()
 	out := append([]model.BlastResultRow(nil), rows...)
 	if inheritedUpdate := updateFromContext(ctx); inheritedUpdate != nil {
 		return w.enrichBlastRowsWithInterProProgress(ctx, client, item, out, settings, inheritedUpdate)
@@ -3253,15 +3868,16 @@ func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, ctx context.Co
 	}
 	source := item.QuerySource
 	row := model.BlastResultRow{
-		Protein:       firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
-		SubjectID:     firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
-		SequenceID:    firstNonEmpty(source.ProteinID, source.TranscriptID),
-		TranscriptID:  source.TranscriptID,
-		Species:       source.OrganismShort,
-		GeneReportURL: firstNonEmpty(source.NormalizedURL, source.OriginalInputURL),
-		JBrowseName:   source.SourceJBrowseName,
-		TargetID:      source.SourceProteomeID,
-		Defline:       source.Annotation,
+		Protein:          firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
+		SubjectID:        firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID),
+		SequenceID:       firstNonEmpty(source.ProteinID, source.TranscriptID),
+		TranscriptID:     source.TranscriptID,
+		Species:          source.OrganismShort,
+		GeneReportURL:    firstNonEmpty(source.NormalizedURL, source.OriginalInputURL),
+		JBrowseName:      source.SourceJBrowseName,
+		TargetID:         source.SourceProteomeID,
+		Defline:          source.Annotation,
+		UniProtAccession: strings.TrimSpace(source.UniProtAccession),
 	}
 	if resolver, ok := resolverForQuerySource(source, w.httpClient); ok {
 		proteinID := firstNonEmpty(source.ProteinID, source.TranscriptID, source.GeneID)
@@ -4581,6 +5197,19 @@ func (w *BlastWizard) collectBlastLabels(ctx context.Context, selected model.Spe
 	labels, err := w.prompt.BlastLabelNames(len(items), multiple, prompt.ErrBackToQueryInput)
 	if err != nil {
 		if errors.Is(err, prompt.ErrAutoIdentifyRequested) {
+			if blastItemsHaveReusableAliases(items) {
+				out := cloneBlastQueryItems(items)
+				for i := range out {
+					if strings.TrimSpace(out[i].LabelName) == "" {
+						if label := autoIdentifyBlastLabel(out[i]); label != "" {
+							out[i].LabelName = label
+						}
+					}
+				}
+				if !multiple || allLabelsPresent(out) {
+					return out, nil
+				}
+			}
 			out, autoErr := w.autoIdentifyBlastLabelsWithProgress(ctx, selected, items)
 			if autoErr != nil {
 				return nil, autoErr
@@ -4612,6 +5241,16 @@ func (w *BlastWizard) prepareBlastExportItem(item blastQueryItem, batch bool) (b
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, selected model.SpeciesCandidate, items []blastQueryItem) ([]blastQueryItem, error) {
+	if blastItemsHaveReusableAliases(items) {
+		out := cloneBlastQueryItems(items)
+		lockedLabels := blastAutoIdentifyLockedLabels(out)
+		for i := range out {
+			if strings.TrimSpace(out[i].LabelName) == "" {
+				setBlastQueryItemLabel(&out[i], autoIdentifyBlastLabel(out[i]))
+			}
+		}
+		return harmonizeAutoIdentifiedBlastLabelsWithLocks(out, lockedLabels), nil
+	}
 	return tui.RunTaskValueContext(tui.TaskPage{
 		Path:        w.tuiPath("BLAST", "Auto identify"),
 		Title:       "Auto identifying BLAST label names",
@@ -4678,6 +5317,9 @@ func (w *BlastWizard) autoIdentifyBlastLabelsWithProgress(ctx context.Context, s
 
 func (w *BlastWizard) supplementBlastAliasesWithProgress(ctx context.Context, selected model.SpeciesCandidate, items []blastQueryItem) ([]blastQueryItem, error) {
 	if len(items) == 0 {
+		return items, nil
+	}
+	if blastItemsHaveReusableAliases(items) {
 		return items, nil
 	}
 	hasResolvable := false
@@ -4896,6 +5538,9 @@ func (w *BlastWizard) autoIdentifyBlastLabelFromPhytozome(ctx context.Context, p
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabelResultFromPhytozome(ctx context.Context, phytozomeSource source.DataSource, species model.SpeciesCandidate, item blastQueryItem) blastAutoLabelResult {
+	if cached, ok := w.cachedBlastLabelLookup(phytozomeSource, species, item); ok {
+		return cached
+	}
 	candidates := make([]string, 0, 8)
 	aliases := make([]string, 0, 16)
 	for _, term := range blastLabelSearchTerms(item) {
@@ -4908,10 +5553,12 @@ func (w *BlastWizard) autoIdentifyBlastLabelResultFromPhytozome(ctx context.Cont
 		}
 		aliases = append(aliases, keywordAliasesFromRows(rows)...)
 	}
-	return blastAutoLabelResult{
+	result := blastAutoLabelResult{
 		Label:   bestTrustedAutoLabel(candidates...),
 		Aliases: uniqueStrings(aliases),
 	}
+	w.storeBlastLabelLookup(phytozomeSource, species, item, result)
+	return result
 }
 
 func (w *BlastWizard) autoIdentifyBlastLabel(ctx context.Context, phytozomeSource source.DataSource, selected model.SpeciesCandidate, item blastQueryItem) string {
@@ -5470,6 +6117,34 @@ func (w *BlastWizard) resolveBlastQueryItemsWithProgress(ctx context.Context, it
 					}, ok: true}
 					continue
 				}
+				if resolver, ok := w.source.(source.QueryResolver); ok {
+					selected := items[idx].QuerySource
+					species := model.SpeciesCandidate{}
+					if selected != nil && selected.SourceProteomeID != 0 {
+						species = model.SpeciesCandidate{
+							ProteomeID:  selected.SourceProteomeID,
+							JBrowseName: selected.SourceJBrowseName,
+							GenomeLabel: selected.SourceGenomeLabel,
+						}
+					}
+					if species.ProteomeID == 0 {
+						for _, candidate := range candidates {
+							if candidate.ProteomeID != 0 {
+								species = candidate
+								break
+							}
+						}
+					}
+					if species.ProteomeID != 0 {
+						if fastSource, resolved, err := w.tryResolveSourceQueryInput(ctx, resolver, species, items[idx].RawInput); err != nil {
+							outcomes <- queryResolveResult{index: idx, err: err}
+							continue
+						} else if fastSource {
+							outcomes <- queryResolveResult{index: idx, querySource: resolved, ok: true}
+							continue
+						}
+					}
+				}
 				querySource, ok, err := w.resolveQuerySequenceInputBatchWithTimeout(ctx, candidates, items[idx].RawInput)
 				outcomes <- queryResolveResult{index: idx, querySource: querySource, ok: ok, err: err}
 			}
@@ -5557,6 +6232,29 @@ func (w *BlastWizard) resolveQuerySequenceInputBatchWithTimeout(ctx context.Cont
 	return w.resolveQuerySequenceInputBatch(resolveCtx, candidates, input)
 }
 
+func (w *BlastWizard) tryResolveSourceQueryInput(ctx context.Context, resolver source.QueryResolver, species model.SpeciesCandidate, input string) (bool, *model.QuerySequenceSource, error) {
+	if resolver == nil {
+		return false, nil, nil
+	}
+	resolved, ok, err := resolver.ResolveQuerySequence(ctx, species, input)
+	if err != nil || !ok || resolved == nil {
+		return ok, resolved, err
+	}
+	if strings.TrimSpace(resolved.SourceDatabase) == "" {
+		resolved.SourceDatabase = w.source.Name()
+	}
+	if resolved.SourceProteomeID == 0 {
+		resolved.SourceProteomeID = species.ProteomeID
+	}
+	if strings.TrimSpace(resolved.SourceJBrowseName) == "" {
+		resolved.SourceJBrowseName = species.JBrowseName
+	}
+	if strings.TrimSpace(resolved.SourceGenomeLabel) == "" {
+		resolved.SourceGenomeLabel = species.GenomeLabel
+	}
+	return true, resolved, nil
+}
+
 func oneLinePreview(value string) string {
 	value = strings.TrimSpace(strings.ReplaceAll(value, "\n", " "))
 	if len(value) > 120 {
@@ -5566,29 +6264,33 @@ func oneLinePreview(value string) string {
 }
 
 func parallelismFor(total int, maxWorkers int) int {
-	return perf.DynamicWorkers(total, maxWorkers)
+	return clampWorkers(total, maxWorkers)
 }
 
 func networkParallelismFor(total int) int {
-	return perf.NetworkWorkers(total)
+	return clampWorkers(total, defaultNetworkWorkers())
 }
 
 func diskParallelismFor(total int) int {
-	return perf.DiskWorkers(total)
+	return clampWorkers(total, defaultDiskWorkers())
 }
 
 func batchBlastWorkerCount(total int, request model.BlastRequest) int {
-	if !isLocalBlastRequest(request) {
-		return networkParallelismFor(total)
+	if isLocalBlastRequest(request) {
+		if configured := configuredInt("PHYTOZOME_GO_LOCAL_BLAST_BATCH_WORKERS", 0); configured > 0 {
+			return clampWorkers(total, configured)
+		}
+	} else {
+		if configured := configuredInt("PHYTOZOME_GO_REMOTE_BLAST_BATCH_WORKERS", 0); configured > 0 {
+			return clampWorkers(total, configured)
+		}
+		return clampWorkers(total, 1)
 	}
 	if total <= 0 {
 		return 0
 	}
-	cpu := perf.Current().CPU
-	if cpu < 1 {
-		cpu = 1
-	}
-	workers := cpu / 2
+	cpu := currentCPUCount()
+	workers := cpu / 4
 	if workers < 1 {
 		workers = 1
 	}
@@ -5598,11 +6300,29 @@ func batchBlastWorkerCount(total int, request model.BlastRequest) int {
 	return workers
 }
 
-func localBlastThreadsPerWorker(workerCount int) int {
-	cpu := perf.Current().CPU
-	if cpu < 1 {
-		return 1
+func keywordSearchWorkerCount(total int) int {
+	return maxInt(parallelismFor(total, maxParallelKeywordJobs), networkParallelismFor(total))
+}
+
+func keywordSearchResultCompleted(result keywordSearchResult) bool {
+	return result.err == nil && !result.ended.IsZero()
+}
+
+func countCompletedKeywordResults(results []keywordSearchResult) int {
+	total := 0
+	for _, result := range results {
+		if keywordSearchResultCompleted(result) {
+			total++
+		}
 	}
+	return total
+}
+
+func localBlastThreadsPerWorker(workerCount int) int {
+	if configured := configuredInt("PHYTOZOME_GO_LOCAL_BLAST_THREADS", 0); configured > 0 {
+		return configured
+	}
+	cpu := currentCPUCount()
 	if workerCount < 1 {
 		workerCount = 1
 	}
@@ -6110,11 +6830,13 @@ func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.Bl
 		if actionErr != nil {
 			return model.BlastJob{}, actionErr
 		}
-		switch action {
-		case "retry":
+		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, false)
+		if navErr != nil {
+			return model.BlastJob{}, navErr
+		}
+		switch decision {
+		case recoveryRetry:
 			continue
-		case "close":
-			return model.BlastJob{}, prompt.ErrBackToQueryInput
 		default:
 			return model.BlastJob{}, prompt.ErrBackToQueryInput
 		}
@@ -6244,16 +6966,17 @@ func normalizeWorkflowBlastProgram(program string) string {
 }
 
 func (w *BlastWizard) waitForBlastResultsWithRetry(ctx context.Context, jobID string) (model.BlastResult, error) {
+	pollInterval := blastResultsPollInterval(w.source)
 	if w.suppressTaskModals {
-		return w.source.WaitForBlastResults(ctx, jobID, 3*time.Second, 5*time.Minute)
+		return w.source.WaitForBlastResults(ctx, jobID, pollInterval, 5*time.Minute)
 	}
 	for {
 		var results model.BlastResult
 		var err error
 		if w.suppressTaskModals {
-			results, err = w.source.WaitForBlastResults(ctx, jobID, 3*time.Second, 5*time.Minute)
+			results, err = w.source.WaitForBlastResults(ctx, jobID, pollInterval, 5*time.Minute)
 		} else {
-			results, err = w.waitForBlastResultsWithProgress(ctx, jobID, 3*time.Second, 5*time.Minute)
+			results, err = w.waitForBlastResultsWithProgress(ctx, jobID, pollInterval, 5*time.Minute)
 		}
 		if err == nil {
 			return results, nil
@@ -6268,6 +6991,29 @@ func (w *BlastWizard) waitForBlastResultsWithRetry(ctx context.Context, jobID st
 		if !retry {
 			return model.BlastResult{}, err
 		}
+	}
+}
+
+func blastResultsPollInterval(src source.DataSource) time.Duration {
+	if configured := configuredInt("PHYTOZOME_GO_BLAST_POLL_MS", 0); configured > 0 {
+		return time.Duration(configured) * time.Millisecond
+	}
+	if src == nil {
+		return 2 * time.Second
+	}
+	switch strings.ToLower(strings.TrimSpace(src.Name())) {
+	case "phytozome":
+		if configured := configuredInt("PHYTOZOME_GO_PHY_BLAST_POLL_MS", 0); configured > 0 {
+			return time.Duration(configured) * time.Millisecond
+		}
+		return time.Second
+	case "lemna":
+		if configured := configuredInt("PHYTOZOME_GO_LEMNA_BLAST_POLL_MS", 0); configured > 0 {
+			return time.Duration(configured) * time.Millisecond
+		}
+		return 2 * time.Second
+	default:
+		return 2 * time.Second
 	}
 }
 
@@ -6328,9 +7074,9 @@ func (w *BlastWizard) exportSelectionsWithRetry(ctx context.Context, rows []mode
 	}
 }
 
-func (w *BlastWizard) exportKeywordSelectionsWithRetry(ctx context.Context, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext) error {
+func (w *BlastWizard) exportKeywordSelectionsWithRetry(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext) error {
 	for {
-		err := w.exportKeywordSelections(ctx, rows, allRows, groups, baseName, outputDir, settings, reportCtx)
+		err := w.exportKeywordSelections(ctx, selected, rows, allRows, groups, baseName, outputDir, settings, reportCtx)
 		if err == nil {
 			return nil
 		}
@@ -6355,14 +7101,14 @@ func flattenKeywordSearchGroups(groups []model.KeywordSearchGroup) []model.Keywo
 	return out
 }
 
-func (w *BlastWizard) prepareAndExportKeywordSelection(ctx context.Context, groups []model.KeywordSearchGroup, rows []model.KeywordResultRow, reportCtx *keywordReportRunContext) error {
+func (w *BlastWizard) prepareAndExportKeywordSelection(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, rows []model.KeywordResultRow, reportCtx *keywordReportRunContext) error {
 	exportRows := append([]model.KeywordResultRow(nil), rows...)
 	settings, err := w.prepareExportSettings(defaultKeywordExportLabel(exportRows, groups), false, true, false)
 	if err != nil {
 		return err
 	}
 	baseName := settings.BaseName
-	if err := w.exportKeywordSelectionsWithRetry(ctx, exportRows, flattenKeywordSearchGroups(groups), groups, baseName, settings.OutputDir, settings, reportCtx); err != nil {
+	if err := w.exportKeywordSelectionsWithRetry(ctx, selected, exportRows, flattenKeywordSearchGroups(groups), groups, baseName, settings.OutputDir, settings, reportCtx); err != nil {
 		return err
 	}
 	return nil
@@ -6373,18 +7119,36 @@ func (w *BlastWizard) retryWorkflowStep(description string, backTarget error) (b
 	if err != nil {
 		return false, err
 	}
+	decision, navErr := interpretRecoveryAction(action, backTarget, false)
+	if navErr != nil {
+		return false, navErr
+	}
+	return decision == recoveryRetry, nil
+}
+
+func interpretRecoveryAction(action string, backTarget error, allowSkip bool) (recoveryDecision, error) {
 	switch action {
 	case "retry":
-		return true, nil
+		return recoveryRetry, nil
+	case "skip":
+		if allowSkip {
+			return recoverySkip, nil
+		}
+		return 0, fmt.Errorf("unsupported recovery action %q", action)
 	case "back", "close":
 		if backTarget != nil {
-			return false, backTarget
+			return recoveryBack, backTarget
 		}
-		return false, prompt.ErrBackToQueryInput
+		return recoveryBack, prompt.ErrBackToQueryInput
 	case "exit":
-		return false, prompt.ErrExitRequested
+		return recoveryExit, prompt.ErrExitRequested
+	case "":
+		if backTarget != nil {
+			return recoveryBack, backTarget
+		}
+		return recoveryBack, prompt.ErrBackToQueryInput
 	default:
-		return false, nil
+		return 0, fmt.Errorf("unsupported recovery action %q", action)
 	}
 }
 
@@ -6531,7 +7295,7 @@ func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context,
 		labelCtx := mergeContexts(ctx, taskCtx)
 		taskUpdate("Reviewing keyword result rows...")
 		working := cloneKeywordSearchGroups(groups)
-		if _, ok := w.source.(*lemna.Client); ok {
+		if _, ok := w.source.(*lemna.Client); ok && keywordGroupsNeedLabelFallback(working) {
 			taskUpdate("Searching Phytozome fallback labels...")
 			working = w.enrichKeywordLabelsFromPhytozome(labelCtx, selected, working)
 		}
@@ -6562,12 +7326,37 @@ func autoIdentifyKeywordGroupLabel(group model.KeywordSearchGroup) string {
 	return ""
 }
 
+func keywordGroupsNeedLabelFallback(groups []model.KeywordSearchGroup) bool {
+	for _, group := range groups {
+		if autoIdentifyKeywordGroupLabel(group) != "" {
+			continue
+		}
+		needsFallback := false
+		for _, row := range group.Rows {
+			if strings.TrimSpace(firstNonEmpty(row.GeneIdentifier, row.TranscriptID, row.SequenceID)) != "" {
+				needsFallback = true
+				break
+			}
+		}
+		if needsFallback {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *BlastWizard) enrichKeywordLabelsFromPhytozome(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup) []model.KeywordSearchGroup {
+	return w.enrichKeywordLabelsFromSource(ctx, selected, groups, phytozome.NewClient(w.httpClient))
+}
+
+func (w *BlastWizard) enrichKeywordLabelsFromSource(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, lookupSource source.DataSource) []model.KeywordSearchGroup {
 	if _, ok := w.source.(*lemna.Client); !ok {
 		return groups
 	}
-	phytozomeSource := phytozome.NewClient(w.httpClient)
-	phytozomeCandidates, err := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
+	if lookupSource == nil {
+		return groups
+	}
+	phytozomeCandidates, err := w.speciesCandidatesForSource(ctx, lookupSource, nil)
 	if err != nil {
 		return groups
 	}
@@ -6577,9 +7366,26 @@ func (w *BlastWizard) enrichKeywordLabelsFromPhytozome(ctx context.Context, sele
 	}
 
 	out := cloneKeywordSearchGroups(groups)
+	type pendingLookup struct {
+		groupIndex int
+		rowIndex   int
+	}
+	lookupPositions := make(map[string][]pendingLookup)
 	for i := range out {
 		groupLabel := strings.TrimSpace(out[i].LabelName)
+		if groupLabel == "" {
+			groupLabel = autoIdentifyKeywordGroupLabel(out[i])
+			if groupLabel != "" {
+				out[i].LabelName = groupLabel
+			}
+		}
 		for r := range out[i].Rows {
+			if groupLabel != "" {
+				if strings.TrimSpace(out[i].Rows[r].LabelName) == "" {
+					out[i].Rows[r].LabelName = groupLabel
+				}
+				continue
+			}
 			if label := rowKeywordLabelName(out[i].Rows[r]); label != "" {
 				if groupLabel == "" {
 					groupLabel = label
@@ -6590,21 +7396,78 @@ func (w *BlastWizard) enrichKeywordLabelsFromPhytozome(ctx context.Context, sele
 			if searchTerm == "" {
 				continue
 			}
-			rows, err := phytozomeSource.SearchKeywordRows(ctx, phytozomeSpecies, searchTerm)
-			if err != nil {
-				continue
-			}
-			label := keywordLabelFromPhytozomeRows(rows)
-			if label == "" {
-				continue
-			}
-			out[i].Rows[r].LabelName = label
-			if groupLabel == "" {
-				groupLabel = label
-			}
+			lookupPositions[searchTerm] = append(lookupPositions[searchTerm], pendingLookup{groupIndex: i, rowIndex: r})
 		}
 		if groupLabel != "" {
 			out[i].LabelName = groupLabel
+		}
+	}
+
+	if len(lookupPositions) == 0 {
+		return out
+	}
+
+	terms := make([]string, 0, len(lookupPositions))
+	for term := range lookupPositions {
+		terms = append(terms, term)
+	}
+	sort.Strings(terms)
+
+	labelsByTerm := make(map[string]string, len(terms))
+	for start := 0; start < len(terms); {
+		if ctx != nil && ctx.Err() != nil {
+			return out
+		}
+		remaining := len(terms) - start
+		batchSize := keywordSearchWorkerCount(remaining)
+		if batchSize <= 0 {
+			break
+		}
+		if batchSize > remaining {
+			batchSize = remaining
+		}
+		batch := terms[start : start+batchSize]
+		results := make([]string, len(batch))
+		var wg sync.WaitGroup
+		for index, term := range batch {
+			wg.Add(1)
+			go func(batchIndex int, searchTerm string) {
+				defer wg.Done()
+				if ctx != nil && ctx.Err() != nil {
+					return
+				}
+				if cached, ok := w.cachedKeywordLabelLookup(lookupSource, phytozomeSpecies, searchTerm); ok {
+					results[batchIndex] = cached
+					return
+				}
+				rows, err := lookupSource.SearchKeywordRows(ctx, phytozomeSpecies, searchTerm)
+				if err != nil {
+					return
+				}
+				label := keywordLabelFromPhytozomeRows(rows)
+				w.storeKeywordLabelLookup(lookupSource, phytozomeSpecies, searchTerm, label)
+				results[batchIndex] = label
+			}(index, term)
+		}
+		wg.Wait()
+		for index, term := range batch {
+			if label := strings.TrimSpace(results[index]); label != "" {
+				labelsByTerm[term] = label
+			}
+		}
+		start += batchSize
+	}
+
+	for term, positions := range lookupPositions {
+		label := strings.TrimSpace(labelsByTerm[term])
+		if label == "" {
+			continue
+		}
+		for _, position := range positions {
+			out[position.groupIndex].Rows[position.rowIndex].LabelName = label
+			if strings.TrimSpace(out[position.groupIndex].LabelName) == "" {
+				out[position.groupIndex].LabelName = label
+			}
 		}
 	}
 	return out
@@ -7430,28 +8293,41 @@ func (w *BlastWizard) exportSelections(ctx context.Context, rows []model.BlastRe
 	return err
 }
 
-func (w *BlastWizard) exportKeywordSelections(ctx context.Context, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext) error {
-	return w.exportSelectedKeywordFiles(ctx, rows, allRows, groups, baseName, outputDir, settings, reportCtx, true)
+func (w *BlastWizard) exportKeywordSelections(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext) error {
+	return w.exportSelectedKeywordFiles(ctx, selected, rows, allRows, groups, baseName, outputDir, settings, reportCtx, true)
 }
 
 func (w *BlastWizard) exportSelectedBlastFiles(ctx context.Context, rows []model.BlastResultRow, allRows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, querySource *model.QuerySequenceSource, baseName string, outputDir string, settings exportSettings, showComplete bool) (exportFileResult, error) {
 	return w.exportBlastSelectionsToDir(ctx, rows, allRows, rowNumbers, filterFlags, querySource, baseName, baseName, sanitizeExportName(baseName), outputDir, settings, showComplete)
 }
 
-func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext, showComplete bool) error {
+func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, allRows []model.KeywordResultRow, groups []model.KeywordSearchGroup, baseName string, outputDir string, settings exportSettings, reportCtx *keywordReportRunContext, showComplete bool) error {
 	files := exportFileResult{}
 	exportStarted := time.Now()
 	steps := make([]report.GenerationStep, 0, 8)
+	var selectedTextRecords []model.ProteinSequenceRecord
+	selectedTextReady := false
 	if settings.WriteExcel {
 		excelPath := filepath.Join(outputDir, baseName+".xlsx")
 		stepStart := time.Now()
-		if err := withSpinner(w.out, "Writing selected keyword Excel file...", func() error {
-			return export.WriteKeywordResultsExcel(excelPath, rows)
-		}); err != nil {
-			steps = append(steps, keywordReportStep("Write selected Excel", stepStart, time.Now(), "failed", err.Error()))
-			return err
+		if settings.WriteText {
+			records, err := w.exportKeywordExcelAndFetchRecords(ctx, selected, rows, excelPath)
+			if err != nil {
+				steps = append(steps, keywordReportStep("Write selected Excel and fetch peptide sequences", stepStart, time.Now(), "failed", err.Error()))
+				return err
+			}
+			selectedTextRecords = records
+			selectedTextReady = true
+			steps = append(steps, keywordReportStep("Write selected Excel and fetch peptide sequences", stepStart, time.Now(), "ok", fmt.Sprintf("%d selected rows written; %d peptide records available", len(rows), len(records))))
+		} else {
+			if err := withSpinner(w.out, "Writing selected keyword Excel file...", func() error {
+				return export.WriteKeywordResultsExcel(excelPath, rows)
+			}); err != nil {
+				steps = append(steps, keywordReportStep("Write selected Excel", stepStart, time.Now(), "failed", err.Error()))
+				return err
+			}
+			steps = append(steps, keywordReportStep("Write selected Excel", stepStart, time.Now(), "ok", fmt.Sprintf("%d selected rows written", len(rows))))
 		}
-		steps = append(steps, keywordReportStep("Write selected Excel", stepStart, time.Now(), "ok", fmt.Sprintf("%d selected rows written", len(rows))))
 		files.ExcelPath = excelPath
 	}
 	if settings.WriteRawExcel {
@@ -7472,7 +8348,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 		if settings.WriteRawExcel {
 			preloadRows = allRows
 		}
-		w.prefetchKeywordSequences(ctx, preloadRows, nil)
+		w.prefetchKeywordSequences(ctx, selected, preloadRows, nil)
 		steps = append(steps, keywordReportStep("Preload keyword peptide sequences", preloadStart, time.Now(), "ok", fmt.Sprintf("%d keyword rows checked before writing text files", len(preloadRows))))
 	}
 	if settings.WriteRawExcel && settings.WriteText {
@@ -7483,9 +8359,9 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 			err        error
 		)
 		if w.suppressTaskModals {
-			rawRecords, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, allRows, nil)
+			rawRecords, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, selected, allRows, nil)
 		} else {
-			rawRecords, err = w.fetchKeywordProteinSequenceRecords(ctx, allRows)
+			rawRecords, err = w.fetchKeywordProteinSequenceRecords(ctx, selected, allRows)
 		}
 		if err != nil {
 			steps = append(steps, keywordReportStep("Fetch/use raw peptide sequences", fetchStart, time.Now(), "failed", err.Error()))
@@ -7506,23 +8382,25 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 	var sequenceAudit report.SequenceAudit
 	if settings.WriteText {
 		textPath := filepath.Join(outputDir, baseName+".txt")
-		fetchStart := time.Now()
-		var (
-			records []model.ProteinSequenceRecord
-			err     error
-		)
-		if w.suppressTaskModals {
-			records, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, rows, nil)
+		records := selectedTextRecords
+		if !selectedTextReady {
+			fetchStart := time.Now()
+			var err error
+			if w.suppressTaskModals {
+				records, err = w.fetchKeywordProteinSequenceRecordsWithProgress(ctx, selected, rows, nil)
+			} else {
+				records, err = w.fetchKeywordProteinSequenceRecords(ctx, selected, rows)
+			}
+			if err != nil {
+				steps = append(steps, keywordReportStep("Fetch/use peptide sequences", fetchStart, time.Now(), "failed", err.Error()))
+				return err
+			}
+			steps = append(steps, keywordReportStep("Fetch/use peptide sequences", fetchStart, time.Now(), "ok", fmt.Sprintf("%d sequence records available", len(records))))
 		} else {
-			records, err = w.fetchKeywordProteinSequenceRecords(ctx, rows)
-		}
-		if err != nil {
-			steps = append(steps, keywordReportStep("Fetch/use peptide sequences", fetchStart, time.Now(), "failed", err.Error()))
-			return err
+			steps = append(steps, keywordReportStep("Reuse prefetched peptide sequences", time.Now(), time.Now(), "ok", fmt.Sprintf("%d sequence records reused from parallel Excel export step", len(records))))
 		}
 		sequenceRecords = records
 		sequenceAudit = buildKeywordSequenceAudit(rows, records)
-		steps = append(steps, keywordReportStep("Fetch/use peptide sequences", fetchStart, time.Now(), "ok", fmt.Sprintf("%d sequence records available", len(records))))
 		writeStart := time.Now()
 		if err := withSpinner(w.out, "Writing peptide text file...", func() error {
 			return export.WriteProteinSequencesText(textPath, records)
@@ -7548,7 +8426,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, rows []mod
 	return nil
 }
 
-func (w *BlastWizard) exportKeywordExcelAndFetchRecords(ctx context.Context, rows []model.KeywordResultRow, excelPath string) ([]model.ProteinSequenceRecord, error) {
+func (w *BlastWizard) exportKeywordExcelAndFetchRecords(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, excelPath string) ([]model.ProteinSequenceRecord, error) {
 	return tui.RunProgressTaskValueContext(tui.TaskPage{
 		Path:        w.tuiPath("Export", "Writing keyword files"),
 		Title:       "Writing keyword export files",
@@ -7566,7 +8444,7 @@ func (w *BlastWizard) exportKeywordExcelAndFetchRecords(ctx context.Context, row
 		go func() {
 			excelDone <- excelResult{err: export.WriteKeywordResultsExcel(excelPath, rows)}
 		}()
-		records, fetchErr := w.fetchKeywordProteinSequenceRecordsWithProgress(exportCtx, rows, func(current int, message string) {
+		records, fetchErr := w.fetchKeywordProteinSequenceRecordsWithProgress(exportCtx, selected, rows, func(current int, message string) {
 			progress(current, message)
 		})
 		excel := <-excelDone
@@ -7608,33 +8486,10 @@ func (w *BlastWizard) resolveQuerySequenceInputBatch(ctx context.Context, candid
 }
 
 func (w *BlastWizard) resolveURLQuerySequenceInput(ctx context.Context, candidates []model.SpeciesCandidate, input string, normalizedURL string) (*model.QuerySequenceSource, bool, error) {
-	jbrowseName, reportType, identifier, err := parseGeneReportURL(normalizedURL)
+	resolverSource, species, reportType, identifier, err := w.resolveGeneReportTarget(ctx, candidates, normalizedURL)
 	if err != nil {
 		return nil, false, err
 	}
-
-	resolverSource := w.source
-	resolverCandidates, err := w.speciesCandidatesForSource(ctx, resolverSource, candidates)
-	if err != nil {
-		return nil, false, fmt.Errorf("load %s species list for URL resolution: %w", resolverSource.Name(), err)
-	}
-
-	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
-	if !ok {
-		phytozomeSource := phytozome.NewClient(w.httpClient)
-		phytozomeCandidates, loadErr := w.speciesCandidatesForSource(ctx, phytozomeSource, nil)
-		if loadErr == nil {
-			if phytozomeSpecies, phytozomeOK := findSpeciesCandidateByJBrowseName(phytozomeCandidates, jbrowseName); phytozomeOK {
-				resolverSource = phytozomeSource
-				species = phytozomeSpecies
-				ok = true
-			}
-		}
-	}
-	if !ok {
-		return nil, false, fmt.Errorf("could not match gene report species %s to a known species in %s or phytozome", jbrowseName, w.source.Name())
-	}
-
 	resolveLabel := databaseDisplayName(resolverSource.Name())
 	gene, err := withSpinnerValue(w.out, "Resolving "+resolveLabel+" gene report URL...", prompt.ErrBackToQueryInput, func(taskCtx context.Context) (*model.QuerySequenceSource, error) {
 		return w.resolveGeneReportSequence(mergeContexts(ctx, taskCtx), resolverSource, species, reportType, identifier, input, normalizedURL)
@@ -7642,20 +8497,31 @@ func (w *BlastWizard) resolveURLQuerySequenceInput(ctx context.Context, candidat
 	if err != nil {
 		return nil, false, err
 	}
-
 	return gene, true, nil
 }
 
 func (w *BlastWizard) resolveURLQuerySequenceInputBatch(ctx context.Context, candidates []model.SpeciesCandidate, input string, normalizedURL string) (*model.QuerySequenceSource, bool, error) {
-	jbrowseName, reportType, identifier, err := parseGeneReportURL(normalizedURL)
+	resolverSource, species, reportType, identifier, err := w.resolveGeneReportTarget(ctx, candidates, normalizedURL)
 	if err != nil {
 		return nil, false, err
+	}
+	gene, err := w.resolveGeneReportSequence(ctx, resolverSource, species, reportType, identifier, input, normalizedURL)
+	if err != nil {
+		return nil, false, err
+	}
+	return gene, true, nil
+}
+
+func (w *BlastWizard) resolveGeneReportTarget(ctx context.Context, candidates []model.SpeciesCandidate, normalizedURL string) (source.DataSource, model.SpeciesCandidate, string, string, error) {
+	jbrowseName, reportType, identifier, err := parseGeneReportURL(normalizedURL)
+	if err != nil {
+		return nil, model.SpeciesCandidate{}, "", "", err
 	}
 
 	resolverSource := w.source
 	resolverCandidates, err := w.speciesCandidatesForSource(ctx, resolverSource, candidates)
 	if err != nil {
-		return nil, false, fmt.Errorf("load %s species list for URL resolution: %w", resolverSource.Name(), err)
+		return nil, model.SpeciesCandidate{}, "", "", fmt.Errorf("load %s species list for URL resolution: %w", resolverSource.Name(), err)
 	}
 
 	species, ok := findSpeciesCandidateByJBrowseName(resolverCandidates, jbrowseName)
@@ -7671,17 +8537,16 @@ func (w *BlastWizard) resolveURLQuerySequenceInputBatch(ctx context.Context, can
 		}
 	}
 	if !ok {
-		return nil, false, fmt.Errorf("could not match gene report species %s to a known species in %s or phytozome", jbrowseName, w.source.Name())
+		return nil, model.SpeciesCandidate{}, "", "", fmt.Errorf("could not match gene report species %s to a known species in %s or phytozome", jbrowseName, w.source.Name())
 	}
-
-	gene, err := w.resolveGeneReportSequence(ctx, resolverSource, species, reportType, identifier, input, normalizedURL)
-	if err != nil {
-		return nil, false, err
-	}
-	return gene, true, nil
+	return resolverSource, species, reportType, identifier, nil
 }
 
 func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSource source.DataSource, species model.SpeciesCandidate, reportType, identifier, input, normalizedURL string) (*model.QuerySequenceSource, error) {
+	cacheKey := w.querySourceResolveKey(resolverSource, species, reportType, identifier, normalizedURL)
+	if cached, ok := w.cachedResolvedQuerySource(cacheKey, input, normalizedURL); ok {
+		return cached, nil
+	}
 	switch reportType {
 	case "gene", "transcript":
 		resolved, err := resolverSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
@@ -7706,6 +8571,7 @@ func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSou
 		if gene.GeneID == "" {
 			gene.GeneID = identifier
 		}
+		w.storeResolvedQuerySource(cacheKey, gene)
 		return &gene, nil
 	case "protein":
 		resolver, ok := resolverSource.(source.ProteinReportResolver)
@@ -7734,10 +8600,54 @@ func (w *BlastWizard) resolveGeneReportSequence(ctx context.Context, resolverSou
 		if gene.ProteinID == "" {
 			gene.ProteinID = identifier
 		}
+		w.storeResolvedQuerySource(cacheKey, gene)
 		return &gene, nil
 	default:
 		return nil, fmt.Errorf("unsupported report URL type %q", reportType)
 	}
+}
+
+func (w *BlastWizard) querySourceResolveKey(src source.DataSource, species model.SpeciesCandidate, reportType, identifier, normalizedURL string) string {
+	sourceName := ""
+	if src != nil {
+		sourceName = src.Name()
+	}
+	return strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(sourceName)),
+		strconv.Itoa(species.ProteomeID),
+		strings.ToLower(strings.TrimSpace(species.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(reportType)),
+		strings.TrimSpace(identifier),
+		strings.TrimSpace(normalizedURL),
+	}, "|")
+}
+
+func (w *BlastWizard) cachedResolvedQuerySource(cacheKey, input, normalizedURL string) (*model.QuerySequenceSource, bool) {
+	if strings.TrimSpace(cacheKey) == "" {
+		return nil, false
+	}
+	w.querySourceResolveMu.RLock()
+	cached, ok := w.querySourceResolveCache[cacheKey]
+	w.querySourceResolveMu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	copySource := cached
+	copySource.OriginalInputURL = strings.TrimSpace(input)
+	copySource.NormalizedURL = normalizedURL
+	return &copySource, true
+}
+
+func (w *BlastWizard) storeResolvedQuerySource(cacheKey string, source model.QuerySequenceSource) {
+	if strings.TrimSpace(cacheKey) == "" {
+		return
+	}
+	w.querySourceResolveMu.Lock()
+	if w.querySourceResolveCache == nil {
+		w.querySourceResolveCache = make(map[string]model.QuerySequenceSource)
+	}
+	w.querySourceResolveCache[cacheKey] = source
+	w.querySourceResolveMu.Unlock()
 }
 
 func (w *BlastWizard) fetchProteinSequenceRecords(ctx context.Context, rows []model.BlastResultRow) ([]model.ProteinSequenceRecord, error) {
@@ -7793,7 +8703,7 @@ func (w *BlastWizard) fetchProteinSequenceRecordsWithProgress(ctx context.Contex
 	return records, nil
 }
 
-func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, rows []model.KeywordResultRow) ([]model.ProteinSequenceRecord, error) {
+func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow) ([]model.ProteinSequenceRecord, error) {
 	return tui.RunProgressTaskValueContext(tui.TaskPage{
 		Path:        w.tuiPath("Export", "Fetching keyword peptides"),
 		Title:       "Fetching keyword peptide sequences",
@@ -7802,15 +8712,15 @@ func (w *BlastWizard) fetchKeywordProteinSequenceRecords(ctx context.Context, ro
 		Total:       len(rows),
 		CancelError: prompt.ErrBackToRowSelection,
 	}, func(taskCtx context.Context, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
-		return w.fetchKeywordProteinSequenceRecordsWithProgress(mergeContexts(ctx, taskCtx), rows, update)
+		return w.fetchKeywordProteinSequenceRecordsWithProgress(mergeContexts(ctx, taskCtx), selected, rows, update)
 	})
 }
 
-func (w *BlastWizard) fetchKeywordProteinSequenceRecordsWithProgress(ctx context.Context, rows []model.KeywordResultRow, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
+func (w *BlastWizard) fetchKeywordProteinSequenceRecordsWithProgress(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, update func(int, string)) ([]model.ProteinSequenceRecord, error) {
 	progress := safeProgress(update)
 	records := make([]model.ProteinSequenceRecord, 0, len(rows))
 
-	results := w.prefetchKeywordSequences(ctx, rows, update)
+	results := w.prefetchKeywordSequences(ctx, selected, rows, update)
 
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -8025,11 +8935,12 @@ func (w *BlastWizard) prefetchBlastSequences(ctx context.Context, rows []model.B
 	return results
 }
 
-func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model.KeywordResultRow, update func(int, string)) map[string]sequenceFetchResult {
+func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow, update func(int, string)) map[string]sequenceFetchResult {
 	progress := safeProgress(update)
 	taskIDs := make([]string, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	results := make(map[string]sequenceFetchResult, len(rows))
+	targetID := keywordSequenceFetchTargetID(w.source, selected)
 	for _, row := range rows {
 		sequenceID := strings.TrimSpace(row.SequenceID)
 		if sequenceID == "" {
@@ -8039,7 +8950,7 @@ func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model
 			continue
 		}
 		seen[sequenceID] = struct{}{}
-		cacheKey := w.proteinSequenceCacheKey(0, sequenceID)
+		cacheKey := w.proteinSequenceCacheKey(targetID, sequenceID)
 		if sequence, ok := w.cachedProteinSequence(cacheKey); ok {
 			results[sequenceID] = sequenceFetchResult{sequence: sequence}
 			continue
@@ -8062,7 +8973,7 @@ func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model
 		go func() {
 			defer workers.Done()
 			for sequenceID := range jobs {
-				sequence, err := w.fetchProteinSequenceCached(ctx, 0, sequenceID)
+				sequence, err := w.fetchProteinSequenceCached(ctx, targetID, sequenceID)
 				mu.Lock()
 				results[sequenceID] = sequenceFetchResult{sequence: sequence, err: err}
 				mu.Unlock()
@@ -8093,6 +9004,16 @@ func (w *BlastWizard) prefetchKeywordSequences(ctx context.Context, rows []model
 		progress(completedCount, fmt.Sprintf("Fetching keyword peptide sequences... %d/%d", completedCount, len(taskIDs)))
 	}
 	return results
+}
+
+func keywordSequenceFetchTargetID(src source.DataSource, selected model.SpeciesCandidate) int {
+	if src == nil {
+		return 0
+	}
+	if _, ok := src.(*lemna.Client); ok {
+		return selected.ProteomeID
+	}
+	return selected.ProteomeID
 }
 
 func buildExportMetadata(baseName string, querySource *model.QuerySequenceSource) *model.ExportMetadata {
@@ -8529,91 +9450,172 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (w *BlastWizard) searchKeywordGroups(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string, forceWideSearch bool) ([]model.KeywordSearchGroup, error) {
-	return tui.RunProgressTaskValueContext(tui.TaskPage{
-		Path:        w.tuiPath("Keyword", "Searching"),
-		Title:       "Searching keyword terms",
-		Description: "Searching annotation rows for each keyword.",
-		Initial:     "Searching keyword terms...",
-		Total:       len(keywords),
-		CancelError: prompt.ErrBackToQueryInput,
-	}, func(taskCtx context.Context, update func(int, string)) ([]model.KeywordSearchGroup, error) {
-		return w.searchKeywordGroupsWithProgress(mergeContexts(ctx, taskCtx), species, keywords, identifications, forceWideSearch, update)
-	})
+	if len(identifications) != 0 && len(identifications) != len(keywords) {
+		return nil, fmt.Errorf("keyword label_name count %d does not match keyword count %d", len(identifications), len(keywords))
+	}
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+
+	results := make([]keywordSearchResult, len(keywords))
+	resumeIndex := 0
+	for resumeIndex < len(keywords) {
+		partialResults, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+			Path:        w.tuiPath("Keyword", "Searching"),
+			Title:       "Searching keyword terms",
+			Description: "Searching annotation rows for each keyword.",
+			Initial:     "Searching keyword terms...",
+			Total:       len(keywords),
+			CancelError: prompt.ErrBackToQueryInput,
+		}, func(taskCtx context.Context, update func(int, string)) ([]keywordSearchResult, error) {
+			return w.searchKeywordResultsWithProgress(mergeContexts(ctx, taskCtx), species, keywords, results, resumeIndex, forceWideSearch, update)
+		})
+		if partialResults != nil {
+			results = partialResults
+		}
+		if err == nil {
+			break
+		}
+
+		var recoverErr *keywordSearchRecoveryError
+		if !errors.As(err, &recoverErr) {
+			return nil, err
+		}
+		action, actionErr := w.prompt.FetchErrorAction(recoverErr.Error(), prompt.ErrBackToQueryInput)
+		if actionErr != nil {
+			return nil, actionErr
+		}
+		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, true)
+		if navErr != nil {
+			return nil, navErr
+		}
+		switch decision {
+		case recoveryRetry:
+			resumeIndex = recoverErr.Index
+		case recoverySkip:
+			skipped := recoverErr.Result
+			skipped.err = nil
+			skipped.rows = nil
+			results[recoverErr.Index] = skipped
+			resumeIndex = recoverErr.Index + 1
+		default:
+			return nil, fmt.Errorf("unsupported keyword recovery action %q", action)
+		}
+	}
+
+	return buildKeywordSearchGroups(keywords, identifications, results, forceWideSearch), nil
 }
 
 func (w *BlastWizard) searchKeywordGroupsWithProgress(ctx context.Context, species model.SpeciesCandidate, keywords []string, identifications []string, forceWideSearch bool, update func(int, string)) ([]model.KeywordSearchGroup, error) {
-	progress := safeProgress(update)
 	if len(identifications) != 0 && len(identifications) != len(keywords) {
 		return nil, fmt.Errorf("keyword label_name count %d does not match keyword count %d", len(identifications), len(keywords))
 	}
 
-	type keywordSearchResult struct {
-		index   int
-		started time.Time
-		ended   time.Time
-		rows    []model.KeywordResultRow
-		err     error
+	results, err := w.searchKeywordResultsWithProgress(ctx, species, keywords, make([]keywordSearchResult, len(keywords)), 0, forceWideSearch, update)
+	if err != nil {
+		return nil, err
+	}
+	return buildKeywordSearchGroups(keywords, identifications, results, forceWideSearch), nil
+}
+
+func (w *BlastWizard) searchKeywordResultsWithProgress(ctx context.Context, species model.SpeciesCandidate, keywords []string, existing []keywordSearchResult, startIndex int, forceWideSearch bool, update func(int, string)) ([]keywordSearchResult, error) {
+	progress := safeProgress(update)
+	results := append([]keywordSearchResult(nil), existing...)
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	completedCount := countCompletedKeywordResults(results)
+	if completedCount < startIndex {
+		completedCount = startIndex
+	}
+	progress(completedCount, "Searching keyword terms...")
+
+	pending := make([]int, 0, len(keywords)-startIndex)
+	for i := startIndex; i < len(keywords); i++ {
+		if keywordSearchResultCompleted(results[i]) {
+			continue
+		}
+		pending = append(pending, i)
 	}
 
-	groups := make([]model.KeywordSearchGroup, len(keywords))
-	progress(0, "Searching keyword terms...")
+	var progressMu sync.Mutex
+	advanceProgress := func() {
+		progressMu.Lock()
+		completedCount++
+		current := completedCount
+		progressMu.Unlock()
+		progress(current, fmt.Sprintf("Searching keyword terms... %d/%d", current, len(keywords)))
+	}
 
-	results := make([]keywordSearchResult, len(keywords))
-	jobs := make(chan int)
-	outcomes := make(chan keywordSearchResult, len(keywords))
-	workerCount := maxInt(parallelismFor(len(keywords), maxParallelKeywordJobs), networkParallelismFor(len(keywords)))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for idx := range jobs {
+	for cursor := 0; cursor < len(pending); {
+		remaining := len(pending) - cursor
+		batchSize := keywordSearchWorkerCount(remaining)
+		if batchSize <= 0 {
+			break
+		}
+		if batchSize > remaining {
+			batchSize = remaining
+		}
+		batch := pending[cursor : cursor+batchSize]
+		batchResults := make([]keywordSearchResult, len(batch))
+		var wg sync.WaitGroup
+		for batchIndex, keywordIndex := range batch {
+			wg.Add(1)
+			go func(batchPosition int, resultIndex int) {
+				defer wg.Done()
 				started := time.Now()
-				rows, err := w.searchKeywordRowsWithTimeout(ctx, species, keywords[idx], forceWideSearch)
-				outcomes <- keywordSearchResult{index: idx, started: started, ended: time.Now(), rows: rows, err: err}
+				rows, err := w.searchKeywordRowsWithTimeout(ctx, species, keywords[resultIndex], forceWideSearch)
+				result := keywordSearchResult{
+					index:   resultIndex,
+					started: started,
+					ended:   time.Now(),
+					rows:    rows,
+					err:     err,
+				}
+				results[resultIndex] = result
+				batchResults[batchPosition] = result
+				if err == nil {
+					advanceProgress()
+				}
+			}(batchIndex, keywordIndex)
+		}
+		wg.Wait()
+		for batchIndex, keywordIndex := range batch {
+			result := batchResults[batchIndex]
+			if isKeywordSearchControlError(result.err) {
+				return results, result.err
 			}
-		}()
-	}
-
-	go func() {
-		for i := range keywords {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				workers.Wait()
-				close(outcomes)
-				return
-			case jobs <- i:
+			if result.err != nil {
+				return results, &keywordSearchRecoveryError{
+					Result:  result,
+					Keyword: keywords[keywordIndex],
+					Index:   keywordIndex,
+					Total:   len(keywords),
+					Err:     result.err,
+				}
 			}
 		}
-		close(jobs)
-		workers.Wait()
-		close(outcomes)
-	}()
+		cursor += batchSize
+	}
+	progress(len(keywords), "Keyword search completed.")
+	return results, nil
+}
 
-	doneCount := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case result, ok := <-outcomes:
-			if !ok {
-				goto keywordResultsDone
-			}
-			results[result.index] = result
-			doneCount++
-			progress(doneCount, fmt.Sprintf("Searching keyword terms... %d/%d", doneCount, len(keywords)))
+func (w *BlastWizard) searchKeywordRowsWithTimeout(ctx context.Context, species model.SpeciesCandidate, keyword string, forceWideSearch bool) ([]model.KeywordResultRow, error) {
+	searchCtx, cancel := context.WithTimeout(ctx, keywordSearchTimeout)
+	defer cancel()
+	if forceWideSearch {
+		if wideSource, ok := w.source.(wideKeywordSearcher); ok {
+			return wideSource.SearchKeywordRowsWide(searchCtx, species, keyword)
 		}
 	}
+	return w.source.SearchKeywordRows(searchCtx, species, keyword)
+}
 
-keywordResultsDone:
+func buildKeywordSearchGroups(keywords []string, identifications []string, results []keywordSearchResult, forceWideSearch bool) []model.KeywordSearchGroup {
+	groups := make([]model.KeywordSearchGroup, len(keywords))
 	for i, keyword := range keywords {
-		rows := results[i].rows
-		err := results[i].err
-		for err != nil {
-			return nil, fmt.Errorf("keyword %d/%d (%s): %w", i+1, len(keywords), keyword, err)
-		}
+		rows := append([]model.KeywordResultRow(nil), results[i].rows...)
 		labelName := ""
 		if len(identifications) == len(keywords) {
 			labelName = identifications[i]
@@ -8641,19 +9643,7 @@ keywordResultsDone:
 			Rows:             rows,
 		}
 	}
-	progress(len(keywords), "Keyword search completed.")
-	return groups, nil
-}
-
-func (w *BlastWizard) searchKeywordRowsWithTimeout(ctx context.Context, species model.SpeciesCandidate, keyword string, forceWideSearch bool) ([]model.KeywordResultRow, error) {
-	searchCtx, cancel := context.WithTimeout(ctx, keywordSearchTimeout)
-	defer cancel()
-	if forceWideSearch {
-		if wideSource, ok := w.source.(wideKeywordSearcher); ok {
-			return wideSource.SearchKeywordRowsWide(searchCtx, species, keyword)
-		}
-	}
-	return w.source.SearchKeywordRows(searchCtx, species, keyword)
+	return groups
 }
 
 func keywordRowsSearchType(rows []model.KeywordResultRow, keyword string, forceWideSearch bool) string {

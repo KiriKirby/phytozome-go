@@ -1,3 +1,10 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package prompt
 
 import (
@@ -501,6 +508,7 @@ var ErrExitRequested = errors.New("exit requested")
 type KeywordRowSelection struct {
 	Rows         []model.KeywordResultRow
 	GenerateFile bool
+	RunBlast     bool
 }
 
 type BlastRowSelection struct {
@@ -721,6 +729,31 @@ func (p *Prompter) ChooseMode() (string, error) {
 		return "", err
 	}
 	if navErr := tuiNavError(result.Nav, ErrBackToDatabaseSelection); navErr != nil {
+		return "", navErr
+	}
+	if result.Value == "" {
+		return "", ErrExitRequested
+	}
+	return result.Value, nil
+}
+
+func (p *Prompter) ChooseBlastTargetDatabase() (string, error) {
+	result, err := tui.RunChoicePage(tui.ChoicePage{
+		Path:        p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "BLAST target database"),
+		Title:       p.t("BLAST target database:"),
+		Description: p.t("Choose the database to BLAST the selected keyword rows against."),
+		Choices: []tui.Choice{
+			{Value: "phytozome", Label: "phytozome", Description: p.t("original Phytozome workflow")},
+			{Value: "lemna", Label: "lemna", Description: p.t("lemna.org download-backed workflow")},
+		},
+		AllowBack:   true,
+		AllowHome:   true,
+		ConfirmText: tui.ButtonSelect,
+	})
+	if err != nil {
+		return "", err
+	}
+	if navErr := tuiNavError(result.Nav, ErrBackToRowSelection); navErr != nil {
 		return "", navErr
 	}
 	if result.Value == "" {
@@ -2631,7 +2664,7 @@ func (p *Prompter) KeywordInput() (KeywordInputResult, error) {
 	secondaryText := ""
 	secondaryShortcut := ""
 	secondaryAction := ""
-	if p.phytozomeContext() {
+	if p.keywordWideSearchContext() {
 		secondaryText = tui.ButtonWideSearch
 		secondaryShortcut = tui.ShortcutWideSearch
 		secondaryAction = "wide_search"
@@ -2659,6 +2692,16 @@ func (p *Prompter) KeywordInput() (KeywordInputResult, error) {
 		WideSearch: result.Action == "wide_search",
 	}, nil
 
+}
+
+func (p *Prompter) keywordWideSearchContext() bool {
+	for _, part := range p.sessionPath {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "phytozome" || part == "lemna" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Prompter) phytozomeContext() bool {
@@ -2696,20 +2739,23 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 	}
 	for {
 		result, err := tui.RunRowSelectionPage(tui.RowSelectionPage{
-			Path:         p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "Row selection"),
-			Title:        p.t("Keyword results:"),
-			Description:  p.t("The first result under each search term is selected by default."),
-			Columns:      columns,
-			Rows:         tableRows,
-			Selected:     selected,
-			Sort:         tui.TableSort{Column: -1, Direction: tui.SortAscending},
-			GroupSort:    true,
-			GroupLabels:  groupLabels,
-			AllowBack:    true,
-			AllowHome:    true,
-			ConfirmText:  tui.ButtonView,
-			GenerateText: tui.ButtonExport,
-			State:        p.rowStates[stateKey],
+			Path:          p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "Row selection"),
+			Title:         p.t("Keyword results:"),
+			Description:   p.t("The first result under each search term is selected by default."),
+			Columns:       columns,
+			Rows:          tableRows,
+			Selected:      selected,
+			Sort:          tui.TableSort{Column: -1, Direction: tui.SortAscending},
+			GroupSort:     true,
+			GroupLabels:   groupLabels,
+			AllowBack:     true,
+			AllowHome:     true,
+			ConfirmText:   tui.ButtonView,
+			GenerateText:  tui.ButtonExport,
+			ExtraText:     tui.ButtonRunBLAST,
+			ExtraShortcut: tui.ShortcutBlast,
+			ExtraAction:   "blast",
+			State:         p.rowStates[stateKey],
 		})
 		if err != nil {
 			return KeywordRowSelection{}, err
@@ -2729,6 +2775,9 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 		}
 		if len(chosen) == 0 {
 			return KeywordRowSelection{}, fmt.Errorf("no rows selected")
+		}
+		if result.Action == "blast" {
+			return KeywordRowSelection{Rows: chosen, RunBlast: true}, nil
 		}
 		if result.GenerateFile {
 			return KeywordRowSelection{Rows: chosen, GenerateFile: true}, nil
@@ -4026,6 +4075,7 @@ func (p *Prompter) recoveryErrorAction(path []string, title string, message stri
 		Title:     title,
 		Message:   message,
 		AllowSkip: allowSkip,
+		AllowBack: backTarget != nil,
 	})
 	if err != nil {
 		return "", err

@@ -1,8 +1,16 @@
+// The contents of this file are subject to the Common Public Attribution License Version 1.0 (CPAL-1.0);
+// you may not use this file except in compliance with the License. You may obtain a copy of the License at
+// https://opensource.org/license/CPAL-1.0. Software distributed under the License is distributed on an "AS IS"
+// basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. The Original Code is phytozome GO. The
+// Initial Developer is wangsychn. All portions of the code written by wangsychn are Copyright (c) 2026
+// wangsychn. All Rights Reserved. Contributor(s): .
+
 package workflow
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -121,7 +129,7 @@ func TestInspectBlastGeneratedFilesIncludesRawText(t *testing.T) {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
 
-	files, err := inspectBlastGeneratedFilesList(context.Background(), []exportFileResult{{RawTextPath: rawTextPath}})
+	files, err := inspectBlastGeneratedFilesList(context.Background(), []exportFileResult{{RawTextPath: rawTextPath}}, report.NewGeneratedFileInspector())
 	if err != nil {
 		t.Fatalf("inspect generated files: %v", err)
 	}
@@ -140,7 +148,7 @@ func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
 
-	files, err := inspectKeywordGeneratedFiles(context.Background(), exportFileResult{RawTextPath: rawTextPath}, report.SequenceAudit{})
+	files, err := inspectKeywordGeneratedFiles(context.Background(), exportFileResult{RawTextPath: rawTextPath}, report.SequenceAudit{}, report.NewGeneratedFileInspector())
 	if err != nil {
 		t.Fatalf("inspect generated files: %v", err)
 	}
@@ -149,6 +157,32 @@ func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
 	}
 	if files[0].Name != "keyword_raw.txt" || files[0].Type != "raw peptide text" {
 		t.Fatalf("raw keyword text file metadata not captured: %#v", files[0])
+	}
+}
+
+func TestInspectGeneratedFilesReusesHashForDuplicatePath(t *testing.T) {
+	dir := t.TempDir()
+	rawTextPath := filepath.Join(dir, "shared.txt")
+	if err := os.WriteFile(rawTextPath, []byte(">shared\nMAAA\n"), 0o600); err != nil {
+		t.Fatalf("write shared text fixture: %v", err)
+	}
+
+	inspector := report.NewGeneratedFileInspector()
+	files, err := inspectBlastGeneratedFilesList(context.Background(), []exportFileResult{{
+		TextPath:    rawTextPath,
+		RawTextPath: rawTextPath,
+	}}, inspector)
+	if err != nil {
+		t.Fatalf("inspect duplicated generated files: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("generated file count = %d, want 2", len(files))
+	}
+	if files[0].SHA256 != files[1].SHA256 || files[0].SHA1 != files[1].SHA1 || files[0].MD5 != files[1].MD5 {
+		t.Fatalf("duplicate file hashes should match: %#v %#v", files[0], files[1])
+	}
+	if files[0].Type == files[1].Type {
+		t.Fatalf("duplicate path metadata should still preserve distinct export roles: %#v %#v", files[0], files[1])
 	}
 }
 
@@ -704,6 +738,24 @@ func TestAutoIdentifyKeywordLabelsUsesBestAliasCandidate(t *testing.T) {
 	}
 }
 
+func TestAutoIdentifyKeywordLabelsPrefersReadableCuratedLemnaLabel(t *testing.T) {
+	groups := []model.KeywordSearchGroup{{
+		SearchTerm: "CYP73A38",
+		Rows: []model.KeywordResultRow{{
+			LabelName:      "C4H",
+			GeneIdentifier: "Sp9509d006g002010",
+			TranscriptID:   "Sp9509d006g002010_T001",
+			Description:    "Trans-cinnamate 4-monooxygenase",
+			UniProt:        "P48522",
+		}},
+	}}
+
+	labels := autoIdentifyKeywordLabels(groups)
+	if len(labels) != 1 || labels[0] != "C4H" {
+		t.Fatalf("unexpected curated lemna auto labels: %#v", labels)
+	}
+}
+
 func TestKeywordProteinSequenceHeaderUsesLabelName(t *testing.T) {
 	row := model.KeywordResultRow{
 		LabelName:           "C4H",
@@ -1203,6 +1255,157 @@ func TestSearchKeywordGroupsCanForceWideSearch(t *testing.T) {
 	}
 }
 
+func TestSearchKeywordResultsWithProgressReturnsRecoverableError(t *testing.T) {
+	w := &BlastWizard{source: keywordMapSource{
+		errByKeyword: map[string]error{"bad": fmt.Errorf("network down")},
+	}}
+
+	results, err := w.searchKeywordResultsWithProgress(context.Background(), model.SpeciesCandidate{}, []string{"bad"}, make([]keywordSearchResult, 1), 0, false, nil)
+	if err == nil {
+		t.Fatal("expected recoverable error")
+	}
+	var recoverErr *keywordSearchRecoveryError
+	if !errors.As(err, &recoverErr) {
+		t.Fatalf("expected keywordSearchRecoveryError, got %T", err)
+	}
+	if recoverErr.Index != 0 || recoverErr.Keyword != "bad" {
+		t.Fatalf("unexpected recoverable error payload: %#v", recoverErr)
+	}
+	if len(results) != 1 || results[0].err == nil {
+		t.Fatalf("expected partial results to preserve failure: %#v", results)
+	}
+}
+
+func TestSearchKeywordResultsWithProgressPreservesCompletedResultsAcrossParallelFailure(t *testing.T) {
+	w := &BlastWizard{source: keywordMapSource{
+		rowsByKeyword: map[string][]model.KeywordResultRow{
+			"ok-a": {{TranscriptID: "ok-a.1", SearchType: "keyword"}},
+			"ok-b": {{TranscriptID: "ok-b.1", SearchType: "keyword"}},
+		},
+		errByKeyword: map[string]error{
+			"bad": fmt.Errorf("network down"),
+		},
+	}}
+
+	keywords := []string{"ok-a", "bad", "ok-b"}
+	results, err := w.searchKeywordResultsWithProgress(context.Background(), model.SpeciesCandidate{}, keywords, make([]keywordSearchResult, len(keywords)), 0, false, nil)
+	if err == nil {
+		t.Fatal("expected recoverable error")
+	}
+	var recoverErr *keywordSearchRecoveryError
+	if !errors.As(err, &recoverErr) {
+		t.Fatalf("expected keywordSearchRecoveryError, got %T", err)
+	}
+	if recoverErr.Index != 1 || recoverErr.Keyword != "bad" {
+		t.Fatalf("unexpected recoverable error payload: %#v", recoverErr)
+	}
+	if len(results[0].rows) != 1 || results[0].err != nil {
+		t.Fatalf("first result should stay completed: %#v", results[0])
+	}
+	if results[1].err == nil {
+		t.Fatalf("second result should preserve the failure: %#v", results[1])
+	}
+	if len(results[2].rows) != 1 || results[2].err != nil {
+		t.Fatalf("third result should still be allowed to complete within the bounded batch: %#v", results[2])
+	}
+}
+
+func TestBuildKeywordSearchGroupsKeepsSkippedGroupEmpty(t *testing.T) {
+	now := time.Now()
+	groups := buildKeywordSearchGroups([]string{"PAL"}, nil, []keywordSearchResult{{
+		index:   0,
+		started: now.Add(-time.Second),
+		ended:   now,
+		rows:    nil,
+	}}, false)
+	if len(groups) != 1 {
+		t.Fatalf("unexpected group count: %#v", groups)
+	}
+	if groups[0].SearchTerm != "PAL" {
+		t.Fatalf("unexpected search term: %#v", groups[0])
+	}
+	if len(groups[0].Rows) != 0 {
+		t.Fatalf("skipped keyword should keep empty rows: %#v", groups[0])
+	}
+	if strings.TrimSpace(groups[0].SearchType) == "" {
+		t.Fatalf("skipped keyword should still infer a search type: %#v", groups[0])
+	}
+}
+
+func TestKeywordRowsToBlastItemsReusesKeywordMetadata(t *testing.T) {
+	selected := model.SpeciesCandidate{
+		ProteomeID:  42,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+	}
+	rows := []model.KeywordResultRow{{
+		SourceDatabase:      "phytozome",
+		LabelName:           "C4H",
+		Aliases:             "AT2G30490;C4H",
+		AutoDefine:          "cinnamate 4-hydroxylase",
+		GeneIdentifier:      "AT2G30490",
+		TranscriptID:        "AT2G30490.1",
+		ProteinID:           "AT2G30490.1.p",
+		SequenceID:          "AT2G30490.1",
+		SequenceHeaderLabel: "At",
+		Description:         "cinnamate 4-hydroxylase family protein",
+		GeneReportURL:       "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+	}}
+	items := keywordRowsToBlastItems(selected, rows, map[string]sequenceFetchResult{
+		"AT2G30490.1": {sequence: "MPEPTIDE"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("blast item count = %d, want 1", len(items))
+	}
+	item := items[0]
+	if item.LabelName != "C4H" {
+		t.Fatalf("label name = %q, want C4H", item.LabelName)
+	}
+	if item.Sequence != "MPEPTIDE" {
+		t.Fatalf("sequence = %q", item.Sequence)
+	}
+	if item.RawInput != rows[0].GeneReportURL {
+		t.Fatalf("raw input = %q, want gene report URL", item.RawInput)
+	}
+	if item.QuerySource == nil {
+		t.Fatal("expected query source")
+	}
+	if item.QuerySource.TranscriptID != rows[0].TranscriptID || item.QuerySource.GeneID != rows[0].GeneIdentifier {
+		t.Fatalf("query source identifiers not reused: %#v", item.QuerySource)
+	}
+	if item.QuerySource.LabelName != "C4H" || item.QuerySource.SourceProteomeID != 42 {
+		t.Fatalf("query source metadata not reused: %#v", item.QuerySource)
+	}
+}
+
+func TestKeywordRowsToBlastItemsFallsBackWhenLabelBlank(t *testing.T) {
+	selected := model.SpeciesCandidate{ProteomeID: 7, JBrowseName: "S_polyrhiza_v2", GenomeLabel: "Spirodela polyrhiza"}
+	rows := []model.KeywordResultRow{{
+		SourceDatabase: "lemna",
+		GeneIdentifier: "Sp9509d006g002010",
+		TranscriptID:   "Sp9509d006g002010_T001",
+		SequenceID:     "Sp9509d006g002010_T001",
+	}}
+	items := keywordRowsToBlastItems(selected, rows, map[string]sequenceFetchResult{
+		"Sp9509d006g002010_T001": {sequence: "MAAA"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("blast item count = %d, want 1", len(items))
+	}
+	if items[0].LabelName != "" {
+		t.Fatalf("blank keyword label should stay blank before BLAST label flow, got %q", items[0].LabelName)
+	}
+	if items[0].QuerySource == nil || items[0].QuerySource.LabelName != "" {
+		t.Fatalf("blank keyword label should remain blank in source metadata: %#v", items[0].QuerySource)
+	}
+}
+
+func TestKeywordRowsSearchTypeFallsBackToClassifiedInputTypeWhenRowsEmpty(t *testing.T) {
+	if got := keywordRowsSearchType(nil, "F5H1", false); got == "" {
+		t.Fatal("empty keyword rows should still produce a classified search type")
+	}
+}
+
 func TestEnrichKeywordLabelsFromPhytozomeKeepsExistingLemnaLabels(t *testing.T) {
 	w := &BlastWizard{
 		source: lemna.NewClient(nil),
@@ -1224,6 +1427,145 @@ func TestEnrichKeywordLabelsFromPhytozomeKeepsExistingLemnaLabels(t *testing.T) 
 	got := w.enrichKeywordLabelsFromPhytozome(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups)
 	if got[0].LabelName != "C4H" || got[0].Rows[0].LabelName != "C4H" {
 		t.Fatalf("existing lemna label should be preserved: %#v", got)
+	}
+}
+
+func TestEnrichKeywordLabelsFromSourceDeduplicatesPhytozomeLookups(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			candidates: []model.SpeciesCandidate{
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		source: lemna.NewClient(nil),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"phytozome": {
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+		},
+	}
+	groups := []model.KeywordSearchGroup{
+		{
+			SearchTerm: "row-1",
+			Rows: []model.KeywordResultRow{{
+				ProteinID: "AT2G30490.1",
+				Aliases:   "candidate alias phrase",
+			}},
+		},
+		{
+			SearchTerm: "row-2",
+			Rows: []model.KeywordResultRow{{
+				ProteinID: "AT2G30490.1",
+				Aliases:   "candidate alias phrase",
+			}},
+		},
+	}
+
+	got := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if got[0].LabelName == "" || got[0].LabelName != got[1].LabelName {
+		t.Fatalf("expected deduplicated lookup to populate both groups: %#v", got)
+	}
+	if got[0].Rows[0].LabelName == "" || got[0].Rows[0].LabelName != got[1].Rows[0].LabelName {
+		t.Fatalf("expected deduplicated lookup to populate both rows: %#v", got)
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome lookup count = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
+	}
+}
+
+func TestEnrichKeywordLabelsFromSourceReusesWizardLookupCacheAcrossRuns(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			candidates: []model.SpeciesCandidate{
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		source: lemna.NewClient(nil),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"phytozome": {
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+		},
+		keywordLabelLookupCache: make(map[string]string),
+	}
+	groups := []model.KeywordSearchGroup{
+		{
+			SearchTerm: "row-1",
+			Rows: []model.KeywordResultRow{{
+				ProteinID: "AT2G30490.1",
+				Aliases:   "candidate alias phrase",
+			}},
+		},
+	}
+
+	first := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	second := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if strings.TrimSpace(first[0].LabelName) == "" || strings.TrimSpace(second[0].LabelName) == "" {
+		t.Fatalf("expected cached lookup to populate labels across runs: first=%#v second=%#v", first, second)
+	}
+	if first[0].LabelName != second[0].LabelName || first[0].Rows[0].LabelName != second[0].Rows[0].LabelName {
+		t.Fatalf("expected cached lookup to populate labels across runs: first=%#v second=%#v", first, second)
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome lookup count across runs = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
+	}
+}
+
+func TestEnrichKeywordLabelsFromSourceSkipsFallbackWhenLocalAliasesAlreadySuffice(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			candidates: []model.SpeciesCandidate{
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		source: lemna.NewClient(nil),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"phytozome": {
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+		},
+	}
+	groups := []model.KeywordSearchGroup{
+		{
+			SearchTerm: "row-1",
+			Rows: []model.KeywordResultRow{{
+				ProteinID:    "AT2G30490.1",
+				TranscriptID: "AT2G30490.1",
+				Aliases:      "C4H; CYP73A5",
+			}},
+		},
+	}
+
+	got := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if strings.TrimSpace(got[0].LabelName) == "" {
+		t.Fatalf("expected local alias-derived label without fallback lookup: %#v", got)
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 0 {
+		t.Fatalf("phytozome fallback lookup count = %d, want 0", lookupSource.fetchCount["AT2G30490.1"])
 	}
 }
 
@@ -1367,6 +1709,37 @@ func TestClassifyWizardBackCoversNavigationTargets(t *testing.T) {
 		if got := classifyWizardBack(tc.err); got != tc.want {
 			t.Fatalf("classifyWizardBack(%v)=%v want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestInterpretRecoveryAction(t *testing.T) {
+	tests := []struct {
+		name       string
+		action     string
+		backTarget error
+		allowSkip  bool
+		want       recoveryDecision
+		wantErr    error
+	}{
+		{name: "retry", action: "retry", want: recoveryRetry},
+		{name: "skip", action: "skip", allowSkip: true, want: recoverySkip},
+		{name: "back", action: "back", backTarget: prompt.ErrBackToRowSelection, want: recoveryBack, wantErr: prompt.ErrBackToRowSelection},
+		{name: "close uses back target", action: "close", backTarget: prompt.ErrBackToQueryInput, want: recoveryBack, wantErr: prompt.ErrBackToQueryInput},
+		{name: "exit", action: "exit", want: recoveryExit, wantErr: prompt.ErrExitRequested},
+		{name: "empty falls back", action: "", backTarget: prompt.ErrBackToQueryInput, want: recoveryBack, wantErr: prompt.ErrBackToQueryInput},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := interpretRecoveryAction(tt.action, tt.backTarget, tt.allowSkip)
+			if got != tt.want {
+				t.Fatalf("decision=%v want %v", got, tt.want)
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err=%v want %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -1720,6 +2093,7 @@ type keywordMapSource struct {
 	name          string
 	candidates    []model.SpeciesCandidate
 	rowsByKeyword map[string][]model.KeywordResultRow
+	errByKeyword  map[string]error
 }
 
 func (f keywordMapSource) Name() string { return firstNonEmpty(f.name, "fake") }
@@ -1738,6 +2112,9 @@ func (f keywordMapSource) WaitForBlastResults(ctx context.Context, jobID string,
 	return model.BlastResult{}, nil
 }
 func (f keywordMapSource) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	if err, ok := f.errByKeyword[keyword]; ok {
+		return nil, err
+	}
 	rows := append([]model.KeywordResultRow(nil), f.rowsByKeyword[keyword]...)
 	for i := range rows {
 		if rows[i].Genome == "" {
@@ -1751,6 +2128,38 @@ func (f keywordMapSource) FetchProteinSequence(ctx context.Context, targetID int
 }
 func (f keywordMapSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	return nil, nil
+}
+
+type countingKeywordMapSource struct {
+	keywordMapSource
+	mu         sync.Mutex
+	fetchCount map[string]int
+}
+
+func (f *countingKeywordMapSource) Name() string { return f.keywordMapSource.Name() }
+func (f *countingKeywordMapSource) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
+	return f.keywordMapSource.FetchSpeciesCandidates(ctx)
+}
+func (f *countingKeywordMapSource) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
+	return f.keywordMapSource.SubmitBlast(ctx, req)
+}
+func (f *countingKeywordMapSource) WaitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
+	return f.keywordMapSource.WaitForBlastResults(ctx, jobID, pollInterval, timeout)
+}
+func (f *countingKeywordMapSource) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
+	f.mu.Lock()
+	if f.fetchCount == nil {
+		f.fetchCount = make(map[string]int)
+	}
+	f.fetchCount[keyword]++
+	f.mu.Unlock()
+	return f.keywordMapSource.SearchKeywordRows(ctx, species, keyword)
+}
+func (f *countingKeywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
+	return f.keywordMapSource.FetchProteinSequence(ctx, targetID, sequenceID)
+}
+func (f *countingKeywordMapSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
+	return f.keywordMapSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
 }
 
 func TestFetchProteinSequenceRecordsSkipsMissingSequencesAndCachesMisses(t *testing.T) {
@@ -1904,6 +2313,7 @@ func TestInterProQueryLookupRowCarriesQuerySourceMetadata(t *testing.T) {
 			NormalizedURL:     "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
 			Annotation:        "Cytochrome P450",
 			OrganismShort:     "A.thaliana",
+			UniProtAccession:  "Q43158",
 		},
 	}
 
@@ -1916,6 +2326,89 @@ func TestInterProQueryLookupRowCarriesQuerySourceMetadata(t *testing.T) {
 	}
 	if row.Protein != "AT2G30490.1" {
 		t.Fatalf("Protein = %q, want query protein id", row.Protein)
+	}
+	if strings.TrimSpace(row.UniProtAccession) == "" {
+		t.Fatalf("UniProtAccession = %q, want non-empty accession from query source or resolver", row.UniProtAccession)
+	}
+}
+
+func TestKeywordRowsToBlastItemsPreservesKeywordMetadata(t *testing.T) {
+	rows := []model.KeywordResultRow{{
+		SourceDatabase:      "lemna",
+		LabelName:           "Os4CL1",
+		Aliases:             "4CL1; Os4CL1",
+		AutoDefine:          "4CL1",
+		UniProt:             "P41636",
+		GeneIdentifier:      "Sp9509d011g001470",
+		TranscriptID:        "Sp9509d011g001470_T001",
+		ProteinID:           "Sp9509d011g001470_T001",
+		SequenceID:          "Sp9509d011g001470_T001",
+		SequenceHeaderLabel: "Spirodela polyrhiza",
+		Genome:              "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		Description:         "4-coumarate--CoA ligase",
+		Comments:            "AHDR note",
+		GeneReportURL:       "https://www.lemna.org/report/Sp_polyrhiza_9509/Sp9509d011g001470",
+	}}
+	items := keywordRowsToBlastItems(model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+	}, rows, map[string]sequenceFetchResult{
+		"Sp9509d011g001470_T001": {sequence: "MPEPTIDE"},
+	})
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if items[0].QuerySource == nil {
+		t.Fatal("expected query source metadata")
+	}
+	source := items[0].QuerySource
+	if source.UniProtAccession != "P41636" {
+		t.Fatalf("UniProtAccession = %q, want P41636", source.UniProtAccession)
+	}
+	if source.OriginalInputURL != rows[0].GeneReportURL || source.NormalizedURL != rows[0].GeneReportURL {
+		t.Fatalf("expected gene report URL to be preserved, got %#v", source)
+	}
+	if source.OrganismShort != "Spirodela polyrhiza" {
+		t.Fatalf("OrganismShort = %q, want sequence header label", source.OrganismShort)
+	}
+	if source.Annotation != "4-coumarate--CoA ligase" {
+		t.Fatalf("Annotation = %q, want description", source.Annotation)
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultFromPhytozomeReusesWizardCache(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		blastLabelLookupCache: make(map[string]blastAutoLabelResult),
+	}
+	item := blastQueryItem{
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID: "AT2G30490.1",
+		},
+	}
+	species := model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10", GenomeLabel: "Arabidopsis thaliana TAIR10"}
+
+	first := w.autoIdentifyBlastLabelResultFromPhytozome(context.Background(), lookupSource, species, item)
+	second := w.autoIdentifyBlastLabelResultFromPhytozome(context.Background(), lookupSource, species, item)
+	if strings.TrimSpace(first.Label) == "" || strings.TrimSpace(second.Label) == "" {
+		t.Fatalf("expected non-empty cached label results: first=%#v second=%#v", first, second)
+	}
+	if first.Label != second.Label {
+		t.Fatalf("cached labels should match: first=%#v second=%#v", first, second)
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome label lookup count = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
 	}
 }
 
