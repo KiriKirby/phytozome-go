@@ -46,16 +46,10 @@ func OutputDir() (string, error) {
 }
 
 func CacheDir(parts ...string) (string, error) {
-	appDir, err := ApplicationDir()
+	base, err := CacheRoot()
 	if err != nil {
 		return "", err
 	}
-	base := filepath.Join(appDir, ".cache")
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		return "", fmt.Errorf("ensure cache directory: %w", err)
-	}
-	markHiddenIfSupported(base)
-
 	dir := base
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -68,6 +62,19 @@ func CacheDir(parts ...string) (string, error) {
 		return "", fmt.Errorf("ensure cache directory: %w", err)
 	}
 	return dir, nil
+}
+
+func CacheRoot() (string, error) {
+	appDir, err := ApplicationDir()
+	if err != nil {
+		return "", err
+	}
+	base := filepath.Join(appDir, ".cache")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", fmt.Errorf("ensure cache directory: %w", err)
+	}
+	markHiddenIfSupported(base)
+	return base, nil
 }
 
 func ResetRunCache() error {
@@ -118,4 +125,23 @@ func cacheRootPaths() ([]string, error) {
 		add(filepath.Join(wd, ".cache"))
 	}
 	return roots, nil
+}
+
+func RemoveCacheSubtree(parts ...string) error {
+	root, err := CacheRoot()
+	if err != nil {
+		return err
+	}
+	target := root
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		target = filepath.Join(target, part)
+	}
+	if err := os.RemoveAll(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove cache subtree %s: %w", target, err)
+	}
+	return nil
 }

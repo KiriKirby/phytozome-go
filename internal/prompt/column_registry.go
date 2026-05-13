@@ -24,18 +24,18 @@ type columnMetadata struct {
 }
 
 var keywordDisplayColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "search_type", "label_name", "transcript", "description", "genome"},
-	"lemna":     {"search_term", "label_name", "transcript", "description", "genome"},
+	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "transcript", "description", "genome"},
+	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "transcript", "description", "genome"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "search_type", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
-	"lemna":     {"search_term", "label_name", "transcript", "description", "genome", "protein_id", "gene_identifier", "location", "alias", "uniprot", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
+	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
+	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "alias", "transcript", "description", "genome", "protein_id", "gene_identifier", "location", "uniprot", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 }
 
 var keywordExportColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"row", "search_term", "search_type", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
-	"lemna":     {"row", "search_term", "label_name", "protein_id", "transcript", "gene_identifier", "genome", "location", "alias", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
+	"phytozome": {"row", "search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
+	"lemna":     {"row", "search_term", "label_name", "labelname_type", "phgo_alias", "alias", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
 }
 
 var keywordReportExtraColumnIDsByDatabase = map[string][]string{
@@ -79,13 +79,13 @@ var keywordReportExtraColumnIDsByDatabase = map[string][]string{
 
 var blastDisplayBaseColumnIDsByDatabaseProgram = map[string]map[string][]string{
 	"phytozome": {
-		"default": {"label_name", "protein", "percent_identity", "e_value", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
+		"default": {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "percent_identity", "e_value", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
 	},
 	"lemna": {
-		"BLASTN":  {"label_name", "protein", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
-		"BLASTX":  {"label_name", "protein", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
-		"TBLASTN": {"label_name", "protein", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
-		"BLASTP":  {"label_name", "protein", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
+		"BLASTN":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
+		"BLASTX":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
+		"TBLASTN": {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
+		"BLASTP":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "target_uniprot_canonical_length_percent", "align_len", "query_length", "uniprot_canonical_length", "species"},
 	},
 }
 
@@ -94,13 +94,13 @@ var blastDisplayInterProColumnIDs = []string{"interpro_entry_type", "interpro_co
 
 var blastDetailBaseColumnIDsByDatabaseProgram = map[string]map[string][]string{
 	"phytozome": {
-		"default": {"label_name", "source_database", "blast_program", "hit_number", "hsp_number", "protein", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "gaps", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
+		"default": {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "source_database", "blast_program", "hit_number", "hsp_number", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "gaps", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
 	},
 	"lemna": {
-		"BLASTN":  {"label_name", "source_database", "blast_program", "hit_number", "protein", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
-		"BLASTX":  {"label_name", "source_database", "blast_program", "hit_number", "protein", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
-		"TBLASTN": {"label_name", "source_database", "blast_program", "hit_number", "protein", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
-		"BLASTP":  {"label_name", "source_database", "blast_program", "hit_number", "protein", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
+		"BLASTN":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "source_database", "blast_program", "hit_number", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
+		"BLASTX":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "source_database", "blast_program", "hit_number", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
+		"TBLASTN": {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "source_database", "blast_program", "hit_number", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
+		"BLASTP":  {"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "source_database", "blast_program", "hit_number", "subject_id", "species", "e_value", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "align_len", "mismatches", "gap_openings", "gaps", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "identical", "positives", "query_length", "target_length", "target_uniprot_canonical_length_percent", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url", "uniprot_canonical_length"},
 	},
 }
 
@@ -118,8 +118,8 @@ var blastDetailInterProColumnIDs = []string{
 }
 
 var blastExportBaseColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"row", "source_database", "blast_program", "label_name", "protein", "subject_id", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "query_length", "species", "hit_number", "hsp_number", "e_value", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "mismatches", "gap_openings", "identical", "positives", "gaps", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url"},
-	"lemna":     {"row", "source_database", "blast_program", "label_name", "protein", "subject_id", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "query_length", "species", "hit_number", "hsp_number", "e_value", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "mismatches", "gap_openings", "identical", "positives", "gaps", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url"},
+	"phytozome": {"row", "source_database", "blast_program", "label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "subject_id", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "query_length", "species", "hit_number", "hsp_number", "e_value", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "mismatches", "gap_openings", "identical", "positives", "gaps", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url"},
+	"lemna":     {"row", "source_database", "blast_program", "label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid", "subject_id", "percent_identity", "align_query_length_percent", "interpro_conserved_region_status", "target_length", "align_len", "query_length", "species", "hit_number", "hsp_number", "e_value", "strands", "query_id", "query_from", "query_to", "target_from", "target_to", "bitscore", "mismatches", "gap_openings", "identical", "positives", "gaps", "jbrowse_name", "target_id", "sequence_id", "transcript_id", "defline", "gene_report_url"},
 }
 
 var blastExportUniProtColumnIDs = []string{
@@ -146,14 +146,18 @@ var columnMetadataByID = map[string]columnMetadata{
 	"search_tern":                      {CompactHeader: "search_tern", DetailLabel: "search_term", ExportHeader: "search_term"},
 	"search_type":                      {CompactHeader: "search_type", DetailLabel: "search_type", ExportHeader: "search_type"},
 	"label_name":                       {CompactHeader: "label_name", DetailLabel: "label_name", ExportHeader: "label_name"},
+	"labelname_type":                   {CompactHeader: "labelname_type", DetailLabel: "labelname_type", ExportHeader: "labelname_type"},
+	"phgo_alias":                       {CompactHeader: "phgo_alias", DetailLabel: "phgo_alias", ExportHeader: "phgo_alias"},
 	"transcript":                       {CompactHeader: "transcript", DetailLabel: "transcript", ExportHeader: "transcript"},
 	"discripition":                     {CompactHeader: "discripition", DetailLabel: "description", ExportHeader: "description"},
 	"gnome":                            {CompactHeader: "gnome", DetailLabel: "genome", ExportHeader: "genome"},
-	"protein_id":                       {CompactHeader: "protein_id", DetailLabel: "protein_id", ExportHeader: "protein_id"},
+	"protein_id":                       {CompactHeader: "geneid", DetailLabel: "geneid", ExportHeader: "geneid"},
 	"gene_identifier":                  {CompactHeader: "gene_identifier", DetailLabel: "gene_identifier", ExportHeader: "gene_identifier"},
 	"genome":                           {CompactHeader: "gnome", DetailLabel: "genome", ExportHeader: "genome"},
 	"location":                         {CompactHeader: "location", DetailLabel: "location", ExportHeader: "location"},
 	"aliases":                          {CompactHeader: "alias", DetailLabel: "alias", ExportHeader: "alias"},
+	"symbols":                          {CompactHeader: "symbols", DetailLabel: "symbols", ExportHeader: "symbols"},
+	"synonyms":                         {CompactHeader: "synonyms", DetailLabel: "synonyms", ExportHeader: "synonyms"},
 	"uniprot":                          {CompactHeader: "uniprot", DetailLabel: "uniprot", ExportHeader: "uniprot"},
 	"comments":                         {CompactHeader: "comments", DetailLabel: "comments", ExportHeader: "comments"},
 	"auto_define":                      {CompactHeader: "auto_define", DetailLabel: "auto_define", ExportHeader: "auto_define"},
@@ -164,7 +168,9 @@ var columnMetadataByID = map[string]columnMetadata{
 	"blast_program":                    {CompactHeader: "blast_program", DetailLabel: "blast_program", ExportHeader: "blast_program"},
 	"hit_number":                       {CompactHeader: "hit_number", DetailLabel: "hit_number", ExportHeader: "hit_number"},
 	"hsp_number":                       {CompactHeader: "hsp_number", DetailLabel: "hsp_number", ExportHeader: "hsp_number"},
-	"protein":                          {CompactHeader: "protein", DetailLabel: "protein", ExportHeader: "protein"},
+	"protein":                          {CompactHeader: "geneid", DetailLabel: "geneid", ExportHeader: "geneid"},
+	"blast_labelname":                  {CompactHeader: "blast_labelname", DetailLabel: "blast_labelname", ExportHeader: "blast_labelname"},
+	"blast_geneid":                     {CompactHeader: "blast_geneid", DetailLabel: "blast_geneid", ExportHeader: "blast_geneid"},
 	"subject_id":                       {CompactHeader: "subject_id", DetailLabel: "subject_id", ExportHeader: "subject_id"},
 	"species":                          {CompactHeader: "species", DetailLabel: "species", ExportHeader: "species"},
 	"e_value":                          {CompactHeader: "e_value", DetailLabel: "e_value", ExportHeader: "e_value"},

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,14 +47,14 @@ func TestKeywordBlastPerformanceMatrixLive(t *testing.T) {
 	}
 
 	type combo struct {
-		name          string
-		keywordSource string
-		blastSource   string
+		name           string
+		keywordSource  string
+		blastSource    string
 		keywordSpecies model.SpeciesCandidate
 		blastSpecies   model.SpeciesCandidate
-		keywords      []string
-		forceWide     bool
-		blastProgram  string
+		keywords       []string
+		forceWide      bool
+		blastProgram   string
 	}
 
 	combos := []combo{
@@ -109,15 +110,18 @@ func TestKeywordBlastPerformanceMatrixLive(t *testing.T) {
 	}
 
 	references := externalReferenceConfig{
-		UseUniProt:       true,
-		UseInterPro:      true,
-		InterProSettings: model.DefaultInterProConservedRegionSettings(),
+		AutoLabelBlastHits: true,
+		UseUniProt:         true,
+		UseInterPro:        true,
+		InterProSettings:   model.DefaultInterProConservedRegionSettings(),
 	}
 
 	for _, tc := range combos {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			replayEnsureKeywordBlastPerfBlastPlusPath()
+			if strings.EqualFold(tc.blastSource, "lemna") && !replayEnsureBlastPlusPathOnPATH() {
+				t.Skip("BLAST+ blastp/makeblastdb not available; skipping local lemna BLAST performance combo")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 			defer cancel()
 
@@ -145,7 +149,8 @@ func TestKeywordBlastPerformanceMatrixLive(t *testing.T) {
 				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
 			}
 			labelDuration := time.Since(labelStarted)
-			applyKeywordIdentifications(groups, labels)
+			annotateKeywordLabelSources(groups, labels, "auto identify labelname")
+			applyKeywordLabelIdentifications(groups, labels)
 
 			selectedRows := make([]model.KeywordResultRow, 0, len(groups))
 			for _, group := range groups {
@@ -163,7 +168,7 @@ func TestKeywordBlastPerformanceMatrixLive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveKeywordRowsToBlastItems: %v", err)
 			}
-			items, err = w.prepareKeywordBlastItems(ctx, tc.keywordSpecies, items)
+			items, err = prepareKeywordBlastPerfItems(ctx, w, tc.keywordSpecies, items)
 			if err != nil {
 				t.Fatalf("prepareKeywordBlastItems: %v", err)
 			}
@@ -233,24 +238,278 @@ func TestKeywordBlastPerformanceSweepLog(t *testing.T) {
 		t.Skip("set PHYTO_KEYWORD_BLAST_SWEEP=1 to log current worker settings")
 	}
 	t.Logf(
-		"workers max=%s disk=%s http_idle=%s http_host=%s",
+		"workers max=%s disk=%s http_idle=%s http_host=%s label=%s keyword_term=%s seq_fetch=%s uniprot=%s uniprot_accession=%s interpro=%s",
 		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_MAX_WORKERS")),
 		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_DISK_WORKERS")),
 		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_MAX_IDLE_CONNS")),
 		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_MAX_IDLE_CONNS_PER_HOST")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_LABEL_WORKERS")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_KEYWORD_TERM_WORKERS")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_SEQUENCE_FETCH_WORKERS")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_UNIPROT_WORKERS")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_UNIPROT_ACCESSION_WORKERS")),
+		strings.TrimSpace(os.Getenv("PHYTOZOME_GO_BLAST_INTERPRO_WORKERS")),
 	)
 	fmt.Println("")
 }
 
+func TestKeywordBlastPreparationBreakdownLive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live keyword->blast preparation breakdown in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run keyword->blast preparation breakdown")
+	}
+	if os.Getenv("PHYTO_KEYWORD_PREP_BREAKDOWN") == "" {
+		t.Skip("set PHYTO_KEYWORD_PREP_BREAKDOWN=1 to run keyword->blast preparation breakdown")
+	}
+
+	keywordSpecies := model.SpeciesCandidate{
+		ProteomeID:  323,
+		JBrowseName: "Osativa_v7_0",
+		GenomeLabel: "Oryza sativa v7.0",
+	}
+	keywords := []string{"Os4CL1", "XP_015624111.1", "Os06g44620.1"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	defer cancel()
+
+	w := NewBlastWizard(os.Stdout)
+	w.suppressTaskModals = true
+	w.source = phytozome.NewClient(w.httpClient)
+
+	searchStarted := time.Now()
+	groups, err := w.searchKeywordGroupsWithProgress(ctx, keywordSpecies, keywords, nil, false, nil)
+	if err != nil {
+		t.Fatalf("searchKeywordGroupsWithProgress: %v", err)
+	}
+	searchDuration := time.Since(searchStarted)
+
+	labelStarted := time.Now()
+	labels, err := w.autoIdentifyKeywordLabelsWithProgress(ctx, keywordSpecies, groups)
+	if err != nil {
+		t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
+	}
+	labelDuration := time.Since(labelStarted)
+	annotateKeywordLabelSources(groups, labels, "auto identify labelname")
+	applyKeywordLabelIdentifications(groups, labels)
+
+	selectedRows := make([]model.KeywordResultRow, 0, len(groups))
+	for _, group := range groups {
+		if len(group.Rows) > 0 {
+			selectedRows = append(selectedRows, group.Rows[0])
+		}
+	}
+	if len(selectedRows) == 0 {
+		t.Fatal("no keyword rows selected")
+	}
+
+	resolveStarted := time.Now()
+	items, err := w.resolveKeywordRowsToBlastItems(ctx, keywordSpecies, selectedRows)
+	if err != nil {
+		t.Fatalf("resolveKeywordRowsToBlastItems: %v", err)
+	}
+	resolveDuration := time.Since(resolveStarted)
+
+	prepareStarted := time.Now()
+	items, err = prepareKeywordBlastPerfItems(ctx, w, keywordSpecies, items)
+	if err != nil {
+		t.Fatalf("prepareKeywordBlastPerfItems: %v", err)
+	}
+	prepareDuration := time.Since(prepareStarted)
+
+	t.Logf(
+		"keyword_prep_breakdown queries=%d selected=%d items=%d search_ms=%d keyword_label_ms=%d resolve_items_ms=%d blast_label_prepare_ms=%d total_ms=%d",
+		len(keywords),
+		len(selectedRows),
+		len(items),
+		searchDuration.Milliseconds(),
+		labelDuration.Milliseconds(),
+		resolveDuration.Milliseconds(),
+		prepareDuration.Milliseconds(),
+		(searchDuration + labelDuration + resolveDuration + prepareDuration).Milliseconds(),
+	)
+}
+
+func TestKeywordBlastExternalReferenceMatrixLive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping live keyword->blast external-reference matrix in short mode")
+	}
+	if os.Getenv("PHYTOZOME_LIVE_REPLAY") == "" {
+		t.Skip("set PHYTOZOME_LIVE_REPLAY=1 to run keyword->blast external-reference matrix")
+	}
+	if os.Getenv("PHYTO_KEYWORD_BLAST_REFERENCE_MATRIX") == "" {
+		t.Skip("set PHYTO_KEYWORD_BLAST_REFERENCE_MATRIX=1 to run keyword->blast external-reference matrix")
+	}
+	if !replayEnsureBlastPlusPathOnPATH() {
+		t.Skip("BLAST+ blastp/makeblastdb not available; skipping local lemna BLAST reference matrix")
+	}
+
+	keywordSpecies := model.SpeciesCandidate{
+		ProteomeID:  323,
+		JBrowseName: "Osativa_v7_0",
+		GenomeLabel: "Oryza sativa v7.0",
+	}
+	blastSpecies := model.SpeciesCandidate{
+		ProteomeID:  18,
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		SearchAlias: "Spirodela polyrhiza",
+		IsOfficial:  true,
+	}
+	keywords := []string{"Os4CL1", "XP_015624111.1", "Os06g44620.1"}
+	configs := []struct {
+		name       string
+		references externalReferenceConfig
+	}{
+		{name: "none", references: externalReferenceConfig{}},
+		{name: "auto-label", references: externalReferenceConfig{AutoLabelBlastHits: true}},
+		{name: "uniprot", references: externalReferenceConfig{UseUniProt: true}},
+		{name: "interpro", references: externalReferenceConfig{UseInterPro: true, InterProSettings: model.DefaultInterProConservedRegionSettings()}},
+		{name: "auto-label+uniprot", references: externalReferenceConfig{AutoLabelBlastHits: true, UseUniProt: true}},
+		{name: "auto-label+interpro", references: externalReferenceConfig{AutoLabelBlastHits: true, UseInterPro: true, InterProSettings: model.DefaultInterProConservedRegionSettings()}},
+		{name: "uniprot+interpro", references: externalReferenceConfig{UseUniProt: true, UseInterPro: true, InterProSettings: model.DefaultInterProConservedRegionSettings()}},
+		{name: "all", references: externalReferenceConfig{AutoLabelBlastHits: true, UseUniProt: true, UseInterPro: true, InterProSettings: model.DefaultInterProConservedRegionSettings()}},
+	}
+
+	for _, cfg := range configs {
+		cfg := cfg
+		t.Run(cfg.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+			defer cancel()
+
+			w := NewBlastWizard(os.Stdout)
+			w.suppressTaskModals = true
+			w.source = phytozome.NewClient(w.httpClient)
+
+			groups, err := w.searchKeywordGroupsWithProgress(ctx, keywordSpecies, keywords, nil, false, nil)
+			if err != nil {
+				t.Fatalf("searchKeywordGroupsWithProgress: %v", err)
+			}
+			labels, err := w.autoIdentifyKeywordLabelsWithProgress(ctx, keywordSpecies, groups)
+			if err != nil {
+				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
+			}
+			annotateKeywordLabelSources(groups, labels, "auto identify labelname")
+			applyKeywordLabelIdentifications(groups, labels)
+
+			selectedRows := make([]model.KeywordResultRow, 0, len(groups))
+			for _, group := range groups {
+				if len(group.Rows) > 0 {
+					selectedRows = append(selectedRows, group.Rows[0])
+				}
+			}
+			if len(selectedRows) == 0 {
+				t.Fatal("no keyword rows selected for BLAST replay")
+			}
+
+			items, err := w.resolveKeywordRowsToBlastItems(ctx, keywordSpecies, selectedRows)
+			if err != nil {
+				t.Fatalf("resolveKeywordRowsToBlastItems: %v", err)
+			}
+			items, err = prepareKeywordBlastPerfItems(ctx, w, keywordSpecies, items)
+			if err != nil {
+				t.Fatalf("prepareKeywordBlastPerfItems: %v", err)
+			}
+
+			w.source = lemna.NewClient(w.httpClient)
+			request := model.BlastRequest{
+				Species:          blastSpecies,
+				SequenceKind:     model.SequenceProtein,
+				TargetType:       "proteome",
+				Program:          "local:BLASTP",
+				EValue:           "1e-10",
+				ComparisonMatrix: "BLOSUM62",
+				WordLength:       "default",
+				AlignmentsToShow: 20,
+				AllowGaps:        true,
+				FilterQuery:      true,
+			}
+
+			start := time.Now()
+			runs, err := w.executeConfiguredBlastBatchRuns(ctx, items, request, cfg.references)
+			if err != nil {
+				t.Fatalf("executeConfiguredBlastBatchRuns: %v", err)
+			}
+			duration := time.Since(start)
+
+			totalRows := 0
+			for _, run := range runs {
+				totalRows += len(run.Results.Rows)
+			}
+			if totalRows == 0 {
+				t.Fatalf("reference config %s produced no BLAST rows", cfg.name)
+			}
+			t.Logf(
+				"keyword_reference_matrix=%s selected=%d items=%d rows=%d runs=%d total_ms=%d",
+				cfg.name,
+				len(selectedRows),
+				len(items),
+				totalRows,
+				len(runs),
+				duration.Milliseconds(),
+			)
+		})
+	}
+}
+
+func prepareKeywordBlastPerfItems(ctx context.Context, w *BlastWizard, selected model.SpeciesCandidate, items []blastQueryItem) ([]blastQueryItem, error) {
+	out := cloneBlastQueryItems(items)
+	for i := range out {
+		if out[i].QuerySource == nil {
+			continue
+		}
+		if strings.TrimSpace(out[i].QuerySource.PreferredSequenceID) == "" {
+			out[i].QuerySource.PreferredSequenceID = firstNonEmpty(
+				strings.TrimSpace(out[i].QuerySource.ProteinID),
+				strings.TrimSpace(out[i].QuerySource.TranscriptID),
+				strings.TrimSpace(out[i].QuerySource.GeneID),
+			)
+		}
+		if seq := strings.TrimSpace(out[i].ProteinSequence); seq != "" && strings.TrimSpace(out[i].QuerySource.ProteinSequence) == "" {
+			out[i].QuerySource.ProteinSequence = seq
+		}
+	}
+	if !allLabelsPresent(out) {
+		var err error
+		out, err = w.autoIdentifyBlastLabelsWithProgress(ctx, selected, out)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !allLabelsPresent(out) {
+		return nil, fmt.Errorf("keyword->BLAST performance replay could not auto identify every query source label")
+	}
+	if !keywordBlastItemsHaveReusableAliases(out) {
+		var err error
+		out, err = w.supplementBlastAliasesWithProgress(ctx, selected, out)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func replayEnsureKeywordBlastPerfBlastPlusPath() {
+	_ = replayEnsureBlastPlusPathOnPATH()
+}
+
+func replayEnsureBlastPlusPathOnPATH() bool {
+	if _, err := exec.LookPath("blastp"); err == nil {
+		if _, err := exec.LookPath("makeblastdb"); err == nil {
+			return true
+		}
+	}
 	for _, root := range []string{
 		filepath.Join(".", "bin", "blastplus"),
 		`C:\Users\wangsychn\Desktop\phytozome-go_windows_amd64\blastplus`,
+		`C:\Users\wangsychn\Documents\GitHub\phytozome-batch-cli_backup_before_rollback_20260512_002654\bin\blastplus`,
 	} {
 		root = strings.TrimSpace(root)
 		if root == "" {
 			continue
 		}
+		found := false
 		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 			if err != nil || entry == nil || !entry.IsDir() {
 				return nil
@@ -263,10 +522,15 @@ func replayEnsureKeywordBlastPerfBlastPlusPath() {
 					if !strings.Contains(strings.ToLower(current), strings.ToLower(path)) {
 						_ = os.Setenv("PATH", path+string(os.PathListSeparator)+current)
 					}
+					found = true
 					return filepath.SkipAll
 				}
 			}
 			return nil
 		})
+		if found {
+			return true
+		}
 	}
+	return false
 }

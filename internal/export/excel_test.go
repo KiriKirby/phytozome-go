@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -89,9 +90,18 @@ func TestBlastExportLeavesUniProtCellsBlankWhenRowHasNoUniProtAccession(t *testi
 	}
 
 	values := blastRowValues(row, 0, true, false)
-	for _, index := range []int{10, 13, 36, 39} {
+	headerIDs := prompt.BlastExportColumnIDs("lemna", true, false)
+	for _, header := range []string{
+		"target_uniprot_canonical_length_percent",
+		"uniprot_canonical_length",
+		"uniprot_protein_name",
+	} {
+		index := indexOfAny(headerIDs, header)
+		if index < 0 {
+			t.Fatalf("header %q not found in %v", header, headerIDs)
+		}
 		if values[index] != "" {
-			t.Fatalf("value at index %d = %#v, want blank for unmapped UniProt row", index, values[index])
+			t.Fatalf("value for %s = %#v, want blank for unmapped UniProt row", header, values[index])
 		}
 	}
 }
@@ -163,6 +173,12 @@ func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t 
 		GeneName:      "C4H",
 		GeneID:        "AT2G30490",
 		GeneReportURL: "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+		Queries: []model.ExportQueryMetadata{{
+			Index:            1,
+			LabelName:        "C4H",
+			GeneID:           "AT2G30490",
+			OriginalInputURL: "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+		}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("write excel: %v", err)
@@ -180,8 +196,8 @@ func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t 
 	if got, err := file.GetCellValue("BLAST Results", "A2"); err != nil || got != "1" {
 		t.Fatalf("BLAST Results!A2 = %q, err=%v, want 1", got, err)
 	}
-	if got, err := file.GetCellValue("Query Metadata", "A1"); err != nil || got != "field" {
-		t.Fatalf("Query Metadata!A1 = %q, err=%v, want field", got, err)
+	if got, err := file.GetCellValue("Query Metadata", "A1"); err != nil || got != "query_index" {
+		t.Fatalf("Query Metadata!A1 = %q, err=%v, want query_index", got, err)
 	}
 	if got, err := file.GetCellValue("Query Metadata", "B2"); err != nil || got != "C4H" {
 		t.Fatalf("Query Metadata!B2 = %q, err=%v, want C4H", got, err)

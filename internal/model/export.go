@@ -10,14 +10,39 @@ package model
 import "time"
 
 type ProteinSequenceRecord struct {
-	Header   string
-	Sequence string
+	Header         string
+	OriginalHeader string
+	SourceKey      string
+	Sequence       string
+}
+
+type ProteinSequenceData struct {
+	Sequence       string
+	OriginalHeader string
 }
 
 type ExportMetadata struct {
 	GeneName      string
 	GeneID        string
 	GeneReportURL string
+	Queries       []ExportQueryMetadata
+}
+
+type ExportQueryMetadata struct {
+	Index             int
+	LabelName         string
+	GeneID            string
+	ProteinID         string
+	TranscriptID      string
+	SourceDatabase    string
+	SourceProteomeID  int
+	SourceJBrowseName string
+	SourceGenomeLabel string
+	OriginalInputURL  string
+	NormalizedURL     string
+	OrganismShort     string
+	Annotation        string
+	SequenceLength    int
 }
 
 type KeywordResultRow struct {
@@ -25,12 +50,16 @@ type KeywordResultRow struct {
 	SearchTerm          string
 	SearchType          string
 	LabelName           string
+	LabelNameType       string
+	PhgoAliases         string
 	ProteinID           string
 	TranscriptID        string
 	GeneIdentifier      string
 	Genome              string
 	Location            string
 	Aliases             string
+	Symbols             string
+	Synonyms            string
 	UniProt             string
 	Description         string
 	Comments            string
@@ -55,20 +84,27 @@ type KeywordSearchGroup struct {
 }
 
 type QuerySequenceSource struct {
-	Sequence          string
-	OriginalInputURL  string
-	NormalizedURL     string
-	SourceDatabase    string
-	SourceProteomeID  int
-	SourceJBrowseName string
-	SourceGenomeLabel string
-	LabelName         string
-	Aliases           string
-	AutoDefine        string
-	UniProtAccession  string
-	GeneID            string
-	TranscriptID      string
-	ProteinID         string
-	OrganismShort     string
-	Annotation        string
+	Sequence            string
+	ProteinSequence     string
+	NucleotideSequence  string
+	SequenceKind        SequenceKind
+	PreferredSequenceID string
+	OriginalInputURL    string
+	NormalizedURL       string
+	SourceDatabase      string
+	SourceProteomeID    int
+	SourceJBrowseName   string
+	SourceGenomeLabel   string
+	LabelName           string
+	PhgoAliases         string
+	Aliases             string
+	Symbols             string
+	Synonyms            string
+	AutoDefine          string
+	UniProtAccession    string
+	GeneID              string
+	TranscriptID        string
+	ProteinID           string
+	OrganismShort       string
+	Annotation          string
 }

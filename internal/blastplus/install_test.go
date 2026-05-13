@@ -7,7 +7,10 @@
 
 package blastplus
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestApplicationDirUsesExecutableDirWhenStable(t *testing.T) {
 	oldExecutableFn := executableFn
@@ -52,5 +55,75 @@ func TestApplicationDirFallsBackToWorkingDirForTempExecutable(t *testing.T) {
 	}
 	if dir != `C:\workspace` {
 		t.Fatalf("unexpected fallback application dir: got %q", dir)
+	}
+}
+
+func TestEnsureToolsOnPathCachesSuccessfulLookups(t *testing.T) {
+	oldExecLookPath := execLookPath
+	oldCache := toolsOnPathCache
+	t.Cleanup(func() {
+		execLookPath = oldExecLookPath
+		toolsOnPathMu.Lock()
+		toolsOnPathCache = oldCache
+		toolsOnPathMu.Unlock()
+	})
+
+	t.Setenv("PATH", "test-path-a")
+	toolsOnPathMu.Lock()
+	toolsOnPathCache = make(map[string]struct{})
+	toolsOnPathMu.Unlock()
+	calls := 0
+	execLookPath = func(file string) (string, error) {
+		calls++
+		return file, nil
+	}
+
+	if err := EnsureToolsOnPath("makeblastdb", "blastp"); err != nil {
+		t.Fatalf("first EnsureToolsOnPath: %v", err)
+	}
+	if err := EnsureToolsOnPath("blastp", "makeblastdb"); err != nil {
+		t.Fatalf("cached EnsureToolsOnPath: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("lookup calls = %d, want 2 after cached repeat", calls)
+	}
+
+	t.Setenv("PATH", "test-path-b")
+	if err := EnsureToolsOnPath("makeblastdb", "blastp"); err != nil {
+		t.Fatalf("PATH-changed EnsureToolsOnPath: %v", err)
+	}
+	if calls != 4 {
+		t.Fatalf("lookup calls after PATH change = %d, want 4", calls)
+	}
+}
+
+func TestEnsureToolsOnPathDoesNotCacheFailures(t *testing.T) {
+	oldExecLookPath := execLookPath
+	oldCache := toolsOnPathCache
+	t.Cleanup(func() {
+		execLookPath = oldExecLookPath
+		toolsOnPathMu.Lock()
+		toolsOnPathCache = oldCache
+		toolsOnPathMu.Unlock()
+	})
+
+	t.Setenv("PATH", "test-path-fail")
+	toolsOnPathMu.Lock()
+	toolsOnPathCache = make(map[string]struct{})
+	toolsOnPathMu.Unlock()
+	calls := 0
+	execLookPath = func(file string) (string, error) {
+		calls++
+		return "", fmt.Errorf("missing %s", file)
+	}
+
+	if err := EnsureToolsOnPath("makeblastdb"); err == nil {
+		t.Fatal("expected missing tool error")
+	}
+	if err := EnsureToolsOnPath("makeblastdb"); err == nil {
+		t.Fatal("expected repeated missing tool error")
+	}
+	if calls != 2 {
+		t.Fatalf("failed lookup calls = %d, want 2 because failures are not cached", calls)
 	}
 }

@@ -139,8 +139,16 @@ func blastExportValue(id string, row model.BlastResultRow, rowNumber int) any {
 		return row.BlastProgram
 	case "label_name":
 		return row.LabelName
+	case "labelname_type":
+		return row.LabelNameType
+	case "phgo_alias":
+		return row.PhgoAliases
 	case "protein":
 		return row.Protein
+	case "blast_labelname":
+		return row.BlastLabelName
+	case "blast_geneid":
+		return row.BlastGeneID
 	case "subject_id":
 		return firstNonEmptyText(row.SubjectID, row.Protein)
 	case "percent_identity":
@@ -391,44 +399,124 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 	if file == nil || metadata == nil {
 		return nil
 	}
-	values := []struct {
-		key   string
-		value string
-	}{
-		{key: "gene_name", value: strings.TrimSpace(metadata.GeneName)},
-		{key: "gene_id", value: strings.TrimSpace(metadata.GeneID)},
-		{key: "gene_report_url", value: strings.TrimSpace(metadata.GeneReportURL)},
-	}
-	hasValues := false
-	for _, item := range values {
-		if item.value != "" {
-			hasValues = true
-			break
-		}
-	}
-	if !hasValues {
+	queries := exportMetadataQueries(metadata)
+	if len(queries) == 0 && strings.TrimSpace(metadata.GeneName) == "" && strings.TrimSpace(metadata.GeneID) == "" && strings.TrimSpace(metadata.GeneReportURL) == "" {
 		return nil
 	}
 	const sheet = "Query Metadata"
 	if _, err := file.NewSheet(sheet); err != nil {
 		return fmt.Errorf("create metadata sheet: %w", err)
 	}
-	if err := file.SetCellValue(sheet, "A1", "field"); err != nil {
-		return fmt.Errorf("write metadata header field: %w", err)
+	stream, err := file.NewStreamWriter(sheet)
+	if err != nil {
+		return fmt.Errorf("create metadata stream writer: %w", err)
 	}
-	if err := file.SetCellValue(sheet, "B1", "value"); err != nil {
-		return fmt.Errorf("write metadata header value: %w", err)
+	if len(queries) == 0 {
+		values := []struct {
+			key   string
+			value string
+		}{
+			{key: "gene_name", value: strings.TrimSpace(metadata.GeneName)},
+			{key: "gene_id", value: strings.TrimSpace(metadata.GeneID)},
+			{key: "gene_report_url", value: strings.TrimSpace(metadata.GeneReportURL)},
+		}
+		if err := stream.SetRow("A1", []interface{}{"field", "value"}); err != nil {
+			return fmt.Errorf("write metadata header row: %w", err)
+		}
+		for i, item := range values {
+			cell, err := excelize.CoordinatesToCellName(1, i+2)
+			if err != nil {
+				return fmt.Errorf("build metadata row cell %d: %w", i+2, err)
+			}
+			if err := stream.SetRow(cell, []interface{}{item.key, item.value}); err != nil {
+				return fmt.Errorf("write metadata row %d: %w", i+2, err)
+			}
+		}
+		if err := stream.Flush(); err != nil {
+			return fmt.Errorf("flush metadata stream: %w", err)
+		}
+		return nil
 	}
-	for i, item := range values {
-		row := i + 2
-		if err := file.SetCellValue(sheet, fmt.Sprintf("A%d", row), item.key); err != nil {
-			return fmt.Errorf("write metadata key %d: %w", i, err)
+	headers := []string{
+		"query_index",
+		"blast_labelname",
+		"blast_geneid",
+		"protein_id",
+		"transcript_id",
+		"source_database",
+		"source_proteome_id",
+		"source_jbrowse_name",
+		"source_genome_label",
+		"original_input_url",
+		"normalized_url",
+		"organism_short",
+		"annotation",
+		"sequence_length",
+	}
+	headerCells := make([]interface{}, 0, len(headers))
+	for _, header := range headers {
+		headerCells = append(headerCells, header)
+	}
+	if err := stream.SetRow("A1", headerCells); err != nil {
+		return fmt.Errorf("write metadata header row: %w", err)
+	}
+	for rowIndex, query := range queries {
+		values := []any{
+			query.Index,
+			query.LabelName,
+			query.GeneID,
+			query.ProteinID,
+			query.TranscriptID,
+			query.SourceDatabase,
+			query.SourceProteomeID,
+			query.SourceJBrowseName,
+			query.SourceGenomeLabel,
+			query.OriginalInputURL,
+			query.NormalizedURL,
+			query.OrganismShort,
+			query.Annotation,
+			query.SequenceLength,
 		}
-		if err := file.SetCellValue(sheet, fmt.Sprintf("B%d", row), item.value); err != nil {
-			return fmt.Errorf("write metadata value %d: %w", i, err)
+		rowCells := make([]interface{}, 0, len(values))
+		for _, value := range values {
+			rowCells = append(rowCells, value)
 		}
+		cell, err := excelize.CoordinatesToCellName(1, rowIndex+2)
+		if err != nil {
+			return fmt.Errorf("build metadata row cell %d: %w", rowIndex+2, err)
+		}
+		if err := stream.SetRow(cell, rowCells); err != nil {
+			return fmt.Errorf("write metadata query row %d: %w", rowIndex+1, err)
+		}
+	}
+	if err := stream.Flush(); err != nil {
+		return fmt.Errorf("flush metadata stream: %w", err)
 	}
 	return nil
+}
+
+func exportMetadataQueries(metadata *model.ExportMetadata) []model.ExportQueryMetadata {
+	if metadata == nil {
+		return nil
+	}
+	if len(metadata.Queries) > 0 {
+		out := append([]model.ExportQueryMetadata(nil), metadata.Queries...)
+		for i := range out {
+			if out[i].Index == 0 {
+				out[i].Index = i + 1
+			}
+		}
+		return out
+	}
+	if strings.TrimSpace(metadata.GeneName) == "" && strings.TrimSpace(metadata.GeneID) == "" && strings.TrimSpace(metadata.GeneReportURL) == "" {
+		return nil
+	}
+	return []model.ExportQueryMetadata{{
+		Index:            1,
+		LabelName:        strings.TrimSpace(metadata.GeneName),
+		GeneID:           strings.TrimSpace(metadata.GeneID),
+		OriginalInputURL: strings.TrimSpace(metadata.GeneReportURL),
+	}}
 }
 
 func blastExcelCellColor(header string, row model.BlastResultRow, originalRowIndex int, options *BlastExcelExportOptions) string {
@@ -521,7 +609,11 @@ var blastExcelHeaderIDs = map[string]string{
 	"source_database":                  "source_database",
 	"blast_program":                    "blast_program",
 	"label_name":                       "label_name",
+	"labelname_type":                   "labelname_type",
 	"protein":                          "protein",
+	"geneid":                           "protein",
+	"blast_labelname":                  "blast_labelname",
+	"blast_geneid":                     "blast_geneid",
 	"subject_id":                       "subject_id",
 	"identity (%)":                     "percent_identity",
 	"align_len / query_length (%)":     "align_query_length_percent",
@@ -691,6 +783,10 @@ func keywordExportValue(id string, row model.KeywordResultRow, rowNumber int) an
 		return row.SearchType
 	case "label_name":
 		return keywordLabelName(row)
+	case "labelname_type":
+		return strings.TrimSpace(row.LabelNameType)
+	case "phgo_alias":
+		return keywordPhgoAliases(row)
 	case "protein_id":
 		return row.ProteinID
 	case "transcript":
@@ -703,6 +799,10 @@ func keywordExportValue(id string, row model.KeywordResultRow, rowNumber int) an
 		return row.Location
 	case "alias":
 		return row.Aliases
+	case "symbols":
+		return row.Symbols
+	case "synonyms":
+		return row.Synonyms
 	case "uniprot":
 		return row.UniProt
 	case "description":
@@ -744,6 +844,10 @@ func keywordExtraHeaders(rows []model.KeywordResultRow) []string {
 
 func keywordLabelName(row model.KeywordResultRow) string {
 	return row.LabelName
+}
+
+func keywordPhgoAliases(row model.KeywordResultRow) string {
+	return row.PhgoAliases
 }
 
 func keywordRowsHaveProteinID(rows []model.KeywordResultRow) bool {

@@ -441,8 +441,8 @@ func labelSourceForGroup(group model.KeywordSearchGroup, method string) (string,
 		}
 	}
 	for _, row := range group.Rows {
-		if label := bestAlias(row.Aliases); label != "" {
-			return "alias", label
+		if label := firstReportAlias(row.PhgoAliases); label != "" {
+			return "phgo_alias", label
 		}
 	}
 	for _, row := range group.Rows {
@@ -451,6 +451,18 @@ func labelSourceForGroup(group model.KeywordSearchGroup, method string) (string,
 		}
 	}
 	return "not available in this run", "not available in this run"
+}
+
+func firstReportAlias(value string) string {
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ';' || r == ',' || r == '|' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			return part
+		}
+	}
+	return ""
 }
 
 func labelTraceExplanation(method string) string {
@@ -543,7 +555,10 @@ func keywordReportSourceValues(row model.KeywordResultRow) []string {
 		row.GeneIdentifier,
 		row.Genome,
 		row.Location,
+		row.PhgoAliases,
 		row.Aliases,
+		row.Symbols,
+		row.Synonyms,
 		row.UniProt,
 		row.Description,
 		row.Comments,
@@ -636,6 +651,10 @@ func keywordReportCellValue(header string, row model.KeywordResultRow, index int
 		return row.SearchType
 	case "label_name":
 		return row.LabelName
+	case "labelname_type":
+		return row.LabelNameType
+	case "phgo_alias":
+		return row.PhgoAliases
 	case "protein_id":
 		return row.ProteinID
 	case "transcript":
@@ -648,6 +667,10 @@ func keywordReportCellValue(header string, row model.KeywordResultRow, index int
 		return row.Location
 	case "alias":
 		return row.Aliases
+	case "symbols":
+		return row.Symbols
+	case "synonyms":
+		return row.Synonyms
 	case "uniprot":
 		return row.UniProt
 	case "description":
@@ -767,6 +790,8 @@ func keywordColumnLineageForHeader(header string, rows []model.KeywordResultRow)
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Search program selected by the keyword search engine."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "new search engine", CollectionMethod: "classified before searching and updated if wide-search fallback produced the hit", BlankMeaning: "legacy row or source did not report search type", UsedInStats: "yes"}
 	case "label_name":
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Readable label used for row grouping, exports, and sequence headers."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "user input or label workflow", CollectionMethod: "captured before or during keyword workflow", BlankMeaning: "user skipped or label unavailable", UsedInStats: "yes"}
+	case "labelname_type":
+		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "How the keyword row label_name was obtained."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "labelname system", CollectionMethod: "recorded from the labelname fallback source for the current row", BlankMeaning: "label_name is blank or source was not recorded", UsedInStats: "label/quality"}
 	case "protein_id":
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Original protein identifier when the source naturally provides one."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "selected database", CollectionMethod: "from current result rows", BlankMeaning: "not provided by this source", UsedInStats: "quality"}
 	case "transcript":
@@ -777,8 +802,14 @@ func keywordColumnLineageForHeader(header string, rows []model.KeywordResultRow)
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Genome or release label stored with the row."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "species/result row", CollectionMethod: "from current result rows", BlankMeaning: "not collected", UsedInStats: "no"}
 	case "location":
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Genomic coordinate or location text."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "selected database", CollectionMethod: "from current result rows", BlankMeaning: "not provided by source row", UsedInStats: "no"}
+	case "phgo_alias":
+		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Labelname-system alias list used by phytozome GO for display, grouping, and automatic label selection."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "labelname system", CollectionMethod: "computed from current result rows", BlankMeaning: "no usable alias could be inferred", UsedInStats: "label/quality"}
 	case "alias":
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Alias or gene-symbol list."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "source annotation", CollectionMethod: "from current result rows", BlankMeaning: "source has no alias", UsedInStats: "label/quality"}
+	case "symbols":
+		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Phytozome symbols preserved from the source gene record."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "Phytozome symbols", CollectionMethod: "copied from current Phytozome keyword result rows", BlankMeaning: "source row has no symbols", UsedInStats: "label/quality"}
+	case "synonyms":
+		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "Phytozome synonyms preserved from the source gene record."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "Phytozome synonyms", CollectionMethod: "copied from current Phytozome keyword result rows", BlankMeaning: "source row has no synonyms", UsedInStats: "label/quality"}
 	case "uniprot":
 		return report.ColumnLineage{ID: header, Column: display, Meaning: firstNonEmpty(english, "UniProt cross-reference text already present in the row."), EnglishDetail: english, ChineseDetail: chinese, JapaneseDetail: japanese, Source: "source annotation", CollectionMethod: "from current result rows", BlankMeaning: "not provided or not requested", UsedInStats: "quality"}
 	case "description":
@@ -854,9 +885,9 @@ func buildKeywordSequenceAudit(rows []model.KeywordResultRow, records []model.Pr
 		TextFileType:    "FASTA-style peptide sequence text export for selected keyword rows",
 		HeaderLabelMode: keywordSequenceHeaderLabelMode(rows),
 	}
-	recordByHeader := make(map[string]model.ProteinSequenceRecord, len(records))
+	recordBySourceKey := make(map[string]model.ProteinSequenceRecord, len(records))
 	for _, record := range records {
-		recordByHeader[record.Header] = record
+		recordBySourceKey[record.SourceKey] = record
 		audit.TotalCharacters += len(record.Sequence)
 	}
 	audit.Records = make([]report.SequenceRecord, 0, len(rows))
@@ -872,8 +903,7 @@ func buildKeywordSequenceAudit(rows []model.KeywordResultRow, records []model.Pr
 	order := make([]string, 0, len(rows))
 	byQuery := make(map[string]*summaryState, len(rows))
 	for idx, row := range rows {
-		header := keywordProteinSequenceHeader(row)
-		record, ok := recordByHeader[header]
+		record, ok := recordBySourceKey[keywordSequenceRecordSourceKey(row)]
 		status := "written"
 		length := len(record.Sequence)
 		source := "sequence fetched during the normal text-export workflow"
@@ -948,7 +978,7 @@ func keywordSequenceHeaderLabelMode(rows []model.KeywordResultRow) string {
 	withTranscript := 0
 	withSequenceOnly := 0
 	for _, row := range rows {
-		if keywordRowLabelName(row) != "" {
+		if rowKeywordLabelName(row) != "" {
 			labelled++
 		} else {
 			plain++

@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/netconfig"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -40,6 +41,7 @@ var (
 	refSeqProteinPattern    = regexp.MustCompile(`(?i)^(?:XP_?)\d+(?:\.\d+)?$`)
 	cytochromeP450Pattern   = regexp.MustCompile(`(?i)^CYP\d+[A-Z]\d+$`)
 	osC4HPattern            = regexp.MustCompile(`(?i)^OS[-_ ]?C4H\d+[A-Z]?$`)
+	riceLocusPartsPattern   = regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`)
 	reportURLHost           = "phytozome-next.jgi.doe.gov"
 	riceAliasByNormalized   = curatedRiceAliasMap()
 	refSeqAliasByNormalized = curatedRiceRefSeqAliasMap()
@@ -415,34 +417,63 @@ func (e *Engine) searchSpecificIdentifier(ctx context.Context, species model.Spe
 	seen := make(map[string]struct{})
 	genes := make([]GeneRecord, 0, 3)
 	variants := SpecificIdentifierVariants(identifier)
-	for _, variant := range variants {
+	type identifierLookup struct {
+		variantIndex int
+		methodIndex  int
+		variant      string
+		method       string
+	}
+	lookups := make([]identifierLookup, 0, len(variants)*3)
+	for variantIndex, variant := range variants {
 		switch reportType {
 		case "gene":
-			if gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-			}
+			lookups = append(lookups, identifierLookup{variantIndex: variantIndex, variant: variant, method: "gene"})
 		case "transcript":
-			if gene, err := e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-			}
+			lookups = append(lookups, identifierLookup{variantIndex: variantIndex, variant: variant, method: "transcript"})
 		case "protein":
-			if gene, err := e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-			}
+			lookups = append(lookups, identifierLookup{variantIndex: variantIndex, variant: variant, method: "protein"})
 		default:
-			if gene, err := e.finder.FetchGeneByGeneID(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-				continue
-			}
-			if gene, err := e.finder.FetchGeneByTranscript(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-				continue
-			}
-			if gene, err := e.finder.FetchGeneByProtein(ctx, species.ProteomeID, variant); err == nil {
-				addGene(&genes, seen, gene)
-			}
+			lookups = append(lookups,
+				identifierLookup{variantIndex: variantIndex, methodIndex: 0, variant: variant, method: "gene"},
+				identifierLookup{variantIndex: variantIndex, methodIndex: 1, variant: variant, method: "transcript"},
+				identifierLookup{variantIndex: variantIndex, methodIndex: 2, variant: variant, method: "protein"},
+			)
 		}
-		if len(genes) > 0 && reportType != "" {
+	}
+	if len(lookups) == 0 {
+		return nil, nil
+	}
+	results := make([]GeneRecord, len(lookups))
+	found := make([]bool, len(lookups))
+	err := runInternalParallel(ctx, len(lookups), func(ctx context.Context, index int) error {
+		lookup := lookups[index]
+		gene, lookupErr := e.fetchIdentifierLookup(ctx, species.ProteomeID, lookup.method, lookup.variant)
+		if lookupErr != nil {
+			return nil
+		}
+		results[index] = gene
+		found[index] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if reportType != "" {
+		for i, gene := range results {
+			if !found[i] {
+				continue
+			}
+			addGene(&genes, seen, gene)
+			break
+		}
+		return genes, nil
+	}
+	for variantIndex := range variants {
+		for i, gene := range results {
+			if !found[i] || lookups[i].variantIndex != variantIndex {
+				continue
+			}
+			addGene(&genes, seen, gene)
 			break
 		}
 	}
@@ -452,29 +483,153 @@ func (e *Engine) searchSpecificIdentifier(ctx context.Context, species model.Spe
 func (e *Engine) searchAliasesAsGenes(ctx context.Context, species model.SpeciesCandidate, aliases []string) ([]GeneRecord, error) {
 	seen := make(map[string]struct{})
 	genes := make([]GeneRecord, 0, len(aliases))
-	for _, alias := range aliases {
+	aliases = uniqueNonEmptyStrings(aliases)
+	type aliasResult struct {
+		genes []GeneRecord
+		err   error
+	}
+	results := make([]aliasResult, len(aliases))
+	err := runInternalParallel(ctx, len(aliases), func(ctx context.Context, index int) error {
+		alias := aliases[index]
 		if strings.TrimSpace(alias) == "" {
-			continue
+			return nil
 		}
 		found, err := e.searchSpecificIdentifier(ctx, species, "", alias)
 		if err != nil {
-			return nil, err
-		}
-		for _, gene := range found {
-			addGene(&genes, seen, gene)
+			results[index].err = err
+			return err
 		}
 		if len(found) > 0 {
-			continue
+			results[index].genes = found
+			return nil
 		}
 		keywordHits, err := e.searchKeyword(ctx, species, alias, 20)
 		if err != nil {
-			return nil, err
+			results[index].err = err
+			return err
 		}
-		for _, gene := range keywordHits {
+		results[index].genes = keywordHits
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, result := range results {
+		if result.err != nil {
+			return nil, result.err
+		}
+		for _, gene := range result.genes {
 			addGene(&genes, seen, gene)
 		}
 	}
 	return genes, nil
+}
+
+func (e *Engine) fetchIdentifierLookup(ctx context.Context, proteomeID int, method string, value string) (GeneRecord, error) {
+	key := strings.Join([]string{"identifier", strconv.Itoa(proteomeID), method, strings.TrimSpace(value)}, "|")
+	result, err, _ := e.sf.Do(key, func() (any, error) {
+		switch method {
+		case "gene":
+			return e.finder.FetchGeneByGeneID(ctx, proteomeID, value)
+		case "transcript":
+			return e.finder.FetchGeneByTranscript(ctx, proteomeID, value)
+		case "protein":
+			return e.finder.FetchGeneByProtein(ctx, proteomeID, value)
+		default:
+			return GeneRecord{}, fmt.Errorf("unknown identifier lookup method %q", method)
+		}
+	})
+	if err != nil {
+		return GeneRecord{}, err
+	}
+	return result.(GeneRecord), nil
+}
+
+func runInternalParallel(ctx context.Context, total int, fn func(context.Context, int) error) error {
+	if total <= 0 || fn == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workers := internalNetworkWorkerCount(total)
+	if workers <= 1 {
+		for i := 0; i < total; i++ {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := fn(ctx, i); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				if err := workCtx.Err(); err != nil {
+					return
+				}
+				if err := fn(workCtx, index); err != nil {
+					select {
+					case errs <- err:
+						cancel()
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for i := 0; i < total; i++ {
+			select {
+			case <-workCtx.Done():
+				return
+			case jobs <- i:
+			}
+		}
+	}()
+	wg.Wait()
+	select {
+	case err := <-errs:
+		return err
+	default:
+	}
+	return ctx.Err()
+}
+
+func internalNetworkWorkerCount(total int) int {
+	return netconfig.NetworkWorkerCount(total)
+}
+
+func uniqueNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func (e *Engine) searchKeyword(ctx context.Context, species model.SpeciesCandidate, term string, limit int) ([]GeneRecord, error) {
@@ -609,7 +764,7 @@ func normalizeRiceLocusCandidate(term string) string {
 	if strings.HasPrefix(upper, "OS") && len(upper) >= 8 {
 		upper = upper[2:]
 	}
-	parts := regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`).FindStringSubmatch(upper)
+	parts := riceLocusPartsPattern.FindStringSubmatch(upper)
 	if len(parts) == 0 {
 		return ""
 	}

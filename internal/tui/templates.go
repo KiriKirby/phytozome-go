@@ -144,8 +144,24 @@ type TableRow struct {
 	Cells        []string
 	Group        string
 	Detail       string
+	DetailPages  []DetailPage
 	FilterFlag   bool
 	FilterReason string
+}
+
+type DetailPage struct {
+	Title string
+	Items []DetailItem
+}
+
+type DetailItem struct {
+	Label       string
+	Value       string
+	ActionLabel string
+	ActionHint  string
+	ActionKey   string
+	AutoLoad    bool
+	Loading     bool
 }
 
 type SortDirection int
@@ -218,6 +234,7 @@ type RowSelectionPage struct {
 	DoneAllText   string
 	Hints         []string
 	State         RowSelectionState
+	LoadDetail    func(rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
 }
 
 type RowSelectionState struct {
@@ -242,20 +259,24 @@ type BlastRunItem struct {
 }
 
 type BlastRunSelectionPage struct {
-	Breadcrumb   string
-	Path         []string
-	Title        string
-	Description  string
-	Items        []BlastRunItem
-	AllowFilter  bool
-	FilterText   string
-	AllowBack    bool
-	AllowHome    bool
-	ConfirmText  string
-	GenerateText string
-	DoneAllText  string
-	Hints        []string
-	State        BlastRunSelectionState
+	Breadcrumb    string
+	Path          []string
+	Title         string
+	Description   string
+	Items         []BlastRunItem
+	AllowFilter   bool
+	FilterText    string
+	AllowBack     bool
+	AllowHome     bool
+	ConfirmText   string
+	GenerateText  string
+	ExtraText     string
+	ExtraShortcut string
+	ExtraAction   string
+	DoneAllText   string
+	Hints         []string
+	State         BlastRunSelectionState
+	LoadDetail    func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
 }
 
 type BlastRunTableState struct {
@@ -283,6 +304,7 @@ type BlastRunSelectionResult struct {
 	FilterFlagsByRun [][]bool
 	FilterRequested  bool
 	GenerateFile     bool
+	Action           string
 	DoneAll          bool
 	Nav              NavAction
 	State            BlastRunSelectionState
@@ -313,6 +335,46 @@ type localizedHelpModal struct {
 	helpText    *tview.TextView
 	helpButtons *buttonRowPrimitive
 	index       int
+}
+
+type detailTabBarPrimitive struct {
+	*tview.Box
+	titles   []string
+	current  int
+	onSelect func(index int)
+}
+
+type detailTabPosition struct {
+	index int
+	left  int
+	right int
+}
+
+type detailListPrimitive struct {
+	*tview.Box
+	items   []DetailItem
+	current int
+	offset  int
+	follow  bool
+	changed func(index int)
+}
+
+type detailRenderedLine struct {
+	itemIndex int
+	text      string
+	label     bool
+}
+
+type detailOverlay struct {
+	body    *buttonFlex
+	tabs    *detailTabBarPrimitive
+	list    *detailListPrimitive
+	buttons *buttonRowPrimitive
+	pages   []DetailPage
+	current int
+	load    func(pageIndex int, itemIndex int) (DetailItem, bool, error)
+	extra   func(pageIndex int, itemIndex int)
+	app     *tview.Application
 }
 
 type clippedPrimitive struct {
@@ -738,6 +800,13 @@ type rowSelectionDisplayRow struct {
 	OriginalRow int
 }
 
+type tableSortValue struct {
+	text      string
+	lowerText string
+	number    float64
+	isNumeric bool
+}
+
 type RowSelectionResult struct {
 	Selected        []bool
 	FilterFlags     []bool
@@ -758,6 +827,10 @@ type TaskPage struct {
 	Total       int
 	AllowCancel bool
 	CancelError error
+}
+
+func taskPageAllowCancel(page TaskPage) bool {
+	return page.AllowCancel || page.CancelError != nil
 }
 
 type InfoPage struct {
@@ -831,6 +904,7 @@ type ExportSettingsPage struct {
 	WriteText      bool
 	WriteExcel     bool
 	WriteRawExcel  bool
+	UsePhgoHeader  bool
 	AllowBack      bool
 	AllowHome      bool
 	ConfirmText    string
@@ -843,6 +917,7 @@ type ExportSettingsResult struct {
 	WriteText     bool
 	WriteExcel    bool
 	WriteRawExcel bool
+	UsePhgoHeader bool
 	Nav           NavAction
 }
 
@@ -851,6 +926,8 @@ type ExternalReferencePage struct {
 	Path             []string
 	Title            string
 	Message          string
+	AutoLabelLabel   string
+	AutoLabelInitial bool
 	UniProtLabel     string
 	UniProtInitial   bool
 	InterProLabel    string
@@ -862,10 +939,11 @@ type ExternalReferencePage struct {
 }
 
 type ExternalReferenceResult struct {
-	UseUniProt       bool
-	UseInterPro      bool
-	InterProSettings InterProConservedRegionSettings
-	Nav              NavAction
+	AutoLabelBlastHits bool
+	UseUniProt         bool
+	UseInterPro        bool
+	InterProSettings   InterProConservedRegionSettings
+	Nav                NavAction
 }
 
 type BlastFilterPage struct {
@@ -949,7 +1027,6 @@ type FamilyBlastSettings struct {
 	PrependOnlyFirstQuery      bool
 	CustomizeGroups            bool
 	MinimumGroupSize           string
-	StripArabidopsisPrefix     bool
 	StripLeadingSpeciesPrefix  bool
 	StripTrailingQueryIndex    bool
 	StripAfterNumberSuffix     bool
@@ -1926,7 +2003,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		SetBordersColor(colorInactiveText).
 		SetSelectable(true, true).
 		SetFixed(2, 2).
-		SetEvaluateAllRows(true).
+		SetEvaluateAllRows(false).
 		Select(2, 2)
 	layout := newRowSelectionLayout(page.Columns)
 	baseTable.SetFixed(layout.firstDataRow, rowSelectionFirstDataColumn).Select(layout.firstDataRow, rowSelectionFirstDataColumn)
@@ -1989,6 +2066,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	var pageRoot tview.Primitive
 	modalOpen := false
 	var modalText *tview.TextView
+	var detailModal *detailOverlay
 	var copyButtonRow *buttonRowPrimitive
 	closeModal := func() {}
 	var helpModal *localizedHelpModal
@@ -2012,8 +2090,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			}
 			app.SetFocus(table)
 		}
-		addButtonRow(modalBody, modalButtons(nil, true, ButtonOK, "Enter", func(nav NavAction) {}, closeModal))
+		addButtonRow(modalBody, closeOnlyModalButtons(nil, true, ButtonOK, "Enter", closeModal, closeModal))
 		modalOpen = true
+		detailModal = nil
 		if pageRoot == nil {
 			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 		}
@@ -2024,6 +2103,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -2072,6 +2152,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	buildVisibleRows := func() []rowSelectionDisplayRow {
 		out := make([]rowSelectionDisplayRow, 0, len(order)+len(groups))
 		if page.GroupSort && len(groups) > 0 {
+			orderedByGroup := make(map[string][]int, len(groups))
 			rowToGroup := make(map[int]string, len(page.Rows))
 			explicitGroups := false
 			for _, group := range groups {
@@ -2087,11 +2168,10 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				}
 				for _, row := range group.Rows {
 					rowToGroup[row] = group.Label
+					orderedByGroup[group.Label] = append(orderedByGroup[group.Label], row)
 				}
-				for _, originalRow := range order {
-					if rowToGroup[originalRow] == group.Label {
-						out = append(out, rowSelectionDisplayRow{OriginalRow: originalRow})
-					}
+				for _, originalRow := range orderedByGroup[group.Label] {
+					out = append(out, rowSelectionDisplayRow{OriginalRow: originalRow})
 				}
 			}
 			if explicitGroups {
@@ -2114,24 +2194,37 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		return out
 	}
 	displayRowsCache := buildVisibleRows()
+	displayRowIndexCache := map[int]int{}
 	rebuildDisplayRows := func() {
 		displayRowsCache = buildVisibleRows()
+		displayRowIndexCache = make(map[int]int, len(page.Rows))
+		for displayRow, item := range displayRowsCache {
+			if item.IsGroup || item.OriginalRow < 0 {
+				continue
+			}
+			displayRowIndexCache[item.OriginalRow] = displayRow
+		}
 	}
 	visibleRows := func() []rowSelectionDisplayRow {
 		return displayRowsCache
 	}
+	rebuildDisplayRows()
 
 	currentOriginalRow := func() int {
 		row, _ := table.GetSelection()
-		if row < layout.firstDataRow {
+		displayRow := row - layout.firstDataRow
+		if displayRow < 0 {
 			return -1
 		}
-		for displayRow, item := range visibleRows() {
-			if displayRow+layout.firstDataRow == row && item.OriginalRow >= 0 {
-				return item.OriginalRow
-			}
+		displayRows := visibleRows()
+		if displayRow >= len(displayRows) {
+			return -1
 		}
-		return -1
+		item := displayRows[displayRow]
+		if item.IsGroup || item.OriginalRow < 0 {
+			return -1
+		}
+		return item.OriginalRow
 	}
 	canViewCurrent := func() bool {
 		if controlHeaders {
@@ -2172,23 +2265,51 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		showHelpModal(columnHelpPages(column), 92, 24)
 	}
-	currentRowDetail := func(originalRow int) string {
-		if originalRow < 0 || originalRow >= len(page.Rows) {
-			return ""
-		}
-		row := page.Rows[originalRow]
-		if strings.TrimSpace(row.Detail) != "" {
-			return row.Detail
-		}
-		lines := []string{fmt.Sprintf("row: %d", originalRow+1)}
-		for i, column := range page.Columns {
-			value := ""
-			if i < len(row.Cells) {
-				value = row.Cells[i]
+	var runExtraAction func()
+	showDetailModal := func(title string, originalRow int, pages []DetailPage) {
+		closeModal = func() {
+			modalOpen = false
+			helpModal = nil
+			detailModal = nil
+			if pageRoot != nil {
+				app.SetRoot(pageRoot, true)
 			}
-			lines = append(lines, fmt.Sprintf("%s: %s", firstNonEmptyText(column.Header, column.ID), displayModalValue(value)))
+			app.SetFocus(table)
 		}
-		return strings.Join(lines, "\n")
+		copyDetailItem := func() error {
+			item := detailModal.CurrentItem()
+			text := detailItemCopyValue(item)
+			if text == "" || text == "~" {
+				showInfoModal(page.Title, "The selected item is empty.", 58, 10)
+				return fmt.Errorf("empty detail item")
+			}
+			if err := writeClipboardText(text); err != nil {
+				showInfoModal("Copy failed", err.Error(), 72, 12)
+				return err
+			}
+			return nil
+		}
+		loadDetailItem := func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+			if page.LoadDetail == nil {
+				return DetailItem{}, false, nil
+			}
+			return page.LoadDetail(originalRow, pageIndex, itemIndex)
+		}
+		var runDetailBlast func(pageIndex int, itemIndex int)
+		runDetailBlast = func(pageIndex int, itemIndex int) {
+			if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
+				return
+			}
+			runExtraAction()
+		}
+		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
+		modalOpen = true
+		helpModal = nil
+		if pageRoot == nil {
+			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
+		}
+		app.SetRoot(overlayRootOn(pageRoot, detailModal.Body(), 118, 34), true)
+		app.SetFocus(detailModal.list)
 	}
 	viewCurrent := func() {
 		if controlHeaders {
@@ -2200,12 +2321,16 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			return
 		}
 		originalRow := currentOriginalRow()
-		detail := strings.TrimSpace(currentRowDetail(originalRow))
-		if detail == "" {
+		if originalRow < 0 || originalRow >= len(page.Rows) {
 			showViewUnavailable("No details are available for the current row.")
 			return
 		}
-		showInfoModal("Row details", detail, 110, 30)
+		detailPages := normalizeDetailPages(page.Columns, page.Rows[originalRow], originalRow+1)
+		if len(detailPages) == 0 {
+			showViewUnavailable("No details are available for the current row.")
+			return
+		}
+		showDetailModal("Row details", originalRow, detailPages)
 	}
 	currentCellText := func() (string, bool) {
 		if controlHeaders {
@@ -2281,11 +2406,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		table.Select(row, column)
 	}
 	selectOriginalRow := func(originalRow int, column int) {
-		for displayRow, item := range visibleRows() {
-			if item.OriginalRow == originalRow {
-				keepSelectionVisible(displayRow+layout.firstDataRow, column)
-				return
-			}
+		if displayRow, ok := displayRowIndexCache[originalRow]; ok {
+			keepSelectionVisible(displayRow+layout.firstDataRow, column)
+			return
 		}
 		keepSelectionVisible(layout.firstDataRow, column)
 	}
@@ -2365,6 +2488,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	}
 	var setSelectionHeader func()
 	var updateMarkerRow func(int, int)
+	var syncVisibleSelectionMarkers func()
 	setSelectionHeader = func() {
 		marker := "[ ]"
 		markerColor := colorSelectionOff
@@ -2378,10 +2502,19 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			SetSelectable(false).
 			SetClickedFunc(func() bool {
 				setAll(selected, !allSelected())
-				refresh()
+				syncVisibleSelectionMarkers()
+				setSelectionHeader()
 				return true
 			}))
 		table.SetTitle(" " + tableTitleWithCount(page.Title, countSelectedBools(selected), len(page.Rows)) + " ")
+	}
+	syncVisibleSelectionMarkers = func() {
+		for displayRow, item := range visibleRows() {
+			if item.IsGroup || item.OriginalRow < 0 {
+				continue
+			}
+			updateMarkerRow(displayRow+layout.firstDataRow, item.OriginalRow)
+		}
 	}
 	updateMarkerRow = func(displayRow int, originalRow int) {
 		if originalRow < 0 || originalRow >= len(selected) {
@@ -2548,7 +2681,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.State = captureState()
 		app.Stop()
 	}
-	runExtraAction := func() {
+	runExtraAction = func() {
 		action := strings.TrimSpace(page.ExtraAction)
 		if action == "" {
 			return
@@ -2615,7 +2748,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	copyButtonRow = buttonRow(actions...)
 	addButtonRow(body, copyButtonRow)
 	body.AddItem(modeText, 1, 0, false)
-	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+Shift+C copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"))
+	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"))
 
 	pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	setPageRoot(app, pageRoot)
@@ -2624,6 +2757,42 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		if modalOpen {
 			if helpModal != nil {
 				_ = helpModal.HandleKey(app, event, closeModal)
+				return nil
+			}
+			if detailModal != nil {
+				if isCopyShortcut(event) {
+					item := detailModal.CurrentItem()
+					text := detailItemCopyValue(item)
+					if text == "" || text == "~" {
+						showInfoModal(page.Title, "The selected item is empty.", 58, 10)
+						return nil
+					}
+					if err := writeClipboardText(text); err != nil {
+						showInfoModal("Copy failed", err.Error(), 72, 12)
+					}
+					return nil
+				}
+				if shortcutMatchesEvent(ShortcutBlast, event) {
+					if detailModal.extra != nil {
+						pageIndex, itemIndex := detailModal.CurrentIndexes()
+						detailModal.extra(pageIndex, itemIndex)
+					}
+					return nil
+				}
+				switch event.Key() {
+				case tcell.KeyEscape:
+					closeModal()
+				case tcell.KeyUp:
+					detailModal.list.Move(-1)
+				case tcell.KeyDown:
+					detailModal.list.Move(1)
+				case tcell.KeyLeft:
+					detailModal.MovePage(-1)
+				case tcell.KeyRight, tcell.KeyTab:
+					detailModal.MovePage(1)
+				case tcell.KeyBacktab:
+					detailModal.MovePage(-1)
+				}
 				return nil
 			}
 			switch event.Key() {
@@ -2643,6 +2812,14 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		if selectionKey(event) && app.GetFocus() != table {
 			app.SetFocus(table)
 		}
+		if isCopyShortcut(event) {
+			copyCurrent()
+			return nil
+		}
+		if strings.TrimSpace(page.ExtraAction) != "" && shortcutMatchesEvent(firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), event) {
+			runExtraAction()
+			return nil
+		}
 		switch event.Key() {
 		case tcell.KeyEscape:
 			if page.AllowBack {
@@ -2660,20 +2837,17 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			}
 		case tcell.KeyCtrlA:
 			setAll(selected, true)
-			refresh()
+			syncVisibleSelectionMarkers()
+			setSelectionHeader()
 			return nil
 		case tcell.KeyCtrlN:
 			setAll(selected, false)
-			refresh()
+			syncVisibleSelectionMarkers()
+			setSelectionHeader()
 			return nil
 		case tcell.KeyCtrlF:
 			if page.AllowFilter {
 				requestFilter()
-				return nil
-			}
-		case tcell.KeyCtrlC:
-			if isCopyShortcut(event) {
-				copyCurrent()
 				return nil
 			}
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
@@ -2750,10 +2924,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				return nil
 			}
 		case tcell.KeyRune:
-			if isCopyShortcut(event) {
-				copyCurrent()
-				return nil
-			}
 			if event.Rune() == ' ' {
 				toggleCurrent()
 				return nil
@@ -2824,7 +2994,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		SetBordersColor(colorInactiveText).
 		SetSelectable(true, true).
 		SetFixed(2, 2).
-		SetEvaluateAllRows(true).
+		SetEvaluateAllRows(false).
 		Select(2, 2)
 	layout := newRowSelectionLayout(page.Items[currentRun].Columns)
 	tableBase.SetFixed(layout.firstDataRow, rowSelectionFirstDataColumn).Select(layout.firstDataRow, rowSelectionFirstDataColumn)
@@ -2848,6 +3018,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	modalOpen := false
 	var modalText *tview.TextView
 	var helpModal *localizedHelpModal
+	var detailModal *detailOverlay
 	closeModal := func() {}
 
 	sortState := TableSort{Column: -1, Direction: SortAscending}
@@ -2946,6 +3117,22 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	currentFilterFlags := func() []bool {
 		return filterFlagsByRun[currentRun]
 	}
+	runExtraAction := func() {
+		action := strings.TrimSpace(page.ExtraAction)
+		if action == "" {
+			return
+		}
+		result.RunIndex = currentRun
+		result.Selected = append([]bool(nil), currentSelected()...)
+		result.SelectedByRun = cloneBoolMatrix(selectedByRun)
+		result.FilterFlagsByRun = cloneBoolMatrix(filterFlagsByRun)
+		result.FilterRequested = false
+		result.GenerateFile = false
+		result.DoneAll = false
+		result.Action = action
+		result.State = captureState()
+		app.Stop()
+	}
 	displayColumn := func(dataColumn int) int { return dataColumn + 2 }
 	dataColumnFromSelection := func() int {
 		row, column := table.GetSelection()
@@ -3000,6 +3187,8 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		closeModal = func() {
 			modalOpen = false
 			modalText = nil
+			helpModal = nil
+			detailModal = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -3009,7 +3198,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				app.SetFocus(table)
 			}
 		}
-		addButtonRow(modalBody, modalButtons(nil, true, ButtonOK, "Enter", func(nav NavAction) {}, closeModal))
+		addButtonRow(modalBody, closeOnlyModalButtons(nil, true, ButtonOK, "Enter", closeModal, closeModal))
 		modalOpen = true
 		app.SetRoot(overlayRootOn(pageRoot, modalBody, width, height), true)
 		app.SetFocus(modalBody)
@@ -3019,6 +3208,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -3031,25 +3221,6 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		modalOpen = true
 		app.SetRoot(overlayRootOn(pageRoot, helpModal.Body(), width, height), true)
 		app.SetFocus(helpModal.TextView())
-	}
-	currentRowDetail := func(originalRow int) string {
-		item := currentItem()
-		if originalRow < 0 || originalRow >= len(item.Rows) {
-			return ""
-		}
-		row := item.Rows[originalRow]
-		if strings.TrimSpace(row.Detail) != "" {
-			return row.Detail
-		}
-		lines := []string{fmt.Sprintf("row: %d", originalRow+1)}
-		for i, column := range item.Columns {
-			value := ""
-			if i < len(row.Cells) {
-				value = row.Cells[i]
-			}
-			lines = append(lines, fmt.Sprintf("%s: %s", firstNonEmptyText(column.Header, column.ID), displayModalValue(value)))
-		}
-		return strings.Join(lines, "\n")
 	}
 	currentHeaderColumn := func() (TableColumn, bool) {
 		if controlMode != 1 {
@@ -3076,6 +3247,54 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			return
 		}
 		showHelpModal(columnHelpPages(column), 92, 24)
+	}
+	showDetailModal := func(title string, runIndex int, originalRow int, pages []DetailPage) {
+		closeModal = func() {
+			modalOpen = false
+			helpModal = nil
+			detailModal = nil
+			if pageRoot != nil {
+				app.SetRoot(pageRoot, true)
+			}
+			if controlMode == 2 {
+				app.SetFocus(list)
+			} else {
+				app.SetFocus(table)
+			}
+		}
+		copyDetailItem := func() error {
+			item := detailModal.CurrentItem()
+			text := detailItemCopyValue(item)
+			if text == "" || text == "~" {
+				showInfoModal(page.Title, "The selected item is empty.", 58, 10)
+				return fmt.Errorf("empty detail item")
+			}
+			if err := writeClipboardText(text); err != nil {
+				showInfoModal("Copy failed", err.Error(), 72, 12)
+				return err
+			}
+			return nil
+		}
+		loadDetailItem := func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+			if page.LoadDetail == nil {
+				return DetailItem{}, false, nil
+			}
+			return page.LoadDetail(runIndex, originalRow, pageIndex, itemIndex)
+		}
+		runDetailBlast := func(pageIndex int, itemIndex int) {
+			if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
+				return
+			}
+			if strings.TrimSpace(page.ExtraAction) == "" {
+				return
+			}
+			runExtraAction()
+		}
+		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
+		modalOpen = true
+		helpModal = nil
+		app.SetRoot(overlayRootOn(pageRoot, detailModal.Body(), 118, 34), true)
+		app.SetFocus(detailModal.list)
 	}
 	allSelected := func() bool {
 		selected := currentSelected()
@@ -3122,6 +3341,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	}
 	var setSelectionHeader func()
 	var updateMarkerRow func(int, int)
+	var syncVisibleSelectionMarkers func()
 	setSelectionHeader = func() {
 		item := currentItem()
 		marker := "[ ]"
@@ -3132,10 +3352,17 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		}
 		table.SetCell(rowSelectionHeaderRow, 0, paddedTableCell(tview.Escape(marker)).SetTextColor(markerColor).SetAlign(tview.AlignCenter).SetSelectable(false).SetClickedFunc(func() bool {
 			setAll(currentSelected(), !allSelected())
-			refresh()
+			syncVisibleSelectionMarkers()
+			setSelectionHeader()
+			refreshList()
 			return true
 		}))
 		table.SetTitle(" " + tableTitleWithCount(page.Title, countSelectedBools(currentSelected()), len(item.Rows)) + " ")
+	}
+	syncVisibleSelectionMarkers = func() {
+		for displayRow, originalRow := range order {
+			updateMarkerRow(displayRow+layout.firstDataRow, originalRow)
+		}
 	}
 	updateMarkerRow = func(displayRow int, originalRow int) {
 		if originalRow < 0 || originalRow >= len(currentSelected()) {
@@ -3340,12 +3567,16 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			return
 		}
 		originalRow := currentOriginalRow()
-		detail := strings.TrimSpace(currentRowDetail(originalRow))
-		if detail == "" {
+		if originalRow < 0 || originalRow >= len(currentItem().Rows) {
 			showInfoModal("Row details", "No details are available for the current row.", 64, 10)
 			return
 		}
-		showInfoModal("Row details", detail, 110, 30)
+		detailPages := normalizeDetailPages(currentItem().Columns, currentItem().Rows[originalRow], originalRow+1)
+		if len(detailPages) == 0 {
+			showInfoModal("Row details", "No details are available for the current row.", 64, 10)
+			return
+		}
+		showDetailModal("Row details", currentRun, originalRow, detailPages)
 	}
 	toggleCurrent := func() {
 		if controlMode != 0 || len(currentItem().Rows) == 0 {
@@ -3394,6 +3625,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
 		{Label: conciseActionLabel(page.DoneAllText, ButtonExportAll), Shortcut: ShortcutExportAll, Action: func() { generate(true) }, Visible: true, Primary: true},
+		{Label: conciseActionLabel(page.ExtraText, ButtonRunBLAST), Shortcut: firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), Action: runExtraAction, Visible: strings.TrimSpace(page.ExtraAction) != "", Primary: true},
 		{Label: conciseActionLabel(page.GenerateText, ButtonExport), Shortcut: ShortcutExport, Action: func() { generate(false) }, Visible: true, Primary: true},
 		{Label: conciseActionLabel(page.ConfirmText, ButtonView), Shortcut: ShortcutConfirm, Action: viewCurrent, Visible: true, Primary: true},
 	}
@@ -3416,6 +3648,42 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				_ = helpModal.HandleKey(app, event, closeModal)
 				return nil
 			}
+			if detailModal != nil {
+				if isCopyShortcut(event) {
+					item := detailModal.CurrentItem()
+					text := detailItemCopyValue(item)
+					if text == "" || text == "~" {
+						showInfoModal(page.Title, "The selected item is empty.", 58, 10)
+						return nil
+					}
+					if err := writeClipboardText(text); err != nil {
+						showInfoModal("Copy failed", err.Error(), 72, 12)
+					}
+					return nil
+				}
+				if shortcutMatchesEvent(ShortcutBlast, event) {
+					if detailModal.extra != nil {
+						pageIndex, itemIndex := detailModal.CurrentIndexes()
+						detailModal.extra(pageIndex, itemIndex)
+					}
+					return nil
+				}
+				switch event.Key() {
+				case tcell.KeyEscape:
+					closeModal()
+				case tcell.KeyUp:
+					detailModal.list.Move(-1)
+				case tcell.KeyDown:
+					detailModal.list.Move(1)
+				case tcell.KeyLeft:
+					detailModal.MovePage(-1)
+				case tcell.KeyRight, tcell.KeyTab:
+					detailModal.MovePage(1)
+				case tcell.KeyBacktab:
+					detailModal.MovePage(-1)
+				}
+				return nil
+			}
 			switch event.Key() {
 			case tcell.KeyEnter, tcell.KeyEscape:
 				closeModal()
@@ -3428,6 +3696,10 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			case tcell.KeyPgDn:
 				scrollTextView(modalText, 8)
 			}
+			return nil
+		}
+		if isCopyShortcut(event) {
+			copyCurrent()
 			return nil
 		}
 		switch event.Key() {
@@ -3460,13 +3732,17 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		case tcell.KeyCtrlA:
 			if len(currentSelected()) > 0 {
 				setAll(currentSelected(), true)
-				refresh()
+				syncVisibleSelectionMarkers()
+				setSelectionHeader()
+				refreshList()
 			}
 			return nil
 		case tcell.KeyCtrlN:
 			if len(currentSelected()) > 0 {
 				setAll(currentSelected(), false)
-				refresh()
+				syncVisibleSelectionMarkers()
+				setSelectionHeader()
+				refreshList()
 			}
 			return nil
 		case tcell.KeyCtrlF:
@@ -3537,10 +3813,6 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				return nil
 			}
 		case tcell.KeyRune:
-			if isCopyShortcut(event) {
-				copyCurrent()
-				return nil
-			}
 			if event.Rune() == ' ' {
 				toggleCurrent()
 				return nil
@@ -3605,8 +3877,8 @@ func RunInfoPage(page InfoPage) (InfoResult, error) {
 	setFocusBorder(modalBody.Box, true)
 	attachFocusBorder(modalBody.Box)
 	modalBody.AddItem(textPanel(page.Title, page.Message), 0, 1, true)
-	addButtonRow(modalBody, modalButtons(nil, true, page.ConfirmText, "Enter", func(nav NavAction) {
-		result.Nav = nav
+	addButtonRow(modalBody, closeOnlyModalButtons(nil, true, page.ConfirmText, "Enter", func() {
+		result.Nav = NavBack
 		app.Stop()
 	}, confirm))
 	addHints(modalBody, page.Hints)
@@ -3706,9 +3978,6 @@ func RunRecoveryModalPage(page RecoveryModalPage) (ActionModalResult, error) {
 	actions := []Action{
 		{Value: "retry", Label: ButtonRetry, Shortcut: ShortcutRetry},
 	}
-	if page.AllowBack {
-		actions = append([]Action{{Value: "back", Label: ButtonBack, Shortcut: ShortcutBack}}, actions...)
-	}
 	confirmText := ButtonClose
 	confirmValue := "close"
 	if page.AllowSkip {
@@ -3727,6 +3996,15 @@ func RunRecoveryModalPage(page RecoveryModalPage) (ActionModalResult, error) {
 		ConfirmText:  confirmText,
 		ConfirmValue: confirmValue,
 	})
+}
+
+func detailItemLine(item DetailItem) string {
+	label := strings.TrimSpace(item.Label)
+	value := displayModalValue(item.Value)
+	if label == "" {
+		return value
+	}
+	return label + ": " + value
 }
 
 func RunChoiceModalPage(page ChoiceModalPage) (ChoiceResult, error) {
@@ -3882,10 +4160,12 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	writeText := page.WriteText
 	writeExcel := page.WriteExcel
 	writeRawExcel := page.WriteRawExcel
-	outputTextBox := newCheckboxModule("Write text file", func() bool { return writeText }, func() { writeText = !writeText })
+	usePhgoHeader := page.UsePhgoHeader
+	outputTextBox := newCheckboxModule("Write FASTA file", func() bool { return writeText }, func() { writeText = !writeText })
 	outputExcelBox := newCheckboxModule("Write Excel file", func() bool { return writeExcel }, func() { writeExcel = !writeExcel })
-	outputRawBox := newCheckboxModule("Write raw Excel and raw text files", func() bool { return writeRawExcel }, func() { writeRawExcel = !writeRawExcel })
-	for _, box := range []*checkboxModule{outputTextBox, outputExcelBox, outputRawBox} {
+	outputRawBox := newCheckboxModule("Write raw Excel and raw FASTA files", func() bool { return writeRawExcel }, func() { writeRawExcel = !writeRawExcel })
+	phgoHeaderBox := newCheckboxModule("Use phytozome GO FASTA header format for exported FASTA", func() bool { return usePhgoHeader }, func() { usePhgoHeader = !usePhgoHeader })
+	for _, box := range []*checkboxModule{outputTextBox, outputExcelBox, outputRawBox, phgoHeaderBox} {
 		box.SetBorder(false)
 	}
 
@@ -3907,6 +4187,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 		exportModule{primitive: outputTextBox},
 		exportModule{primitive: outputExcelBox},
 		exportModule{primitive: outputRawBox},
+		exportModule{primitive: phgoHeaderBox},
 		exportModule{primitive: reportBox},
 	)
 	focusIndex := 0
@@ -3925,6 +4206,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 		result.WriteText = writeText
 		result.WriteExcel = writeExcel
 		result.WriteRawExcel = writeRawExcel
+		result.UsePhgoHeader = usePhgoHeader
 		app.Stop()
 	}
 	focusNext := func() {
@@ -3986,22 +4268,22 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	outputGroup.SetBorder(true)
 	outputGroup.SetTitle(" Files to generate ")
 	outputGroup.SetTitleAlign(tview.AlignCenter)
-	outputHelp := "Text exports selected peptide sequences. Excel exports selected rows.\nRaw exports every table row to _raw.xlsx, and also writes _raw.txt when text export is enabled."
+	outputHelp := "FASTA exports selected peptide sequences. Excel exports selected rows.\nRaw exports every table row to _raw.xlsx, and also writes _raw.fasta when FASTA export is enabled."
 	outputGroup.AddItem(textBlock(outputHelp), 3, 0, false)
 	outputGroup.AddItem(outputTextBox, 1, 0, false)
 	outputGroup.AddItem(outputExcelBox, 1, 0, false)
 	outputGroup.AddItem(outputRawBox, 1, 0, false)
-	outputGroupHeight := 8
+	outputGroup.AddItem(phgoHeaderBox, 1, 0, false)
+	outputGroupHeight := 9
 	modalBody.AddItem(outputGroup, outputGroupHeight, 0, false)
 	contentHeight += outputGroupHeight
 	modalBody.AddItem(reportBox, 3, 0, false)
 	contentHeight += 3
 	modalBody.AddItem(pasteStatus.view, 1, 0, false)
 	contentHeight += 1
-	addButtonRow(modalBody, modalButtons([]buttonSpec{
-		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
+	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: true},
-	}, true, page.ConfirmText, "Enter", closeWithNav, submitExportSettings))
+	}, true, page.ConfirmText, "Enter", func() { closeWithNav(NavBack) }, submitExportSettings))
 	contentHeight += 1
 	addHints(modalBody, []string{"Tab switches fields. Enter moves forward; on the last field it starts export. Space toggles file options."})
 	contentHeight += 1
@@ -4067,11 +4349,22 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceResult, error) {
 	app := newApp()
 	var result ExternalReferenceResult
+	autoLabelHits := page.AutoLabelInitial
 	useUniProt := page.UniProtInitial
 	useInterPro := page.InterProInitial
 	settings := normalizeTUIInterProSettings(page.InterProSettings)
 	helpVisible := false
 	var mainRoot tview.Primitive
+	autoLabelBox := newCheckboxModule(firstNonEmptyText(page.AutoLabelLabel, "Auto identify BLAST hit labelnames"), func() bool {
+		return autoLabelHits
+	}, func() {
+		autoLabelHits = !autoLabelHits
+	})
+	autoLabelBox.SetBorder(true)
+	autoLabelBox.SetTitle(" BLAST hit labelnames ")
+	autoLabelBox.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(autoLabelBox.Box, false)
+	attachFocusBorder(autoLabelBox.Box)
 	uniProtBox := newCheckboxModule(firstNonEmptyText(page.UniProtLabel, "Add UniProt annotation columns"), func() bool {
 		return useUniProt
 	}, func() {
@@ -4162,6 +4455,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		app.Stop()
 	}
 	confirm := func() {
+		result.AutoLabelBlastHits = autoLabelHits
 		result.UseUniProt = useUniProt
 		result.UseInterPro = useInterPro
 		result.InterProSettings = InterProConservedRegionSettings{
@@ -4189,16 +4483,21 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	interProIndex := 0
 	setTopFocus := func(index int) {
 		if index < 0 {
-			index = 1
+			index = 2
 		}
-		if index > 1 {
+		if index > 2 {
 			index = 0
 		}
 		topIndex = index
-		setFocusBorder(uniProtBox.Box, topIndex == 0)
-		setFocusBorder(interProModule.Box, topIndex == 1)
-		setFocusBorder(params.Box, topIndex == 1)
+		setFocusBorder(autoLabelBox.Box, topIndex == 0)
+		setFocusBorder(uniProtBox.Box, topIndex == 1)
+		setFocusBorder(interProModule.Box, topIndex == 2)
+		setFocusBorder(params.Box, topIndex == 2)
 		if topIndex == 0 {
+			app.SetFocus(autoLabelBox)
+			return
+		}
+		if topIndex == 1 {
 			app.SetFocus(uniProtBox)
 			return
 		}
@@ -4225,8 +4524,17 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	syncFocusFromApp := func() {
 		current := app.GetFocus()
-		if current == uniProtBox {
+		if current == autoLabelBox {
 			topIndex = 0
+			setFocusBorder(autoLabelBox.Box, true)
+			setFocusBorder(uniProtBox.Box, false)
+			setFocusBorder(interProModule.Box, false)
+			setFocusBorder(params.Box, false)
+			return
+		}
+		if current == uniProtBox {
+			topIndex = 1
+			setFocusBorder(autoLabelBox.Box, false)
 			setFocusBorder(uniProtBox.Box, true)
 			setFocusBorder(interProModule.Box, false)
 			setFocusBorder(params.Box, false)
@@ -4234,8 +4542,9 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		}
 		for i, primitive := range interProControls {
 			if current == primitive {
-				topIndex = 1
+				topIndex = 2
 				interProIndex = i
+				setFocusBorder(autoLabelBox.Box, false)
 				setFocusBorder(uniProtBox.Box, false)
 				setFocusBorder(interProModule.Box, true)
 				setFocusBorder(params.Box, true)
@@ -4245,6 +4554,10 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	toggleFocused := func() bool {
 		if topIndex == 0 {
+			autoLabelBox.toggleChecked()
+			return true
+		}
+		if topIndex == 1 {
 			uniProtBox.toggleChecked()
 			return true
 		}
@@ -4286,19 +4599,19 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	if strings.TrimSpace(page.Message) != "" {
 		modalBody.AddItem(textBlock(page.Message), 3, 0, false)
 	}
+	modalBody.AddItem(autoLabelBox, 3, 0, true)
 	modalBody.AddItem(uniProtBox, 3, 0, true)
 	modalBody.AddItem(interProModule, 0, 1, false)
-	addButtonRow(modalBody, modalButtons([]buttonSpec{
-		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
+	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
-	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", closeWithNav, confirm))
-	addHints(modalBody, []string{"Tab switches between UniProt and InterPro. Up/Down moves through InterPro options. Space toggles a checkbox. Enter continues from UniProt or applies from InterPro. F1 opens parameter help."})
+	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
+	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, and InterPro. Up/Down moves through InterPro options. Space toggles a checkbox. Enter continues or applies from InterPro. F1 opens parameter help."})
 
 	messageHeight := 0
 	if strings.TrimSpace(page.Message) != "" {
 		messageHeight = 3
 	}
-	externalReferenceHeight := modalHeightForContent(messageHeight+3+2+2+3+len(settingBoxes)+1+2+1+5+1+4, 36, 46)
+	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+2+2+3+len(settingBoxes)+1+2+1+5+1+4, 39, 50)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
 	app.SetRoot(mainRoot, true)
 	setTopFocus(0)
@@ -4312,7 +4625,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			showHelp()
 			return nil
 		}
-		if topIndex == 1 {
+		if topIndex == 2 {
 			if input, ok := interProControls[interProIndex].(*tview.InputField); ok && inputFieldEditKey(event) {
 				deliverInputFieldKey(input, event, app)
 				return nil
@@ -4333,28 +4646,30 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		case tcell.KeyEnter:
 			if topIndex == 0 {
 				setTopFocus(1)
+			} else if topIndex == 1 {
+				setTopFocus(2)
 			} else {
 				confirm()
 			}
 			return nil
 		case tcell.KeyUp:
-			if topIndex == 1 {
+			if topIndex == 2 {
 				setInterProFocus(interProIndex - 1)
 				return nil
 			}
 		case tcell.KeyDown:
-			if topIndex == 1 {
+			if topIndex == 2 {
 				setInterProFocus(interProIndex + 1)
 				return nil
 			}
 		case tcell.KeyLeft:
-			if topIndex == 0 {
-				setTopFocus(1)
+			if topIndex > 0 {
+				setTopFocus(topIndex - 1)
 				return nil
 			}
 		case tcell.KeyRight:
-			if topIndex == 0 {
-				setTopFocus(1)
+			if topIndex < 2 {
+				setTopFocus(topIndex + 1)
 				return nil
 			}
 		case tcell.KeyRune:
@@ -4384,14 +4699,13 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	mergeBox := newCheckboxModule("Merge rows that hit the same target gene/protein", func() bool { return settings.MergeRowsByTarget }, func() { settings.MergeRowsByTarget = !settings.MergeRowsByTarget })
 	bestBox := newCheckboxModule("When merged, keep the strongest member hit", func() bool { return settings.KeepBestHitPerTarget }, func() { settings.KeepBestHitPerTarget = !settings.KeepBestHitPerTarget })
 	prependFirstBox := newCheckboxModule("TXT export: include only the first query sequence", func() bool { return settings.PrependOnlyFirstQuery }, func() { settings.PrependOnlyFirstQuery = !settings.PrependOnlyFirstQuery })
-	stripAtBox := newCheckboxModule("Remove Arabidopsis At/AT prefix for grouping", func() bool { return settings.StripArabidopsisPrefix }, func() { settings.StripArabidopsisPrefix = !settings.StripArabidopsisPrefix })
 	stripSpeciesBox := newCheckboxModule("Remove leading species-style prefix", func() bool { return settings.StripLeadingSpeciesPrefix }, func() { settings.StripLeadingSpeciesPrefix = !settings.StripLeadingSpeciesPrefix })
 	stripIndexBox := newCheckboxModule("Remove trailing member number", func() bool { return settings.StripTrailingQueryIndex }, func() { settings.StripTrailingQueryIndex = !settings.StripTrailingQueryIndex })
 	stripAfterNumberBox := newCheckboxModule("Ignore suffix after a member number", func() bool { return settings.StripAfterNumberSuffix }, func() { settings.StripAfterNumberSuffix = !settings.StripAfterNumberSuffix })
 	normalizePunctuationBox := newCheckboxModule("Treat punctuation as the same separator", func() bool { return settings.NormalizeInnerPunctuation }, func() { settings.NormalizeInnerPunctuation = !settings.NormalizeInnerPunctuation })
 	stripSubtypeBox := newCheckboxModule("Remove terminal subtype suffix", func() bool { return settings.StripTerminalSubtypeSuffix }, func() { settings.StripTerminalSubtypeSuffix = !settings.StripTerminalSubtypeSuffix })
 	keepSubgroupsBox := newCheckboxModule("Keep detected subgroups as separate families", func() bool { return settings.KeepDistinctQuerySubgroups }, func() { settings.KeepDistinctQuerySubgroups = !settings.KeepDistinctQuerySubgroups })
-	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripAtBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, normalizePunctuationBox, stripSubtypeBox, keepSubgroupsBox} {
+	for _, box := range []*checkboxModule{enableBox, detectBox, mergeBox, bestBox, prependFirstBox, stripSpeciesBox, stripIndexBox, stripAfterNumberBox, normalizePunctuationBox, stripSubtypeBox, keepSubgroupsBox} {
 		box.SetBorder(false)
 	}
 	minGroupInput := tview.NewInputField().SetLabel("minimum queries in a family ").SetText(settings.MinimumGroupSize).SetFieldWidth(8)
@@ -4442,7 +4756,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		settingsModule.AddItem(primitive, 1, 0, primitive == minGroupInput)
 	}
 	settingsModule.AddItem(sectionHeader("Name cleanup before grouping"), 1, 0, false)
-	for _, primitive := range []tview.Primitive{stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, stripAtBox, keepSubgroupsBox} {
+	for _, primitive := range []tview.Primitive{stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, keepSubgroupsBox} {
 		settingsModule.AddItem(primitive, 1, 0, false)
 	}
 	settingsModule.AddItem(sectionHeader("Merged rows and export"), 1, 0, false)
@@ -4452,7 +4766,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	setFocusBorder(settingsModule.Box, true)
 	attachFocusBorder(settingsModule.Box)
 
-	controls := []tview.Primitive{enableBox, detectBox, minGroupInput, stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, stripAtBox, keepSubgroupsBox, mergeBox, bestBox, rankingOrderInput, prependFirstBox}
+	controls := []tview.Primitive{enableBox, detectBox, minGroupInput, stripSpeciesBox, normalizePunctuationBox, stripIndexBox, stripAfterNumberBox, stripSubtypeBox, keepSubgroupsBox, mergeBox, bestBox, rankingOrderInput, prependFirstBox}
 	focusIndex := 0
 	setFocusAt := func(index int) {
 		if index < 0 {
@@ -4498,7 +4812,6 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
 			CustomizeGroups:            customizeGroups,
 			MinimumGroupSize:           minGroupInput.GetText(),
-			StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
 			StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
 			StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
 			StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
@@ -4560,8 +4873,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		AddItem(detectedModule, 44, 0, false).
 		AddItem(settingsModule, 0, 1, true)
 	body.AddItem(contentRow, 0, 1, true)
-	actionButtons := buttonRow(
-		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
+	actionButtons := closeOnlyModalButtons([]buttonSpec{
 		buttonSpec{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+R", Action: func() {
 			result.Settings = captureSettings()
@@ -4569,8 +4881,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			app.Stop()
 		}, Visible: true},
 		buttonSpec{Label: "Customize groups", Shortcut: "Ctrl+G", Action: customizeGroups, Visible: true, Primary: true},
-		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: ShortcutApply, Action: confirm, Visible: true, Primary: true},
-	)
+	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), ShortcutApply, func() { closeWithNav(NavBack) }, confirm)
 	addButtonRow(body, actionButtons)
 	addHints(body, []string{"Up/Down moves through options. Space toggles a checkbox. Ctrl+G opens the group editor. Ctrl+R refreshes the preview after changing grouping rules. Enter applies. F1 opens help."})
 
@@ -5667,7 +5978,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Shift+C copies an alias in the alias dialog. Delete removes/deletes. Ctrl+N creates a group. Ctrl+Enter applies."})
+	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+N creates a group. Ctrl+Enter applies."})
 
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
 	refreshGroupedList()
@@ -6304,11 +6615,10 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		setModuleFocus(moduleIndex)
 	}
 
-	addButtonRow(module, modalButtons([]buttonSpec{
-		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { closeWithNav(NavBack) }, Visible: page.AllowBack},
+	addButtonRow(module, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonClearFilter, Shortcut: ShortcutClearFilter, Action: clearFilter, Visible: true},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
-	}, true, firstNonEmptyText(page.ConfirmText, ButtonFilter), ShortcutConfirm, closeWithNav, confirm))
+	}, true, firstNonEmptyText(page.ConfirmText, ButtonFilter), ShortcutConfirm, func() { closeWithNav(NavBack) }, confirm))
 	addHints(module, []string{"Tab switches sections. Up/Down moves within the active section. Space toggles a checkbox. Enter advances and applies from the final page. Ctrl+L clears filter marks and reselects all rows. F1 opens help."})
 
 	filterContentRows := 3 + maxInt(31, 46)
@@ -6579,8 +6889,6 @@ Enable Family BLAST mode turns this grouped workflow on. If it is off, the batch
 Group queries by detected family prefix derives a family name from the query label without changing the original label.
 
 Ignore suffix after member number before grouping is on by default and helps labels such as IRX10-like group with IRX10 and other IRX members.
-
-Strip Arabidopsis At/AT prefix only for family_name is off by default and is only for cases where ATPAL should group as PAL.
 
 Merge grouped result rows by target protein/gene removes duplicate targets inside one family.
 
@@ -6874,15 +7182,16 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
 	}
 	modalBody.AddItem(statusView, 0, 1, true)
+	allowCancel := taskPageAllowCancel(page)
 	cancelTask := func() {
 		if cancelled.CompareAndSwap(false, true) {
 			cancelTaskContext()
-			if stopped.CompareAndSwap(false, true) {
-				app.Stop()
-			}
+			app.QueueUpdateDraw(func() {
+				statusView.SetText("Cancelling task...")
+			})
 		}
 	}
-	if page.AllowCancel {
+	if allowCancel {
 		addButtonRow(modalBody, buttonRow(buttonSpec{
 			Label:    ButtonCancel,
 			Shortcut: ShortcutCancel,
@@ -6953,9 +7262,6 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 				text := status
 				mu.Unlock()
 				app.QueueUpdateDraw(func() {
-					if cancelled.Load() {
-						return
-					}
 					statusView.SetText(fmt.Sprintf("[yellow]%s[white] %s", frames[frame%len(frames)], text))
 				})
 				frame++
@@ -6967,6 +7273,12 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 		select {
 		case <-taskReady:
 		case <-taskCtx.Done():
+			taskErr = taskCtx.Err()
+			app.QueueUpdateDraw(func() {
+				if stopped.CompareAndSwap(false, true) {
+					app.Stop()
+				}
+			})
 			return
 		}
 		result, taskErr = task(taskCtx, setStatus)
@@ -6978,7 +7290,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 	}()
 
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if page.AllowCancel && event.Key() == tcell.KeyEscape {
+		if allowCancel && event.Key() == tcell.KeyEscape {
 			cancelTask()
 			return nil
 		}
@@ -7063,15 +7375,16 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
 	}
 	modalBody.AddItem(statusView, 0, 1, true)
+	allowCancel := taskPageAllowCancel(page)
 	cancelTask := func() {
 		if cancelled.CompareAndSwap(false, true) {
 			cancelTaskContext()
-			if stopped.CompareAndSwap(false, true) {
-				app.Stop()
-			}
+			app.QueueUpdateDraw(func() {
+				statusView.SetText(render("|") + "\n\nCancelling task...")
+			})
 		}
 	}
-	if page.AllowCancel {
+	if allowCancel {
 		addButtonRow(modalBody, buttonRow(buttonSpec{
 			Label:    ButtonCancel,
 			Shortcut: ShortcutCancel,
@@ -7145,9 +7458,6 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 				text := render(frames[frame%len(frames)])
 				mu.Unlock()
 				app.QueueUpdateDraw(func() {
-					if cancelled.Load() {
-						return
-					}
 					statusView.SetText(text)
 				})
 				frame++
@@ -7159,6 +7469,12 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 		select {
 		case <-taskReady:
 		case <-taskCtx.Done():
+			taskErr = taskCtx.Err()
+			app.QueueUpdateDraw(func() {
+				if stopped.CompareAndSwap(false, true) {
+					app.Stop()
+				}
+			})
 			return
 		}
 		result, taskErr = task(taskCtx, updateStatus)
@@ -7170,7 +7486,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 	}()
 
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if page.AllowCancel && event.Key() == tcell.KeyEscape {
+		if allowCancel && event.Key() == tcell.KeyEscape {
 			cancelTask()
 			return nil
 		}
@@ -7596,6 +7912,147 @@ func displayModalValue(value string) string {
 	return value
 }
 
+func fallbackDetailPages(columns []TableColumn, row TableRow, rowNumber int) []DetailPage {
+	items := make([]DetailItem, 0, len(columns)+1)
+	items = append(items, DetailItem{Label: "row", Value: fmt.Sprintf("%d", rowNumber)})
+	for i, column := range columns {
+		value := ""
+		if i < len(row.Cells) {
+			value = row.Cells[i]
+		}
+		items = append(items, DetailItem{
+			Label: firstNonEmptyText(column.Header, column.ID),
+			Value: displayModalValue(value),
+		})
+	}
+	return []DetailPage{{Title: "Details", Items: items}}
+}
+
+func normalizeDetailPages(columns []TableColumn, row TableRow, rowNumber int) []DetailPage {
+	if len(row.DetailPages) > 0 {
+		pages := make([]DetailPage, 0, len(row.DetailPages))
+		for i, page := range row.DetailPages {
+			title := strings.TrimSpace(page.Title)
+			if title == "" {
+				title = fmt.Sprintf("Page %d", i+1)
+			}
+			items := make([]DetailItem, 0, len(page.Items))
+			for _, item := range page.Items {
+				items = append(items, DetailItem{
+					Label:       strings.TrimSpace(item.Label),
+					Value:       displayModalValue(item.Value),
+					ActionLabel: strings.TrimSpace(item.ActionLabel),
+					ActionHint:  strings.TrimSpace(item.ActionHint),
+					ActionKey:   strings.TrimSpace(item.ActionKey),
+					AutoLoad:    item.AutoLoad,
+					Loading:     item.Loading,
+				})
+			}
+			if len(items) == 0 {
+				items = append(items, DetailItem{Label: "item", Value: "~"})
+			}
+			pages = append(pages, DetailPage{Title: title, Items: items})
+		}
+		if len(pages) > 0 {
+			return pages
+		}
+	}
+	if strings.TrimSpace(row.Detail) != "" {
+		return []DetailPage{{
+			Title: "Details",
+			Items: []DetailItem{{Label: "details", Value: row.Detail}},
+		}}
+	}
+	return fallbackDetailPages(columns, row, rowNumber)
+}
+
+func detailItemCopyValue(item DetailItem) string {
+	return strings.TrimSpace(item.Value)
+}
+
+func detailItemActionText(item DetailItem) string {
+	label := strings.TrimSpace(item.ActionLabel)
+	if label == "" {
+		return ""
+	}
+	hint := strings.TrimSpace(item.ActionHint)
+	key := strings.TrimSpace(item.ActionKey)
+	if hint != "" && key != "" {
+		return label + " " + hint + " (" + key + ")"
+	}
+	if hint != "" {
+		return label + " " + hint
+	}
+	if key != "" {
+		return label + " (" + key + ")"
+	}
+	return label
+}
+
+func detailItemCanTriggerLoad(item DetailItem) bool {
+	return item.AutoLoad || strings.TrimSpace(item.ActionLabel) != "" || strings.TrimSpace(item.ActionHint) != "" || strings.TrimSpace(item.ActionKey) != ""
+}
+
+func detailLoadingBarText(step int) string {
+	const width = 18
+	filled := step % (width + 1)
+	if filled < 0 {
+		filled = 0
+	}
+	return "[" + strings.Repeat("=", filled) + strings.Repeat(" ", width-filled) + "] Loading FASTA..."
+}
+
+func sanitizeDetailTabTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return "Details"
+	}
+	return title
+}
+
+func fitTextRunes(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	if width <= 1 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-1]) + "…"
+}
+
+func wrapDetailValueLines(value string, width int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return []string{"~"}
+	}
+	if width <= 0 {
+		return []string{value}
+	}
+	parts := strings.Split(value, "\n")
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimRight(part, "\r")
+		if part == "" {
+			lines = append(lines, "")
+			continue
+		}
+		runes := []rune(part)
+		for len(runes) > width {
+			lines = append(lines, string(runes[:width]))
+			runes = runes[width:]
+		}
+		lines = append(lines, string(runes))
+	}
+	if len(lines) == 0 {
+		return []string{"~"}
+	}
+	return lines
+}
+
 func wrapPlainText(text string, width int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -7636,6 +8093,516 @@ func modalFramePage(breadcrumb string, path []string, title string) InfoPage {
 	}
 }
 
+func newDetailTabBar(titles []string, current int, onSelect func(index int)) *detailTabBarPrimitive {
+	return &detailTabBarPrimitive{
+		Box:      tview.NewBox(),
+		titles:   append([]string(nil), titles...),
+		current:  current,
+		onSelect: onSelect,
+	}
+}
+
+func (d *detailTabBarPrimitive) SetCurrent(index int) {
+	if len(d.titles) == 0 {
+		d.current = 0
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(d.titles) {
+		index = len(d.titles) - 1
+	}
+	d.current = index
+}
+
+func (d *detailTabBarPrimitive) tabPositions(width int) []detailTabPosition {
+	positions := make([]detailTabPosition, 0, len(d.titles))
+	total := 0
+	widths := make([]int, len(d.titles))
+	for i, title := range d.titles {
+		label := "[ " + sanitizeDetailTabTitle(title) + " ]"
+		w := len([]rune(label))
+		widths[i] = w
+		total += w
+		if i > 0 {
+			total++
+		}
+	}
+	x := maxInt(0, width-total)
+	for i := range d.titles {
+		if i > 0 {
+			x++
+		}
+		positions = append(positions, detailTabPosition{index: i, left: x, right: x + widths[i]})
+		x += widths[i]
+	}
+	return positions
+}
+
+func (d *detailTabBarPrimitive) Draw(screen tcell.Screen) {
+	d.Box.DrawForSubclass(screen, d)
+	x, y, width, height := d.GetInnerRect()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	baseStyle := tcell.StyleDefault.Foreground(tview.Styles.SecondaryTextColor).Background(tview.Styles.PrimitiveBackgroundColor)
+	activeStyle := tcell.StyleDefault.Foreground(colorActionText).Background(colorAction).Bold(true)
+	for _, pos := range d.tabPositions(width) {
+		if pos.left >= width {
+			break
+		}
+		label := fitTextRunes("[ "+sanitizeDetailTabTitle(d.titles[pos.index])+" ]", maxInt(1, width-pos.left))
+		style := baseStyle
+		if pos.index == d.current {
+			style = activeStyle
+		}
+		printStyledText(screen, x+pos.left, y, width-pos.left, style, label)
+	}
+}
+
+func (d *detailTabBarPrimitive) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+	return d.WrapMouseHandler(func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+		if action != tview.MouseLeftClick || event == nil {
+			return false, nil
+		}
+		x, y := event.Position()
+		ix, iy, width, height := d.GetInnerRect()
+		if height <= 0 || y != iy || x < ix || x >= ix+width {
+			return false, nil
+		}
+		relX := x - ix
+		for _, pos := range d.tabPositions(width) {
+			if relX >= pos.left && relX < pos.right {
+				if d.onSelect != nil {
+					d.onSelect(pos.index)
+				}
+				return true, d
+			}
+		}
+		return false, nil
+	})
+}
+
+func newDetailListPrimitive(items []DetailItem, current int, changed func(index int)) *detailListPrimitive {
+	list := &detailListPrimitive{
+		Box:     tview.NewBox(),
+		items:   append([]DetailItem(nil), items...),
+		current: current,
+		follow:  true,
+		changed: changed,
+	}
+	if len(list.items) == 0 {
+		list.items = []DetailItem{{Label: "item", Value: "~"}}
+	}
+	if list.current < 0 {
+		list.current = 0
+	}
+	if list.current >= len(list.items) {
+		list.current = len(list.items) - 1
+	}
+	return list
+}
+
+func (d *detailListPrimitive) SetItems(items []DetailItem) {
+	d.items = append([]DetailItem(nil), items...)
+	if len(d.items) == 0 {
+		d.items = []DetailItem{{Label: "item", Value: "~"}}
+	}
+	if d.current >= len(d.items) {
+		d.current = len(d.items) - 1
+	}
+	if d.current < 0 {
+		d.current = 0
+	}
+	d.offset = 0
+	d.follow = true
+}
+
+func (d *detailListPrimitive) SetCurrent(index int) {
+	if len(d.items) == 0 {
+		d.current = 0
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(d.items) {
+		index = len(d.items) - 1
+	}
+	if d.current == index {
+		return
+	}
+	d.current = index
+	d.follow = true
+	if d.changed != nil {
+		d.changed(index)
+	}
+}
+
+func (d *detailListPrimitive) Move(delta int) {
+	if len(d.items) == 0 || delta == 0 {
+		return
+	}
+	d.SetCurrent(d.current + delta)
+}
+
+func (d *detailListPrimitive) CurrentItem() DetailItem {
+	if len(d.items) == 0 {
+		return DetailItem{}
+	}
+	if d.current < 0 || d.current >= len(d.items) {
+		return d.items[0]
+	}
+	return d.items[d.current]
+}
+
+func (d *detailListPrimitive) CurrentIndex() int {
+	return d.current
+}
+
+func (d *detailListPrimitive) renderedLines(width int) []detailRenderedLine {
+	lines := make([]detailRenderedLine, 0, len(d.items)*2)
+	labelWidth := maxInt(8, minInt(24, width/3))
+	valueWidth := width - labelWidth - 4
+	if valueWidth < 8 {
+		valueWidth = maxInt(1, width-4)
+	}
+	for i, item := range d.items {
+		label := strings.TrimSpace(item.Label)
+		if label == "" {
+			label = fmt.Sprintf("item %d", i+1)
+		}
+		lines = append(lines, detailRenderedLine{itemIndex: i, text: fitTextRunes(label+":", maxInt(1, labelWidth)), label: true})
+		if item.Loading {
+			lines = append(lines, detailRenderedLine{itemIndex: i, text: "[Loading...]", label: false})
+		}
+		for _, line := range wrapDetailValueLines(item.Value, valueWidth) {
+			lines = append(lines, detailRenderedLine{itemIndex: i, text: line})
+		}
+		if actionText := detailItemActionText(item); actionText != "" {
+			lines = append(lines, detailRenderedLine{itemIndex: i, text: actionText})
+		}
+		if i < len(d.items)-1 {
+			lines = append(lines, detailRenderedLine{itemIndex: i, text: ""})
+		}
+	}
+	return lines
+}
+
+func (d *detailListPrimitive) itemBounds(lines []detailRenderedLine) [][2]int {
+	bounds := make([][2]int, len(d.items))
+	for i := range bounds {
+		bounds[i] = [2]int{-1, -1}
+	}
+	for lineIndex, line := range lines {
+		if bounds[line.itemIndex][0] == -1 {
+			bounds[line.itemIndex][0] = lineIndex
+		}
+		bounds[line.itemIndex][1] = lineIndex
+	}
+	return bounds
+}
+
+func (d *detailListPrimitive) ensureItemVisible(width int, height int) {
+	if height <= 0 || len(d.items) == 0 {
+		return
+	}
+	lines := d.renderedLines(maxInt(1, width))
+	bounds := d.itemBounds(lines)
+	if d.current < 0 || d.current >= len(bounds) {
+		return
+	}
+	start := bounds[d.current][0]
+	end := bounds[d.current][1]
+	if start < 0 {
+		return
+	}
+	if d.offset > start {
+		d.offset = start
+	}
+	if end >= d.offset+height {
+		d.offset = end - height + 1
+	}
+	if d.offset < 0 {
+		d.offset = 0
+	}
+	maxOffset := maxInt(0, len(lines)-height)
+	if d.offset > maxOffset {
+		d.offset = maxOffset
+	}
+}
+
+func (d *detailListPrimitive) clampOffset(width int, height int) {
+	if height <= 0 {
+		d.offset = 0
+		return
+	}
+	lines := d.renderedLines(maxInt(1, width))
+	maxOffset := maxInt(0, len(lines)-height)
+	if d.offset < 0 {
+		d.offset = 0
+	}
+	if d.offset > maxOffset {
+		d.offset = maxOffset
+	}
+}
+
+func (d *detailListPrimitive) Scroll(delta int, width int, height int) {
+	if delta == 0 {
+		return
+	}
+	d.offset += delta
+	d.clampOffset(width, height)
+	d.follow = false
+}
+
+func (d *detailListPrimitive) Draw(screen tcell.Screen) {
+	d.Box.DrawForSubclass(screen, d)
+	x, y, width, height := d.GetInnerRect()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	lines := d.renderedLines(width)
+	if d.follow {
+		d.ensureItemVisible(width, height)
+	} else {
+		d.clampOffset(width, height)
+	}
+	baseStyle := tcell.StyleDefault.Foreground(tview.Styles.PrimaryTextColor).Background(tview.Styles.PrimitiveBackgroundColor)
+	labelStyle := tcell.StyleDefault.Foreground(tview.Styles.SecondaryTextColor).Background(tview.Styles.PrimitiveBackgroundColor).Bold(true)
+	activeStyle := tcell.StyleDefault.Foreground(colorActionText).Background(colorAction)
+	activeLabelStyle := tcell.StyleDefault.Foreground(colorActionText).Background(colorAction).Bold(true)
+	for row := 0; row < height; row++ {
+		lineIndex := d.offset + row
+		if lineIndex >= len(lines) {
+			break
+		}
+		line := lines[lineIndex]
+		style := baseStyle
+		if line.label {
+			style = labelStyle
+		}
+		if line.itemIndex == d.current {
+			if line.label {
+				style = activeLabelStyle
+			} else {
+				style = activeStyle
+			}
+		}
+		printStyledText(screen, x, y+row, width, style, fitTextRunes(line.text, width))
+	}
+}
+
+func (d *detailListPrimitive) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+	return d.WrapMouseHandler(func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (bool, tview.Primitive) {
+		if event == nil {
+			return false, nil
+		}
+		x, y := event.Position()
+		ix, iy, width, height := d.GetInnerRect()
+		if x < ix || x >= ix+width || y < iy || y >= iy+height {
+			return false, nil
+		}
+		switch action {
+		case tview.MouseLeftClick:
+			lines := d.renderedLines(width)
+			lineIndex := d.offset + (y - iy)
+			if lineIndex >= 0 && lineIndex < len(lines) {
+				d.SetCurrent(lines[lineIndex].itemIndex)
+			}
+			return true, d
+		case tview.MouseScrollUp:
+			d.Scroll(-3, width, height)
+			return true, d
+		case tview.MouseScrollDown:
+			d.Scroll(3, width, height)
+			return true, d
+		default:
+			return false, nil
+		}
+	})
+}
+
+func newDetailOverlay(app *tview.Application, title string, pages []DetailPage, onCopy func() error, load func(pageIndex int, itemIndex int) (DetailItem, bool, error), extra func(pageIndex int, itemIndex int), close func()) *detailOverlay {
+	overlay := &detailOverlay{pages: append([]DetailPage(nil), pages...), load: load, extra: extra, app: app}
+	titles := make([]string, 0, len(overlay.pages))
+	for _, page := range overlay.pages {
+		titles = append(titles, sanitizeDetailTabTitle(page.Title))
+	}
+	overlay.body = newButtonFlex()
+	overlay.body.SetBorder(true)
+	overlay.body.SetTitle(" " + trimColon(title) + " ")
+	overlay.body.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(overlay.body.Box, true)
+	attachFocusBorder(overlay.body.Box)
+	overlay.tabs = newDetailTabBar(titles, 0, func(index int) {
+		overlay.SetPage(index)
+	})
+	overlay.list = newDetailListPrimitive(nil, 0, nil)
+	overlay.body.AddItem(overlay.tabs, 1, 0, false)
+	overlay.body.AddItem(overlay.list, 0, 1, true)
+	overlay.buttons = buttonRow(
+		buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: func() { _ = onCopy() }, Visible: true},
+		buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: close, Visible: true},
+		buttonSpec{Label: ButtonRunBLAST, Shortcut: ShortcutBlast, Action: func() {
+			if overlay.extra == nil {
+				return
+			}
+			pageIndex, itemIndex := overlay.CurrentIndexes()
+			overlay.extra(pageIndex, itemIndex)
+		}, Visible: false, Primary: true},
+	)
+	addButtonRow(overlay.body, overlay.buttons)
+	addHints(overlay.body, []string{"Up/Down chooses items. Mouse wheel or touchpad scroll moves the page content. Left/Right or Tab switches pages. FASTA starts loading automatically when its page opens. Enter reloads the selected loadable item. Ctrl+Y copies the selected item."})
+	overlay.SetPage(0)
+	return overlay
+}
+
+func (d *detailOverlay) SetPage(index int) {
+	if len(d.pages) == 0 {
+		d.current = 0
+		d.tabs.SetCurrent(0)
+		d.list.SetItems([]DetailItem{{Label: "details", Value: "~"}})
+		return
+	}
+	if index < 0 {
+		index = len(d.pages) - 1
+	}
+	if index >= len(d.pages) {
+		index = 0
+	}
+	d.current = index
+	d.tabs.SetCurrent(index)
+	d.list.SetItems(d.pages[index].Items)
+	if d.buttons != nil && len(d.buttons.buttons) >= 3 {
+		isFastaPage := strings.EqualFold(strings.TrimSpace(d.pages[index].Title), "FASTA")
+		d.buttons.buttons[2].Visible = isFastaPage
+	}
+	d.autoLoadCurrentPage()
+}
+
+func (d *detailOverlay) MovePage(delta int) {
+	if len(d.pages) == 0 {
+		return
+	}
+	d.SetPage(d.current + delta)
+}
+
+func (d *detailOverlay) CurrentItem() DetailItem {
+	return d.list.CurrentItem()
+}
+
+func (d *detailOverlay) CurrentIndexes() (int, int) {
+	return d.current, d.list.CurrentIndex()
+}
+
+func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
+	if d.load == nil {
+		return false, nil
+	}
+	pageIndex, itemIndex := d.CurrentIndexes()
+	if pageIndex < 0 || pageIndex >= len(d.pages) {
+		return false, nil
+	}
+	if itemIndex < 0 || itemIndex >= len(d.pages[pageIndex].Items) {
+		return false, nil
+	}
+	item := d.pages[pageIndex].Items[itemIndex]
+	if !detailItemNeedsLoad(item) {
+		return false, nil
+	}
+	item.Loading = true
+	item.Value = detailLoadingBarText(0)
+	d.pages[pageIndex].Items[itemIndex] = item
+	d.list.SetItems(d.pages[pageIndex].Items)
+	if d.app == nil {
+		updated, handled, err := d.load(pageIndex, itemIndex)
+		if err != nil {
+			item.Loading = false
+			d.pages[pageIndex].Items[itemIndex] = item
+			d.list.SetItems(d.pages[pageIndex].Items)
+			return handled, err
+		}
+		if handled {
+			d.pages[pageIndex].Items[itemIndex] = updated
+			d.list.SetItems(d.pages[pageIndex].Items)
+		}
+		return handled, nil
+	}
+	go func() {
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		done := make(chan struct{})
+		var updated DetailItem
+		var handled bool
+		var loadErr error
+		go func() {
+			updated, handled, loadErr = d.load(pageIndex, itemIndex)
+			close(done)
+		}()
+		step := 0
+	loop:
+		for {
+			select {
+			case <-done:
+				break loop
+			case <-ticker.C:
+				step++
+				_ = d.app.QueueUpdateDraw(func() {
+					current := d.pages[pageIndex].Items[itemIndex]
+					if !current.Loading {
+						return
+					}
+					current.Value = detailLoadingBarText(step)
+					d.pages[pageIndex].Items[itemIndex] = current
+					if d.current == pageIndex {
+						d.list.SetItems(d.pages[pageIndex].Items)
+					}
+				})
+			}
+		}
+		_ = d.app.QueueUpdateDraw(func() {
+			if loadErr != nil {
+				current := d.pages[pageIndex].Items[itemIndex]
+				current.Loading = false
+				current.Value = "Load failed: " + loadErr.Error()
+				current.ActionLabel = ""
+				current.ActionHint = ""
+				current.ActionKey = ""
+				d.pages[pageIndex].Items[itemIndex] = current
+			} else if handled {
+				d.pages[pageIndex].Items[itemIndex] = updated
+			}
+			if d.current == pageIndex {
+				d.list.SetItems(d.pages[pageIndex].Items)
+			}
+		})
+	}()
+	return true, nil
+}
+
+func (d *detailOverlay) autoLoadCurrentPage() {
+	if d.load == nil || d.current < 0 || d.current >= len(d.pages) {
+		return
+	}
+	for itemIndex, item := range d.pages[d.current].Items {
+		if detailItemNeedsLoad(item) {
+			d.list.SetCurrent(itemIndex)
+			_, _ = d.TriggerCurrentLoad()
+			return
+		}
+	}
+}
+
+func detailItemNeedsLoad(item DetailItem) bool {
+	return detailItemCanTriggerLoad(item)
+}
+
+func (d *detailOverlay) Body() tview.Primitive {
+	return d.body
+}
+
 func newLocalizedHelpModal(app *tview.Application, pages []localizedHelpPage, close func()) *localizedHelpModal {
 	modal := &localizedHelpModal{pages: normalizeLocalizedHelpPages(pages)}
 	modal.index = int(helpLanguageIndex.Load())
@@ -7667,7 +8634,10 @@ func newLocalizedHelpModal(app *tview.Application, pages []localizedHelpPage, cl
 			Visible: true,
 		})
 	}
-	languageButtons = append(languageButtons, buttonSpec{Label: ButtonOK, Shortcut: "Enter", Action: close, Visible: true, Primary: true})
+	languageButtons = append(languageButtons,
+		buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: close, Visible: true},
+		buttonSpec{Label: ButtonOK, Shortcut: ShortcutConfirm, Action: close, Visible: true, Primary: true},
+	)
 	modal.helpButtons = buttonRow(languageButtons...)
 	addButtonRow(modal.helpBody, modal.helpButtons)
 	addHints(modal.helpBody, []string{"1/2/3 switch English, 中文, and 日本語. Up/Down scroll. PageUp/PageDown scroll faster. Enter, Esc, or F1 closes help."})
@@ -7796,16 +8766,7 @@ func scrollTextView(view *tview.TextView, delta int) {
 }
 
 func isCopyShortcut(event *tcell.EventKey) bool {
-	if event == nil {
-		return false
-	}
-	if event.Key() == tcell.KeyCtrlC {
-		return event.Modifiers()&tcell.ModShift != 0
-	}
-	if event.Key() == tcell.KeyRune && (event.Rune() == 'C' || event.Rune() == 'c') {
-		return event.Modifiers()&tcell.ModCtrl != 0 && event.Modifiers()&tcell.ModShift != 0
-	}
-	return false
+	return shortcutMatchesEvent("Ctrl+C", event) || shortcutMatchesEvent("Ctrl+Shift+C", event) || shortcutMatchesEvent(ShortcutCopy, event)
 }
 
 func maxInt(left, right int) int {
@@ -8013,9 +8974,55 @@ func navButtonsWithShortcut(allowBack bool, allowHome bool, allowConfirm bool, c
 }
 
 func modalButtons(actions []buttonSpec, allowConfirm bool, confirmText string, confirmShortcut string, nav func(NavAction), confirm func()) *buttonRowPrimitive {
-	_ = nav
-	buttons := make([]buttonSpec, 0, len(actions)+1)
+	buttons := make([]buttonSpec, 0, len(actions)+2)
+	hasCloseAction := false
+	if nav != nil {
+		buttons = append(buttons, buttonSpec{
+			Label:    ButtonClose,
+			Shortcut: ShortcutBack,
+			Action:   func() { nav(NavBack) },
+			Visible:  true,
+		})
+	}
 	for _, action := range actions {
+		if actionLooksLikeClose(action.Label, "") {
+			hasCloseAction = true
+		}
+		if action.Visible && strings.EqualFold(strings.TrimSpace(action.Shortcut), ShortcutBack) && actionLooksLikeClose(action.Label, "") && len(buttons) > 0 && buttons[0].Label == ButtonClose {
+			buttons = buttons[1:]
+		}
+		action.Primary = false
+		buttons = append(buttons, action)
+	}
+	if !hasCloseAction && nav != nil && len(buttons) > 0 && buttons[0].Label != ButtonClose {
+		buttons = append([]buttonSpec{{
+			Label:    ButtonClose,
+			Shortcut: ShortcutBack,
+			Action:   func() { nav(NavBack) },
+			Visible:  true,
+		}}, buttons...)
+	}
+	buttons = append(buttons, buttonSpec{
+		Label:    conciseActionLabel(confirmText, ButtonOK),
+		Shortcut: confirmShortcut,
+		Action:   confirm,
+		Visible:  allowConfirm,
+		Primary:  true,
+	})
+	return buttonRow(buttons...)
+}
+
+func closeOnlyModalButtons(actions []buttonSpec, allowConfirm bool, confirmText string, confirmShortcut string, close func(), confirm func()) *buttonRowPrimitive {
+	buttons := []buttonSpec{{
+		Label:    ButtonClose,
+		Shortcut: ShortcutBack,
+		Action:   close,
+		Visible:  true,
+	}}
+	for _, action := range actions {
+		if action.Visible && actionLooksLikeClose(action.Label, "") && strings.EqualFold(strings.TrimSpace(action.Shortcut), ShortcutBack) {
+			continue
+		}
 		action.Primary = false
 		buttons = append(buttons, action)
 	}
@@ -8881,6 +9888,7 @@ func pastedFilePath(text string) (string, bool, error) {
 		return "", false, nil
 	}
 	quoted := false
+	fileURL := false
 	if len(path) >= 1 {
 		first := path[0]
 		if first == '"' || first == '\'' {
@@ -8895,6 +9903,7 @@ func pastedFilePath(text string) (string, bool, error) {
 		return "", false, nil
 	}
 	if strings.HasPrefix(strings.ToLower(path), "file://") {
+		fileURL = true
 		u, err := url.Parse(path)
 		if err != nil {
 			return "", false, fmt.Errorf("parse dropped file path: %w", err)
@@ -8908,12 +9917,12 @@ func pastedFilePath(text string) (string, bool, error) {
 		}
 	}
 	path = filepath.Clean(filepath.FromSlash(path))
-	looksLikePath := quoted || filepath.IsAbs(path) || strings.ContainsAny(path, `\/`)
+	looksLikePath := quoted || fileURL || filepath.IsAbs(path) || strings.ContainsAny(path, `\/`)
+	if !looksLikePath {
+		return "", false, nil
+	}
 	info, err := os.Stat(path)
 	if err != nil {
-		if !looksLikePath && (os.IsNotExist(err) || os.IsPermission(err)) {
-			return "", false, nil
-		}
 		return path, true, err
 	}
 	if info.IsDir() {
@@ -9000,8 +10009,8 @@ func conciseActionLabel(value string, fallback string) string {
 		return ButtonExport
 	case "generate all":
 		return ButtonExportAll
-	case "write txt":
-		return "Save txt"
+	case "write txt", "write fasta":
+		return "Save FASTA"
 	default:
 		return value
 	}
@@ -9015,14 +10024,59 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 	if shortcut == "" {
 		return false
 	}
-	if strings.HasPrefix(shortcut, "ctrl+") {
-		name := strings.TrimPrefix(shortcut, "ctrl+")
-		if event.Modifiers()&tcell.ModCtrl != 0 && event.Key() == tcell.KeyRune {
-			return strings.EqualFold(string(event.Rune()), name)
+	parts := strings.Split(shortcut, "+")
+	wantCtrl := false
+	wantShift := false
+	wantAlt := false
+	keyName := ""
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		switch part {
+		case "ctrl":
+			wantCtrl = true
+		case "shift":
+			wantShift = true
+		case "alt":
+			wantAlt = true
+		case "":
+		default:
+			if keyName != "" {
+				return false
+			}
+			keyName = part
 		}
-		switch name {
+	}
+	if wantAlt {
+		return false
+	}
+	switch keyName {
+	case "f1":
+		return event.Key() == tcell.KeyF1
+	case "esc", "escape":
+		return event.Key() == tcell.KeyEscape
+	case "enter":
+		return event.Key() == tcell.KeyEnter
+	case "space":
+		return event.Key() == tcell.KeyRune && event.Rune() == ' '
+	case "":
+		return false
+	}
+	if wantCtrl {
+		if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModCtrl != 0 {
+			if strings.EqualFold(string(event.Rune()), keyName) {
+				if !wantShift {
+					return true
+				}
+				if event.Modifiers()&tcell.ModShift != 0 || strings.ToUpper(string(event.Rune())) == keyName {
+					return true
+				}
+			}
+		}
+		switch keyName {
 		case "a":
 			return event.Key() == tcell.KeyCtrlA
+		case "c":
+			return event.Key() == tcell.KeyCtrlC
 		case "d":
 			return event.Key() == tcell.KeyCtrlD
 		case "g":
@@ -9047,22 +10101,18 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 			return event.Key() == tcell.KeyCtrlV
 		case "w":
 			return event.Key() == tcell.KeyCtrlW
+		case "y":
+			return event.Key() == tcell.KeyCtrlY
 		default:
 			return false
 		}
 	}
-	if shortcut == "f1" {
-		return event.Key() == tcell.KeyF1
-	}
-	if strings.HasPrefix(shortcut, "alt+") {
-		return false
-	}
-	if event.Key() != tcell.KeyRune {
+	if wantShift || event.Key() != tcell.KeyRune {
 		return false
 	}
 	key := strings.ToLower(string(event.Rune()))
 	if key == "" {
 		return false
 	}
-	return shortcut == key
+	return keyName == key
 }

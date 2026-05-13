@@ -61,10 +61,11 @@ const (
 )
 
 var (
-	lemnaTranscriptPattern         = regexp.MustCompile(`(?i)^[A-Z]{2}\d{4}D\d{3}G\d{6}_T\d+$`)
-	lemnaGenePattern               = regexp.MustCompile(`(?i)^[A-Z]{2}\d{4}D\d{3}G\d{6}$`)
-	labelSymbolPattern             = regexp.MustCompile(`\b[A-Z][A-Z0-9-]{1,14}\b`)
+	lemnaTranscriptPattern       = regexp.MustCompile(`(?i)^[A-Z]{2}\d{4}D\d{3}G\d{6}_T\d+$`)
+	lemnaGenePattern             = regexp.MustCompile(`(?i)^[A-Z]{2}\d{4}D\d{3}G\d{6}$`)
+	labelSymbolPattern           = regexp.MustCompile(`\b[A-Z][A-Z0-9-]{1,14}\b`)
 	riceLocusPattern             = regexp.MustCompile(`(?i)^(?:LOC_)?(?:OS)?\d{2}G\d{5}(?:\.\d+)?$`)
+	riceLocusPartsPattern        = regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`)
 	refSeqProteinPattern         = regexp.MustCompile(`(?i)^(?:XP_?)\d+(?:\.\d+)?$`)
 	cytochromeP450Pattern        = regexp.MustCompile(`(?i)^CYP\d+[A-Z]\d+$`)
 	curatedRiceRefSeqAliasLookup = map[string][]string{
@@ -950,7 +951,7 @@ func normalizeRiceLocusCandidate(term string) string {
 	if strings.HasPrefix(upper, "OS") && len(upper) >= 8 {
 		upper = upper[2:]
 	}
-	parts := regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`).FindStringSubmatch(upper)
+	parts := riceLocusPartsPattern.FindStringSubmatch(upper)
 	if len(parts) == 0 {
 		return ""
 	}

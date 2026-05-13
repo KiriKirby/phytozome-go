@@ -335,7 +335,6 @@ func SampleBlastReportData() ReportData {
 					{Name: "Merge rows that hit the same target gene/protein", Value: "true", Explanation: "Rows from member queries were merged by normalized target key."},
 					{Name: "When merged, keep the strongest member hit", Value: "true", Explanation: "One best-ranked row was kept when several member queries hit the same target."},
 					{Name: "minimum queries in a family", Value: "2", Explanation: "At least two member queries were required for a family group."},
-					{Name: "Remove Arabidopsis At/AT prefix for grouping", Value: "false", Explanation: "Leading At/AT was preserved for family-name derivation in this sample."},
 					{Name: "Remove trailing member number", Value: "true", Explanation: "Trailing numeric member indexes were removed."},
 					{Name: "Ignore suffix after a member number", Value: "true", Explanation: "Suffixes after member numbers were normalized before final family name creation."},
 					{Name: "Use UniProt evidence when ranking merged rows", Value: "true", Explanation: "UniProt evidence contributed to best-hit merge ranking."},

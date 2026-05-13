@@ -84,6 +84,10 @@ type proteinReleaseSequencesDisk struct {
 	Sequences map[string]string `json:"sequences"`
 }
 
+type nucleotideReleaseSequencesDisk struct {
+	Sequences map[string]string `json:"sequences"`
+}
+
 func localBlastResultIndexPath(jobID string) (string, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return "", fmt.Errorf("empty local blast job id")

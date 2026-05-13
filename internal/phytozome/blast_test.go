@@ -35,17 +35,23 @@ func TestSpecificIdentifierVariantsDeduplicates(t *testing.T) {
 	}
 }
 
-func TestApplyPhytozomeQueryLabelsUsesFirstAlias(t *testing.T) {
+func TestApplyPhytozomeQueryLabelsKeepsRawAliasFields(t *testing.T) {
 	var source model.QuerySequenceSource
 	applyPhytozomeQueryLabels(&source, geneRecord{
 		Symbols:  []string{"PAL4", "PAL4"},
 		Synonyms: []string{"ATPAL4"},
 	})
-	if source.LabelName != "PAL4" {
-		t.Fatalf("unexpected label: %q", source.LabelName)
+	if source.LabelName != "" {
+		t.Fatalf("unexpected precomputed label: %q", source.LabelName)
 	}
-	if source.Aliases != "PAL4; ATPAL4" {
+	if source.Aliases != "" {
 		t.Fatalf("unexpected aliases: %q", source.Aliases)
+	}
+	if source.Symbols != "PAL4" {
+		t.Fatalf("unexpected symbols: %q", source.Symbols)
+	}
+	if source.Synonyms != "ATPAL4" {
+		t.Fatalf("unexpected synonyms: %q", source.Synonyms)
 	}
 }
 

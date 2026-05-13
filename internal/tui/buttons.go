@@ -51,7 +51,7 @@ const (
 	ShortcutClear       = "Ctrl+N"
 	ShortcutClearFilter = "Ctrl+L"
 	ShortcutToggle      = "Space"
-	ShortcutCopy        = "Ctrl+Shift+C"
+	ShortcutCopy        = "Ctrl+Y"
 	ShortcutFilter      = "Ctrl+F"
 	ShortcutExport      = "Ctrl+G"
 	ShortcutExportAll   = "Ctrl+D"

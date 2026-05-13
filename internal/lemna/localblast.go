@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/blastplus"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/progressctx"
 )
 
 type localBlastThreadsContextKey struct{}
@@ -68,12 +71,16 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	if err != nil {
 		return model.BlastJob{}, err
 	}
+	cacheKey := localBlastRequestCacheKey(req, blastProg)
+	if job, ok := c.cachedLocalBlastJob(cacheKey); ok {
+		return job, nil
+	}
 
 	rel, err := c.releaseForSpecies(ctx, req.Species)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("resolve release metadata: %w", err)
 	}
-	fastaURL, dbType, err := localBlastDatabase(rel, blastProg)
+	fastaURL, dbType, dbKey, err := localBlastDatabase(rel, blastProg)
 	if err != nil {
 		return model.BlastJob{}, err
 	}
@@ -86,13 +93,15 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	if err := ensureBlastTools(blastProg); err != nil {
 		return model.BlastJob{}, err
 	}
+	progressctx.Report(ctx, 1, fmt.Sprintf("Preparing local %s FASTA and BLAST database...", strings.ToUpper(blastProg)))
 
 	fastaPath, err := downloadAndPrepareFasta(ctx, c, fastaURL, cacheDir)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("download FASTA: %w", err)
 	}
 
-	dbPrefix := filepath.Join(cacheDir, "lemna_"+dbType+"_db")
+	dbPrefix := filepath.Join(cacheDir, compactLocalBlastDBPrefix(dbType, dbKey))
+	progressctx.Report(ctx, 60, fmt.Sprintf("Preparing local %s database...", strings.ToUpper(blastProg)))
 	if err := ensureBlastDBOnce(ctx, c, fastaPath, dbPrefix, dbType); err != nil {
 		return model.BlastJob{}, fmt.Errorf("makeblastdb: %w", err)
 	}
@@ -103,10 +112,12 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	}
 
 	// Run BLAST
+	progressctx.Report(ctx, 80, fmt.Sprintf("Running local %s...", strings.ToUpper(blastProg)))
 	result, err := runBlastAndParse(ctx, blastProg, dbPrefix, fastaIdx, req)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("run blast: %w", err)
 	}
+	progressctx.Report(ctx, 100, fmt.Sprintf("Local %s completed with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
 
 	// Enrich rows using GFF3-derived mappings and AHRD when available.
 	// First attempt to build protein->transcript and transcript->gene maps from the GFF.
@@ -142,6 +153,10 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 		job.Message = fmt.Sprintf("local BLAST completed; failed to cache results: %v", err)
 	}
 	c.mu.Lock()
+	if c.localBlastJobCache == nil {
+		c.localBlastJobCache = make(map[string]model.BlastJob)
+	}
+	c.localBlastJobCache[cacheKey] = job
 	c.localResultsCache[job.JobID] = result
 	c.mu.Unlock()
 
@@ -149,26 +164,164 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	return job, nil
 }
 
-func localBlastDatabase(rel releaseInfo, program string) (fastaURL string, dbType string, err error) {
+func (c *Client) cachedLocalBlastJob(cacheKey string) (model.BlastJob, bool) {
+	cacheKey = strings.TrimSpace(cacheKey)
+	if cacheKey == "" {
+		return model.BlastJob{}, false
+	}
+	c.mu.RLock()
+	job, ok := c.localBlastJobCache[cacheKey]
+	if ok {
+		_, ok = c.localResultsCache[job.JobID]
+	}
+	c.mu.RUnlock()
+	return job, ok
+}
+
+func localBlastRequestCacheKey(req model.BlastRequest, blastProg string) string {
+	parts := []string{
+		strings.ToLower(strings.TrimSpace(req.Species.JBrowseName)),
+		strings.ToLower(strings.TrimSpace(req.Species.GenomeLabel)),
+		strconv.Itoa(req.Species.ProteomeID),
+		strings.ToLower(strings.TrimSpace(blastProg)),
+		strings.TrimSpace(req.Sequence),
+		strings.TrimSpace(req.EValue),
+		strconv.Itoa(req.AlignmentsToShow),
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func localBlastDatabase(rel releaseInfo, program string) (fastaURL string, dbType string, dbKey string, err error) {
 	switch program {
 	case "blastp", "blastx":
 		if rel.ProteinURL == "" {
-			return "", "", fmt.Errorf("no protein FASTA available for local %s", program)
+			return "", "", "", fmt.Errorf("no protein FASTA available for local %s", program)
 		}
-		return rel.ProteinURL, "prot", nil
+		return rel.ProteinURL, "prot", localBlastDBKey(rel.ProteinURL, program), nil
 	case "blastn", "tblastn":
-		if rel.NucleotideURL == "" {
-			return "", "", fmt.Errorf("no nucleotide FASTA available for local %s", program)
+		fastaURL = bestLocalNucleotideURL(rel, program)
+		if fastaURL == "" {
+			return "", "", "", fmt.Errorf("no nucleotide FASTA available for local %s", program)
 		}
-		return rel.NucleotideURL, "nucl", nil
+		return fastaURL, "nucl", localBlastDBKey(fastaURL, program), nil
 	default:
-		return "", "", fmt.Errorf("unsupported local BLAST program %q", program)
+		return "", "", "", fmt.Errorf("unsupported local BLAST program %q", program)
 	}
+}
+
+func bestLocalNucleotideURL(rel releaseInfo, program string) string {
+	bestURL := ""
+	bestScore := 0
+	for _, file := range rel.AvailableFiles {
+		name := strings.ToLower(strings.TrimSpace(file.Name))
+		if name == "" {
+			continue
+		}
+		score := localNucleotideFileScore(name, program)
+		if score <= bestScore {
+			continue
+		}
+		bestScore = score
+		bestURL = file.URL
+	}
+	if bestURL != "" {
+		return bestURL
+	}
+	return strings.TrimSpace(rel.NucleotideURL)
+}
+
+func localNucleotideFileScore(name string, program string) int {
+	base := nucleotideFileScore(name)
+	if base == 0 {
+		return 0
+	}
+	switch program {
+	case "tblastn":
+		switch {
+		case strings.HasSuffix(name, ".genes.cds.primary.fasta.gz"):
+			return 300
+		case strings.HasSuffix(name, ".genes.filt.cds.primary.fasta.gz"):
+			return 280
+		case strings.HasSuffix(name, ".genes.cds.fasta.gz"):
+			return 260
+		case strings.HasSuffix(name, ".genes.transcripts.primary.fasta.gz"):
+			return 220
+		case strings.HasSuffix(name, ".genes.filt.transcripts.primary.fasta.gz"):
+			return 200
+		case strings.HasSuffix(name, ".genes.transcripts.fasta.gz"):
+			return 180
+		default:
+			return 100 + base
+		}
+	case "blastn":
+		switch {
+		case strings.HasSuffix(name, ".genes.transcripts.primary.fasta.gz"):
+			return 300
+		case strings.HasSuffix(name, ".genes.filt.transcripts.primary.fasta.gz"):
+			return 280
+		case strings.HasSuffix(name, ".genes.transcripts.fasta.gz"):
+			return 260
+		case strings.HasSuffix(name, ".genes.cds.primary.fasta.gz"):
+			return 220
+		case strings.HasSuffix(name, ".genes.filt.cds.primary.fasta.gz"):
+			return 200
+		case strings.HasSuffix(name, ".genes.cds.fasta.gz"):
+			return 180
+		default:
+			return 100 + base
+		}
+	default:
+		return base
+	}
+}
+
+func localBlastDBKey(fastaURL string, program string) string {
+	base := strings.TrimSpace(filepath.Base(fastaURL))
+	base = strings.TrimSuffix(base, ".gz")
+	base = strings.TrimSuffix(base, ".fasta")
+	base = strings.TrimSuffix(base, ".fa")
+	base = sanitizeFileName(base)
+	if base == "" {
+		base = "default"
+	}
+	return sanitizeFileName(strings.ToLower(program) + "_" + base)
+}
+
+func compactLocalBlastDBPrefix(dbType string, dbKey string) string {
+	base := sanitizeFileName(strings.TrimSpace(dbKey))
+	if base == "" {
+		base = "default"
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(dbType)) + "\x00" + base))
+	shortHash := hex.EncodeToString(sum[:6])
+	if len(base) > 48 {
+		base = strings.TrimRight(base[:48], "._- ")
+	}
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "default"
+	}
+	return fmt.Sprintf("lemna_%s_%s_%s_db", sanitizeFileName(strings.ToLower(strings.TrimSpace(dbType))), base, shortHash)
 }
 
 // ensureCacheDir returns (and creates) a cache directory for species and release.
 func ensureCacheDir(jbrowseName string, releaseDir string) (string, error) {
 	return appfs.CacheDir("lemna", "localblast", jbrowseName, sanitizeFileName(releaseDir))
+}
+
+func resetLocalBlastCache(jbrowseName string, releaseDir string) error {
+	jbrowseName = strings.TrimSpace(jbrowseName)
+	releaseDir = sanitizeFileName(releaseDir)
+	if jbrowseName == "" && releaseDir == "" {
+		return appfs.RemoveCacheSubtree("lemna", "localblast")
+	}
+	if jbrowseName == "" {
+		return appfs.RemoveCacheSubtree("lemna", "localblast")
+	}
+	if releaseDir == "" {
+		return appfs.RemoveCacheSubtree("lemna", "localblast", jbrowseName)
+	}
+	return appfs.RemoveCacheSubtree("lemna", "localblast", jbrowseName, releaseDir)
 }
 
 // downloadAndPrepareFasta downloads the FASTA (possibly gzipped) and ensures an
@@ -182,16 +335,20 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 	if _, err := os.Stat(destPath); err == nil {
 		// If gz, ensure decompressed version exists
 		if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-			return ensureDecompressed(c, destPath)
+			progressctx.Report(ctx, 10, fmt.Sprintf("Using cached FASTA archive: %s", filepath.Base(destPath)))
+			return ensureDecompressed(ctx, c, destPath)
 		}
+		progressctx.Report(ctx, 20, fmt.Sprintf("Using cached FASTA: %s", filepath.Base(destPath)))
 		return destPath, nil
 	}
 
 	value, err, _ := c.sf.Do("download-fasta:"+destPath, func() (any, error) {
 		if _, err := os.Stat(destPath); err == nil {
 			if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-				return ensureDecompressed(c, destPath)
+				progressctx.Report(ctx, 10, fmt.Sprintf("Using cached FASTA archive: %s", filepath.Base(destPath)))
+				return ensureDecompressed(ctx, c, destPath)
 			}
+			progressctx.Report(ctx, 20, fmt.Sprintf("Using cached FASTA: %s", filepath.Base(destPath)))
 			return destPath, nil
 		}
 
@@ -213,7 +370,16 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 		if err != nil {
 			return "", err
 		}
-		if _, err := io.Copy(out, resp.Body); err != nil {
+		progressctx.Report(ctx, 1, fmt.Sprintf("Downloading FASTA: %s", filepath.Base(destPath)))
+		if _, err := io.CopyBuffer(&localProgressWriter{
+			ctx:     ctx,
+			sink:    out,
+			total:   resp.ContentLength,
+			base:    1,
+			span:    39,
+			prefix:  fmt.Sprintf("Downloading FASTA %s", filepath.Base(destPath)),
+			lastPct: -1,
+		}, resp.Body, make([]byte, 1024*1024)); err != nil {
 			_ = out.Close()
 			_ = os.Remove(tmpPath)
 			return "", err
@@ -228,8 +394,9 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 		}
 
 		if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-			return ensureDecompressed(c, destPath)
+			return ensureDecompressed(ctx, c, destPath)
 		}
+		progressctx.Report(ctx, 40, fmt.Sprintf("Downloaded FASTA: %s", filepath.Base(destPath)))
 		return destPath, nil
 	})
 	if err != nil {
@@ -239,15 +406,17 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 }
 
 // ensureDecompressed returns path to .fasta decompressed from gz, creating it if needed.
-func ensureDecompressed(c *Client, gzPath string) (string, error) {
+func ensureDecompressed(ctx context.Context, c *Client, gzPath string) (string, error) {
 	// target path: remove .gz suffix
 	target := strings.TrimSuffix(gzPath, ".gz")
 	if _, err := os.Stat(target); err == nil {
+		progressctx.Report(ctx, 59, fmt.Sprintf("Using cached decompressed FASTA: %s", filepath.Base(target)))
 		return target, nil
 	}
 
 	value, err, _ := c.sf.Do("decompress-fasta:"+gzPath, func() (any, error) {
 		if _, err := os.Stat(target); err == nil {
+			progressctx.Report(ctx, 59, fmt.Sprintf("Using cached decompressed FASTA: %s", filepath.Base(target)))
 			return target, nil
 		}
 
@@ -268,7 +437,20 @@ func ensureDecompressed(c *Client, gzPath string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if _, err := io.Copy(out, gzReader); err != nil {
+		progressctx.Report(ctx, 41, fmt.Sprintf("Decompressing FASTA: %s", filepath.Base(gzPath)))
+		sourceSize := int64(0)
+		if info, err := os.Stat(gzPath); err == nil {
+			sourceSize = info.Size()
+		}
+		if _, err := io.CopyBuffer(&localProgressWriter{
+			ctx:     ctx,
+			sink:    out,
+			total:   sourceSize,
+			base:    41,
+			span:    18,
+			prefix:  fmt.Sprintf("Decompressing FASTA %s", filepath.Base(gzPath)),
+			lastPct: -1,
+		}, gzReader, make([]byte, 1024*1024)); err != nil {
 			_ = out.Close()
 			_ = os.Remove(tmpPath)
 			return "", err
@@ -281,6 +463,7 @@ func ensureDecompressed(c *Client, gzPath string) (string, error) {
 			_ = os.Remove(tmpPath)
 			return "", err
 		}
+		progressctx.Report(ctx, 59, fmt.Sprintf("Decompressed FASTA: %s", filepath.Base(target)))
 		return target, nil
 	})
 	if err != nil {
@@ -296,10 +479,7 @@ func ensureBlastTools(program string) error {
 
 // ensureBlastDB runs makeblastdb if the db files are not already present.
 func ensureBlastDB(ctx context.Context, fastaPath string, dbPrefix string, dbType string) error {
-	// Check for sentinel file (.pin) to detect built DB quickly
-	// makeblastdb creates files like dbPrefix.phr/.pin/.psq for protein DB
-	// We'll check for dbPrefix+".pin" or dbPrefix+".nsq" depending on type.
-	if existsBlastDBFiles(dbPrefix) {
+	if blastDBComplete(dbPrefix, dbType) {
 		return nil
 	}
 
@@ -307,25 +487,30 @@ func ensureBlastDB(ctx context.Context, fastaPath string, dbPrefix string, dbTyp
 		return fmt.Errorf("unsupported makeblastdb dbtype %q", dbType)
 	}
 
-	cmd := exec.CommandContext(ctx, "makeblastdb", "-in", fastaPath, "-dbtype", dbType, "-parse_seqids", "-out", dbPrefix)
+	_ = removeBlastDBFiles(dbPrefix)
+	cmd := exec.CommandContext(ctx, "makeblastdb", "-in", fastaPath, "-dbtype", dbType, "-parse_seqids", "-blastdb_version", "4", "-out", dbPrefix)
+	cmd.Env = append(os.Environ(), "BLASTDB_VERSION=4")
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		_ = removeBlastDBFiles(dbPrefix)
 		return fmt.Errorf("makeblastdb failed: %w%s", err, formatCapturedOutput(stderr.String()))
 	}
-	if !existsBlastDBFiles(dbPrefix) {
+	progressctx.Report(ctx, 79, fmt.Sprintf("Prepared BLAST database: %s", filepath.Base(dbPrefix)))
+	if !blastDBComplete(dbPrefix, dbType) {
+		_ = removeBlastDBFiles(dbPrefix)
 		return fmt.Errorf("makeblastdb completed but DB files not found for %s", dbPrefix)
 	}
 	return nil
 }
 
 func ensureBlastDBOnce(ctx context.Context, c *Client, fastaPath string, dbPrefix string, dbType string) error {
-	if existsBlastDBFiles(dbPrefix) {
+	if blastDBComplete(dbPrefix, dbType) {
 		return nil
 	}
 	_, err, _ := c.sf.Do("makeblastdb:"+dbPrefix, func() (any, error) {
-		if existsBlastDBFiles(dbPrefix) {
+		if blastDBComplete(dbPrefix, dbType) {
 			return nil, nil
 		}
 		return nil, ensureBlastDB(ctx, fastaPath, dbPrefix, dbType)
@@ -333,15 +518,52 @@ func ensureBlastDBOnce(ctx context.Context, c *Client, fastaPath string, dbPrefi
 	return err
 }
 
-func existsBlastDBFiles(dbPrefix string) bool {
-	// common extensions for protein DB
-	exts := []string{".pin", ".phr", ".psq", ".nsq", ".nin", ".nhr"}
+func blastDBExtensions(dbType string) []string {
+	switch dbType {
+	case "prot":
+		return []string{".pin", ".phr", ".psq"}
+	case "nucl":
+		return []string{".nin", ".nhr", ".nsq"}
+	default:
+		return nil
+	}
+}
+
+func blastDBComplete(dbPrefix string, dbType string) bool {
+	exts := blastDBExtensions(dbType)
+	if len(exts) == 0 {
+		return false
+	}
 	for _, ex := range exts {
-		if _, err := os.Stat(dbPrefix + ex); err == nil {
-			return true
+		info, err := os.Stat(dbPrefix + ex)
+		if err != nil || info.IsDir() || info.Size() <= 0 {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+func removeBlastDBFiles(dbPrefix string) error {
+	patterns := []string{
+		dbPrefix + ".*",
+		dbPrefix + ".p*",
+		dbPrefix + ".n*",
+	}
+	seen := make(map[string]struct{})
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			if _, ok := seen[match]; ok {
+				continue
+			}
+			seen[match] = struct{}{}
+			_ = os.Remove(match)
+		}
+	}
+	return nil
 }
 
 // normalizeProgram returns the executable program name for a requested program.
@@ -351,14 +573,14 @@ func normalizeProgram(requestProg string) (string, error) {
 	p = strings.TrimPrefix(p, "local:")
 	p = strings.TrimSpace(strings.ReplaceAll(p, "(local)", ""))
 	switch {
-	case strings.Contains(p, "blastn"):
-		return "blastn", nil
-	case strings.Contains(p, "blastp"):
-		return "blastp", nil
-	case strings.Contains(p, "blastx"):
-		return "blastx", nil
 	case strings.Contains(p, "tblastn"):
 		return "tblastn", nil
+	case strings.Contains(p, "blastx"):
+		return "blastx", nil
+	case strings.Contains(p, "blastp"):
+		return "blastp", nil
+	case strings.Contains(p, "blastn"):
+		return "blastn", nil
 	default:
 		// Fallback: choose blastp for protein-like, else blastn
 		if strings.Contains(p, "protein") || strings.Contains(p, "prot") {
@@ -386,9 +608,20 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	// Prepare output file
 	outPath := filepath.Join(tmpDir, "blast.tsv")
 
-	// outfmt fields:
-	// qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore
-	outfmt := "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore"
+	// Include frames for translated programs so downstream rows can expose strand-like context.
+	outfmtFields := []string{
+		"qseqid", "sseqid", "pident", "length", "mismatch", "gapopen",
+		"qstart", "qend", "sstart", "send", "evalue", "bitscore",
+	}
+	switch prog {
+	case "blastx", "tblastn", "blastp":
+		outfmtFields = append(outfmtFields, "positive")
+	}
+	switch prog {
+	case "blastx", "tblastn":
+		outfmtFields = append(outfmtFields, "qframe", "sframe")
+	}
+	outfmt := "6 " + strings.Join(outfmtFields, " ")
 
 	// Build command
 	args := []string{"-query", queryPath, "-db", dbPrefix, "-outfmt", outfmt, "-out", outPath}
@@ -401,6 +634,26 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	if req.AlignmentsToShow > 0 {
 		args = append(args, "-max_target_seqs", strconv.Itoa(req.AlignmentsToShow))
 	}
+	if wordSize := normalizedLocalBlastWordSize(req.WordLength); wordSize != "" {
+		args = append(args, "-word_size", wordSize)
+	}
+	if !req.AllowGaps {
+		switch prog {
+		case "blastn":
+			args = append(args, "-ungapped")
+		case "blastp", "blastx", "tblastn":
+			args = append(args, "-ungapped", "-comp_based_stats", "F")
+		}
+	}
+	if filter := localBlastSegArg(req.FilterQuery, prog); filter != "" {
+		args = append(args, "-seg", filter)
+	}
+	if filter := localBlastDustArg(req.FilterQuery, prog); filter != "" {
+		args = append(args, "-dust", filter)
+	}
+	if matrix := normalizedLocalBlastMatrix(req.ComparisonMatrix, prog); matrix != "" {
+		args = append(args, "-matrix", matrix)
+	}
 	cmd := exec.CommandContext(ctx, prog, args...)
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
@@ -410,9 +663,14 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	}
 
 	// Parse output TSV and enrich rows using the provided FASTA (deflines + lengths).
-	rows, err := parseBlastTabular(outPath, fastaIndex)
+	rows, err := parseBlastTabular(outPath, fastaIndex, prog, len(localBlastSanitizeSequence(req.Sequence)))
 	if err != nil {
 		return model.BlastResult{}, err
+	}
+	for i := range rows {
+		if rows[i].BlastProgram == "" {
+			rows[i].BlastProgram = strings.ToUpper(prog)
+		}
 	}
 
 	result := model.BlastResult{
@@ -421,6 +679,50 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 		Rows:    rows,
 	}
 	return result, nil
+}
+
+func normalizedLocalBlastWordSize(wordLength string) string {
+	wordLength = strings.TrimSpace(wordLength)
+	if wordLength == "" || strings.EqualFold(wordLength, "default") {
+		return ""
+	}
+	if _, err := strconv.Atoi(wordLength); err != nil {
+		return ""
+	}
+	return wordLength
+}
+
+func normalizedLocalBlastMatrix(matrix string, prog string) string {
+	if prog != "blastp" && prog != "blastx" && prog != "tblastn" {
+		return ""
+	}
+	matrix = strings.TrimSpace(matrix)
+	if matrix == "" || strings.EqualFold(matrix, "default") {
+		return ""
+	}
+	return matrix
+}
+
+func localBlastSegArg(enabled bool, prog string) string {
+	switch prog {
+	case "blastp", "blastx", "tblastn":
+		if enabled {
+			return "yes"
+		}
+		return "no"
+	default:
+		return ""
+	}
+}
+
+func localBlastDustArg(enabled bool, prog string) string {
+	if prog != "blastn" {
+		return ""
+	}
+	if enabled {
+		return "yes"
+	}
+	return "no"
 }
 
 func localBlastThreads(ctx context.Context) int {
@@ -448,9 +750,45 @@ func formatCapturedOutput(output string) string {
 	return "\n" + strings.Join(lines, "\n")
 }
 
+type localProgressWriter struct {
+	ctx     context.Context
+	sink    io.Writer
+	total   int64
+	written int64
+	base    int
+	span    int
+	prefix  string
+	lastPct int
+}
+
+func (w *localProgressWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.sink.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		w.report()
+	}
+	return n, err
+}
+
+func (w *localProgressWriter) report() {
+	if w.total > 0 {
+		pct := int((w.written * 100) / w.total)
+		if pct == w.lastPct {
+			return
+		}
+		w.lastPct = pct
+		progressctx.Report(w.ctx, w.base+(w.span*pct)/100, fmt.Sprintf("%s... %d%%", w.prefix, pct))
+		return
+	}
+	progressctx.Report(w.ctx, w.base, fmt.Sprintf("%s... %d bytes", w.prefix, w.written))
+}
+
 // parseBlastTabular parses the outfmt 6 TSV into model.BlastResultRow slice,
 // and enriches rows using a FASTA index built from fastaPath when available.
-func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.BlastResultRow, error) {
+func parseBlastTabular(path string, fastaIndex map[string]fastaEntry, prog string, queryLength int) ([]model.BlastResultRow, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -466,7 +804,7 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 			continue
 		}
 		fields := strings.Fields(line)
-		// Expect at least 12 fields per outfmt declaration
+		// Expect at least the base fields per outfmt declaration.
 		if len(fields) < 12 {
 			continue
 		}
@@ -507,6 +845,29 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 			Identical:       int(pident * float64(alignLen) / 100),
 			Positives:       0,
 			Gaps:            gapOpen,
+			QueryLength:     queryLength,
+		}
+		next := 12
+		if prog == "blastx" || prog == "tblastn" || prog == "blastp" {
+			if len(fields) > next {
+				row.Positives, _ = strconv.Atoi(fields[next])
+				next++
+			}
+		}
+		if prog == "blastx" || prog == "tblastn" {
+			qframe, sframe := 0, 0
+			if len(fields) > next {
+				qframe, _ = strconv.Atoi(fields[next])
+				next++
+			}
+			if len(fields) > next {
+				sframe, _ = strconv.Atoi(fields[next])
+				next++
+			}
+			row.Strands = localBlastStrandText(qframe, sframe)
+		}
+		if row.AlignLength > 0 && row.QueryLength > 0 {
+			row.AlignQueryLengthPercent = float64(row.AlignLength) / float64(row.QueryLength) * 100
 		}
 
 		// Enrich from fastaIndex if available
@@ -545,6 +906,33 @@ func parseBlastTabular(path string, fastaIndex map[string]fastaEntry) ([]model.B
 		return nil, err
 	}
 	return rows, nil
+}
+
+func localBlastStrandText(queryFrame int, subjectFrame int) string {
+	if queryFrame == 0 && subjectFrame == 0 {
+		return ""
+	}
+	return localBlastFrameDirection(queryFrame) + "/" + localBlastFrameDirection(subjectFrame)
+}
+
+func localBlastFrameDirection(frame int) string {
+	switch {
+	case frame < 0:
+		return "-"
+	case frame > 0:
+		return "+"
+	default:
+		return "0"
+	}
+}
+
+func localBlastSanitizeSequence(sequence string) string {
+	sequence = strings.TrimSpace(sequence)
+	if sequence == "" {
+		return ""
+	}
+	fields := strings.Fields(sequence)
+	return strings.ToUpper(strings.Join(fields, ""))
 }
 
 // fastaEntry holds minimal FASTA header info used to enrich BLAST rows.
@@ -764,6 +1152,22 @@ func enrichBlastRowsWithMappings(rel releaseInfo, rows *[]model.BlastResultRow, 
 		for _, tok := range expanded {
 			if tok == "" {
 				continue
+			}
+			if gid, ok := lookupNormalizedMapValue(transToGene, tok); ok && gid != "" {
+				if r.TranscriptID == "" {
+					r.TranscriptID = tok
+				}
+				if r.GeneReportURL == "" || r.GeneReportURL == rel.ReleaseURL {
+					r.GeneReportURL = lemnaGeneReportURL(rel.RootDir, gid)
+				}
+				if r.JBrowseName == "" {
+					r.JBrowseName = rel.RootDir
+				}
+				if r.TargetID == 0 {
+					r.TargetID = rel.BlastNDBID
+				}
+				gffMatched = true
+				break
 			}
 			if tid, ok := lookupNormalizedMapValue(protToTrans, tok); ok && tid != "" {
 				// fill transcript and gene fields where possible

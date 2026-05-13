@@ -22,6 +22,33 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 ## Long-term database and workflow direction
 
 - Treat `Phytozome` and `lemna.org` as primary sequence/genome sources. They provide species selection, keyword search targets, BLAST targets, source FASTA/GFF-style assets, gene/protein identifiers, and peptide export data.
+- Keep search, BLAST, and labelname identification as three separate systems:
+  - Search is only the keyword/search-engine path for the selected primary database.
+  - BLAST is only BLAST execution, parsing, review, filtering, and export of BLAST hits.
+- Labelname identification is a standalone ranking system under `internal/labelname`. Workflows collect alias candidates from their own search terms, protein/gene identifiers, source aliases, FASTA headers, and database-specific metadata, then send each item to labelname with the current task timestamp and task-local item index. Labelname returns the same timestamp/index plus aliases sorted by priority. The workflow stores that ranked list, uses the first alias as the default `label_name`, and passes the stored list forward.
+  - BLAST query/source auto labelname and BLAST-hit auto labelname should prefer two-phase execution for performance: parallel candidate collection first, then batch `labelname` ranking over the de-duplicated requests.
+  - BLAST-hit auto labelname should cache hit-level identification decisions by a stable row/source-label key across repeated runs so reopening/re-filtering/export chains do not redo the same keyword-label resolution work.
+  - Auto labelname stages must expose visible progress states instead of a silent wait; at minimum distinguish candidate prefetch/collection from ranking/application so users do not interpret the phase as a hang.
+  - Table selection performance is part of workflow performance, not only UI polish:
+    - large row-selection tables and BLAST run tables must keep `SetEvaluateAllRows(false)` so off-screen rows are not eagerly re-evaluated during draw
+    - repeated selection-only actions such as `Ctrl+A`, `Ctrl+N`, header checkbox toggle, or single-row checkbox toggle should update only visible checkbox/title/list state when the row order and table contents did not change; do not rebuild the whole table for those actions
+    - grouped row-selection tables should keep a direct original-row -> display-row index cache after each display-row rebuild so selection restore and current-row lookup do not rescan the full visible row slice on every interaction
+    - grouped display-row construction must not rescan the sorted order once per group; build ordered/group lookup structures once and reuse them
+- `phgo_alias` is the phytozome GO authoritative alias column produced by the labelname system. Result table views show `phgo_alias`; the original source `alias` column remains available in row details, exports, and reports immediately after `phgo_alias`.
+- Phytozome keyword rows keep source `symbols` and `synonyms` as separate fields instead of merging them into `alias`. They are not table-display columns. For each Phytozome keyword item, labelname candidate collection uses `synonyms` first, falls back to `symbols` only when synonyms are empty, and falls back to candidates parsed from source `auto_define` only when both are empty.
+- Phytozome BLAST query/source labelname collection follows the same per-item fallback as Phytozome keyword: `synonyms` first, then `symbols`, then `auto_define`. FASTA parenthetical/header labels are never direct query labels; they are only the final fallback alias candidate when the three database-derived layers are empty. BLAST query/source `label_name` is required before BLAST execution can continue.
+- Optional BLAST-hit labelname identification also follows the Phytozome keyword fallback for each hit (`synonyms` -> `symbols` -> `auto_define`) using de-duplicated, parallel Phytozome keyword lookups for hit identifiers. If those three layers produce nothing, the hit falls back to the BLAST source item's `label_name`; if the source item has no label, the hit label stays blank.
+- Lemna keyword and Lemna BLAST labelname candidate collection share the same source ordering: first look up usable gene/protein/transcript IDs in Phytozome and apply the Phytozome three-layer fallback (`synonyms` -> `symbols` -> `auto_define`), then fall back to Lemna local alias candidates from the row/source metadata. For BLAST source/query items only, FASTA header aliases are the final fallback after Phytozome and Lemna local candidates fail, and the whole ranked alias list is stored for grouping/custom-group reuse. For BLAST hit rows, the final fallback after Phytozome and Lemna local candidates fail is the BLAST source/query `label_name`.
+- Keyword-to-BLAST transfer keeps only reusable workflow outputs plus BLAST execution/fallback material: stored query-source `label_name`, stored `phgo_alias`, resolved peptide sequence, source URLs, source database/species identifiers, target-compatible gene/transcript/protein identifiers, and other sequence-resolution metadata needed by downstream BLAST fallbacks. It must not forward source `alias`, `symbols`, `synonyms`, or `auto_define` as fresh BLAST label candidates.
+  - Keyword-to-BLAST preparation should treat the selected-row transfer as its own performance-critical stage:
+    - de-duplicate sequence fetches by sequence id through the shared protein-sequence cache/singleflight path
+    - de-duplicate BLAST query-item construction by stable keyword-row cache key within the same transfer pass, not only across later re-entry
+    - expose at least two visible progress phases: fetching keyword peptide sequences, then building cached BLAST query items
+- A `label_name` selected from a keyword result table is the BLAST query/source label, not the label for every BLAST hit. It is preserved as query metadata, written to hit rows through `blast_labelname`, used in TXT query-sequence headers, and included in the Excel query metadata sheet. BLAST hit rows have their own independent `label_name`, with `labelname_type` recording how that row label was obtained.
+- In keyword modes, `phgo_alias` is each keyword result item's ranked alias list. In BLAST modes, `phgo_alias` is each BLAST hit/result row's ranked alias list, not the BLAST source/query item's alias list. Source/query aliases stay on `QuerySequenceSource.PhgoAliases` for metadata, family BLAST, and custom grouping.
+- Keyword-to-BLAST skips the BLAST query label input page only when every selected keyword row already carries a non-empty query-source `label_name`; otherwise the normal BLAST label input flow still runs for the remaining unlabeled query items. This query label flow is separate from optional automatic BLAST-hit label identification.
+- Family BLAST, the custom grouping editor, and multi-file BLAST grouping define groups by the genes/sequences used as BLAST queries (`blast_labelname`/query-source gene identity), not by each BLAST hit row's own `label_name`. Hit-level labels may differ inside one family table and must not change the query-family grouping definition.
+- Family BLAST and the custom grouping editor must consume the ranked alias lists already stored by the workflow during auto-identification for grouping, member alias dialogs, semantic alias tokens, and default member names. They must not query labelname again or independently rebuild alias ranking.
 - Treat `UniProt`, `InterPro`, `Plant Reactome`, `PlantCyc`, and `MetaCyc` as external knowledge layers, not as peer primary databases in the startup selector:
   - `UniProt`: protein names, reviewed/unreviewed status, canonical length, GO, EC/catalytic activity, pathway notes, subcellular location, keywords, sequence cautions, and cross-references.
   - `InterPro`: protein families, domains, motifs, signatures, and Pfam-backed domain evidence through InterPro rather than direct Pfam-only coupling.
@@ -82,6 +109,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - BLAST filter default intent: conservatively remove hits that are unlikely to be true homologs before export or follow-up BLAST, using only generic evidence columns and thresholds. Default hard rules emphasize the two main biological failure modes for homolog pickup: abnormal amino-acid length and lost conserved-region evidence. By default, original target_length / UniProt canonical length must be present and within 70-130%, UniProt fragment records are rejected, and `InterPro conserved region status` must be `present` or allowed `partial`; `missing`, `uncertain`, and blank InterPro status are rejected. Identity, align_len/query_length, and E-value thresholds default to 0/off and are available as optional stricter hard rules for follow-up passes. Do not reject all unreviewed UniProt rows by default and do not require UniProt accession by default. By default the filter also collapses transcript isoforms to the best row per target gene. Do not add family-specific, species-specific, pathway-specific, paper-specific, copy-number-specific, whitelist, or special-name matching behavior to the filter; papers may only be used to calibrate generic thresholds. Optional generic top-hit limiting and soft scoring exist for stricter later passes, but should remain off by default.
   - BLAST filter parameter-surface rule: every numeric threshold, score weight, penalty, multiplier, distance band, evidence requirement, missing-data behavior, row-limiting mechanism, and ranking/tie-break preference used by the filter must be exposed in the filter parameter modal and round-tripped through model, prompt, and TUI settings. Do not add hidden filter constants or hard-coded ordering rules that a user cannot inspect and change from the modal.
   - BLAST filter execution rule: applying a filter, recalculating filter suggestions, clearing filter marks, and resetting selected rows from filter state must run behind a TUI loading/progress modal over the current result table. Never perform these actions synchronously in a table callback in a way that freezes the terminal. The modal must include `Cancel (Esc)` and cancellation returns to the same result table without showing a workflow error.
+  - BLAST filter performance rule:
+    - when suggesting rows for `RowsByRun`, process runs in parallel with a bounded worker pool instead of serially walking each run
+    - ranking/sorting helpers for top-hit and best-isoform limits must reuse precomputed per-row metrics such as query coverage, parsed E-value, and reference score instead of recomputing them inside sort comparison hot loops
 - Scrollable module status:
   - Do not add hidden-row/hidden-column status lines to scrollable modules. This design was removed because it made table and modal layouts heavier without improving navigation.
   - Do not draw custom scrollbar tracks or thumbs.
@@ -90,10 +120,10 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - Search-term group order is fixed to the query order.
   - Sorting in keyword tables is performed only inside each search-term group; sorting must never move rows between groups.
   - The `search_tern` display column is not sortable because group headers already define the search-term partition.
-  - Keyword result short labels such as `C4H`, `CCR2`, or `ATPAL1` are `label_name`, not `protein_id`. Phytozome keyword results only expose this naming label as `label_name`; do not add a separate `protein_id` column there unless the database source actually provides an original protein accession independently of the label feature.
-  - Keyword display columns are checkbox, row count, `search_tern`, conditional `label_name`, conditional original `protein_id` only when the source naturally provides it, `transcript`, and `discripition`; `search_tern` is not sortable, while `label_name`, original `protein_id`, `transcript`, and `discripition` are sortable.
+  - Keyword result short labels such as `C4H`, `CCR2`, or `ATPAL1` are `label_name`, not `geneid`. Phytozome keyword results expose this naming label as `label_name`; source protein/gene identifiers are shown as `geneid` only when the selected database naturally provides them independently of the label feature.
+  - Keyword display columns are checkbox, row count, `search_tern`, conditional `label_name`, `labelname_type` where available, `phgo_alias`, conditional original `geneid` only when the source naturally provides it, `transcript`, and `discripition`; `search_tern` is not sortable, while `label_name`, `labelname_type`, `phgo_alias`, original `geneid`, `transcript`, and `discripition` are sortable.
   - Keyword-mode label names are part of the main keyword review flow, not export-only data. Ask for them immediately after keyword input and before running keyword searches for both databases, so table display, View dialogs, file naming, and FASTA labels can use `label_name`.
-  - Keyword and BLAST label prompts use `Auto identify (Enter)` as the primary action when the input is empty. As soon as any text is present, the same primary button becomes `Apply (Enter)`. `Skip` is shown immediately to its left in the right-side action group and uses a non-Enter Ctrl shortcut. Auto identify must produce the same label list as manual input would: for keyword mode, label trust order is user-entered `label_name`, then labels inferred from database/result data; within automatic keyword inference, prefer an explicit row `label_name`, then the first alias (for example `ATPAL1` from `ATPAL1; PAL1`), and only then gene/transcript/sequence identifiers. For lemna keyword rows with no local alias-derived label, search Phytozome Arabidopsis with an `At1g80820`-style identifier found in the row/search term and use the first result's first alias as `label_name`. For BLAST automatic label inference, label trust order is user-entered `label_name`, then a label parsed directly from the pasted/loaded FASTA header, then labels inferred through database matching/resolved source metadata. Database aliases may be kept as alias candidates for dialogs/grouping, but they must not override a higher-trust label during automatic identification. User-edited family/custom grouping after automatic identification is authoritative and must not be rewritten by these automatic label priority rules.
+  - Keyword and BLAST label prompts use `Auto identify (Enter)` as the primary action when the input is empty. As soon as any text is present, the same primary button becomes `Apply (Enter)`. `Skip` is shown immediately to its left in the right-side action group and uses a non-Enter Ctrl shortcut. Auto identify must produce the same label list as manual input would: for keyword mode, label trust order is user-entered `label_name`, then labels inferred from database/result data; within automatic keyword inference, prefer an explicit row `label_name`, then the first alias (for example `ATPAL1` from `ATPAL1; PAL1`), and only then gene/transcript/sequence identifiers. For BLAST query/source automatic label inference, user-entered `label_name` is authoritative; otherwise Phytozome database candidates use the `synonyms` -> `symbols` -> `auto_define` fallback, and FASTA header labels are only the last fallback alias when database candidates are absent. User-edited family/custom grouping after automatic identification is authoritative and must not be rewritten by these automatic label priority rules.
 - Treat the application as query-first. Search/query workflows should end at selectable result tables by default; file generation is a subordinate table action, never the default meaning of completing a table.
 - In every result table, the default primary action is `View` (`Enter`): it opens a small details dialog for the current/selected rows. Export is exposed as `Export` (`Ctrl+G`) and batch export as `Export all` (`Ctrl+D`) where applicable.
 - Do not ask for export filenames, output folders, label names that are only needed for exported files, data analysis reports, peptide fetching, Excel writing, list-file writing, or any other export-only data until the user explicitly chooses `Export` or `Export all`.
@@ -310,10 +340,10 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - allow `~` as the explicit blank placeholder for per-query labels
   - after external-reference settings, detect Family BLAST/query-group patterns generically, such as `NAME1/NAME2/NAME3`, `PREFIX10/PREFIX10-like`, or `GROUP.1/GROUP2`; if at least two queries share a detected family prefix, open the Family BLAST settings modal with Family BLAST enabled by default
   - Family BLAST does not require external references to run; it groups the review/export unit by gene family while still executing BLAST per query. External references still control evidence columns, and the automatic filter remains gated on full external-reference availability
-  - Family BLAST must not rewrite or normalize original `label_name` values. Derive a separate `family_name` for grouping only. Remove trailing member numbering by default. Before that, default-on suffix handling should treat `prefix + number + suffix` labels such as `GENE10-like` or `GENE10_like` as `GENE10`, so `GENE9/GENE14/GENE10/GENE10-like` group as `GENE`. Keep database-provided `At`/`AT` prefixes by default, so `ATGENE1/ATGENE2` groups as `ATGENE`; the optional `Strip Arabidopsis At/AT prefix only for family_name` setting may be enabled manually to group those as `GENE`
+  - Family BLAST must not rewrite or normalize hit-row `label_name` values. It groups by BLAST query/source labels and query gene identity, then derives a separate `family_name` for the grouped review/export unit. Remove trailing member numbering by default. Before that, default-on suffix handling should treat `prefix + number + suffix` query labels such as `GENE10-like` or `GENE10_like` as `GENE10`, so `GENE9/GENE14/GENE10/GENE10-like` group as `GENE`.
   - in Family BLAST, grouped output filenames use the derived family name without member numbering, for example `GENE` instead of `GENE1`, `GENE2`, `GENE3`, `GENE4`; rows are merged by target protein/gene by default, keeping the best hit when one target is hit by multiple member queries
   - Family BLAST export should preserve the grouped family file while including all available query sequence headers for the family, not only the first member query
-  - ask for missing per-query label names only inside the file-generation subflow
+  - ask for missing per-query source `label_name` values before BLAST execution when they are needed for multi-query review, Family BLAST grouping, query-source metadata, and TXT query headers; this source-label flow is separate from hit-row labelname auto-identification in the external-reference modal
   - ask for an optional output folder name only inside the file-generation subflow for batch BLAST export
   - process and confirm BLAST result tables one query at a time
   - keep the BLAST selection table visible during row confirmation, including checkbox markers and row numbers
@@ -358,19 +388,51 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - every such modal should include a `Help (F1)` button using the shared three-language help template; remember the last help language for the current session
   - text and controls must wrap or use vertical module layout rather than overflowing horizontally; modal height should fit actual content without unnecessary dead space
 - Performance and concurrency:
-  - all new network clients must use `perf.HTTPClient()` or receive the shared workflow client; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
-  - all new ordinary batch-safe parallel loops must use `perf.ParallelFor(ctx, perf.WorkCPU|WorkDisk|WorkNetwork, total, fn)` so dynamic worker counts, context cancellation, and first-error cancellation stay consistent
-  - recovery-aware workflow pipelines such as BLAST batch execution or export-all may keep specialized worker loops, but they must use `perf` worker counts, propagate `context.Context`, cancel sibling workers on first fatal error, preserve completed results, and return a recovery error whose index resumes from the first incomplete item
+  - all new network clients must use `internal/netconfig.DefaultHTTPClient()` or receive the shared workflow client; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
+  - global network fanout must come from `internal/netconfig.DefaultNetworkWorkers()` / `NetworkWorkerCount(total)`, which currently defaults to `max(GOMAXPROCS*16, 96)` and can be raised with `PHYTOZOME_GO_MAX_WORKERS`; HTTP idle pools use the same shared defaults and `PHYTOZOME_GO_MAX_IDLE_CONNS*` overrides
+  - all new ordinary batch-safe parallel loops should reuse the existing shared/cancellable worker helpers where available, or the package's `netconfig`-backed worker count plus first-error cancellation, so dynamic worker counts, context cancellation, and first-error cancellation stay consistent
+  - recovery-aware workflow pipelines such as BLAST batch execution or export-all may keep specialized worker loops, but they must use shared `netconfig`/workflow worker counts, propagate `context.Context`, cancel sibling workers on first fatal error, preserve completed results, and return a recovery error whose index resumes from the first incomplete item
   - every long-running loading/generation/analysis path must accept or derive a cancellable `context.Context`; cancellation must pause/stop the current action and return to the expected TUI recovery/back target without leaking background workers
   - prefer controlled parallelism for batch-safe stages such as keyword searches, batch query resolution, and sequence fetch preloading
   - keep all interactive prompts serialized even when background work is parallelized
   - apply per-item timeouts to remote work units so a single slow request cannot stall the whole batch indefinitely
   - preserve input order in final tables and exports even when work completes out of order
   - deduplicate identical in-flight work with `singleflight` or equivalent guards so concurrent workers do not download, parse, or build the same artifact twice
+  - size auto-label and alias-supplement worker pools by the number of items that actually need work, not by the total row/query count when many items already carry labels or reusable aliases
+  - for BLAST downstream auxiliary stages, do not blindly reuse the global `96+` network worker budget. Keep phase-specific bounded defaults and only raise them with fresh measurements:
+    - UniProt row enrichment default worker cap: `12`
+    - UniProt accession prefetch default worker cap: `16`
+    - InterPro row enrichment default worker cap: `10`
+    - BLAST query/source auto-label and alias-supplement default worker cap: `min(cpu*2, 24)` with a floor of `4`
+    - BLAST keyword-term prefetch default worker cap: `min(cpu*2, 24)` with a floor of `4`
+    - BLAST sequence fetch default worker cap: `min(cpu*2, 20)` with a floor of `4`
+  - keep environment overrides for each BLAST auxiliary phase (`PHYTOZOME_GO_BLAST_UNIPROT_WORKERS`, `PHYTOZOME_GO_BLAST_UNIPROT_ACCESSION_WORKERS`, `PHYTOZOME_GO_BLAST_INTERPRO_WORKERS`, `PHYTOZOME_GO_BLAST_LABEL_WORKERS`, `PHYTOZOME_GO_BLAST_KEYWORD_TERM_WORKERS`, `PHYTOZOME_GO_BLAST_SEQUENCE_FETCH_WORKERS`) so live sweeps can still push higher where evidence supports it
+  - reuse BLAST-hit labelname identification results by stable hit/source keys within a run so duplicate HSPs, duplicate target rows, and family-merged tables do not repeat local labelname ranking or fallback work
+  - cache UniProt and InterPro lookup results across BLAST runs in the same wizard session, including negative lookups, so repeated hits from related query sources do not repeat external-reference calls
+  - remote Phytozome BLAST should default to a small bounded batch concurrency of 2; live replay checks showed 2 workers modestly improves throughput while 3 workers slows down the remote target
+  - inside Phytozome keyword lookups, run independent identifier variants and alias fallbacks with bounded network parallelism, but merge results in the original priority order so faster requests never change biological/search semantics
+  - cache duplicate labelname batch-ranking requests within a run so repeated alias lists are sorted once while preserving each request's task timestamp and item index in the returned result
+  - live keyword -> BLAST throughput is still not monotonic with larger worker caps, but the best setting changes when the full downstream pipeline is enabled. Old single-path sweeps that stopped at BLAST-only stages are no longer sufficient after enabling automatic query `labelname`, BLAST-hit `labelname`, UniProt, and InterPro together.
+  - for keyword-result-table -> BLAST full-chain live sweeps, always test with all expensive downstream stages enabled together:
+    - keyword auto `labelname`
+    - BLAST query/source auto `labelname`
+    - BLAST-hit auto `labelname`
+    - UniProt enrichment
+    - InterPro enrichment
+  - current full-chain live matrix evidence for the four keyword/blast combinations (`phytozome->phytozome`, `phytozome->lemna`, `lemna->phytozome`, `lemna->lemna`) showed:
+    - `PHYTOZOME_GO_MAX_WORKERS=32` total about `62633 ms`
+    - `PHYTOZOME_GO_MAX_WORKERS=64` total about `58564 ms`
+    - `PHYTOZOME_GO_MAX_WORKERS=96` total about `53129 ms`
+    - `PHYTOZOME_GO_MAX_WORKERS=128` total about `49124 ms` in one full pass, but later reruns varied upward
+    - `PHYTOZOME_GO_MAX_WORKERS=192` gave very fast `phytozome->lemna` and `lemna->lemna` runs in one pass, but could regress badly on the remote-Phytozome combinations on rerun
+    - `PHYTOZOME_GO_MAX_WORKERS=224` and `256` stayed competitive, but the best point still drifted run-to-run because the remote services dominate variance
+  - practical rule from the latest full-chain sweeps: do not trust old BLAST-only worker conclusions for the complete keyword->BLAST workflow. Re-measure on the exact stage mix being optimized, and treat roughly the `96-256` band as the current search space for full-chain runs with all downstream enrichments enabled.
+  - keep `internal/labelname` independent from workflow/search row model types; workflows collect candidates and metadata, while labelname only ranks generic alias requests and returns ranked aliases
+  - remove obsolete helper paths after moving behavior into labelname or workflow-owned candidate collection; do not keep compatibility wrappers that only reintroduce old ownership boundaries
   - use persistent local caches for stable remote payloads when that improves later sessions without changing user-visible behavior
   - prefer atomic file writes for shared cache artifacts so background workers cannot observe partial files
   - avoid deep-copying large BLAST/keyword row slices unless crossing a mutable ownership boundary; report and export assembly should pre-size result buffers and reuse already-stable slices where behavior stays unchanged
-  - production-code guardrail tests under `internal/perf` enforce the no-ad-hoc-client and no-unreviewed-parallel-loop rules; update the allowlist only for deliberate, documented exceptions
+  - keep `internal/netconfig` tests as the baseline guardrail for shared HTTP and worker defaults; if a broader `internal/perf` layer is later added, migrate clients/loops deliberately instead of reintroducing scattered constants
 - Metadata and result-link semantics:
   - preserve `OriginalInputURL` and `NormalizedURL` when resolving report URLs; do not overwrite them with fetched source structs
   - keep export metadata for query-source URLs separate from row-level target links
@@ -378,6 +440,77 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - cache release-level AHRD, protein->transcript maps, and FASTA indexes in memory for the current client
   - reuse cached BLAST-ready FASTA artifacts and build the index only once per path
   - avoid duplicate scans of the same release assets within one run
+  - production networked BLAST/keyword/reference paths must not impose hard client/request timeouts for slow links; cancellation must come from the task context so ESC/close can always stop the underlying work cleanly
+  - managed `blast+` bootstrap and local lemna FASTA preparation must expose real download/decompress progress in task pages, not a fake spinner-only status
+  - cache the managed `blast+` archive itself under the app-local tools directory so retries and repeated installs can skip the network when the archive is already present
+  - for multi-query local BLAST, prefer a small number of BLAST processes plus higher `-num_threads` per process instead of opening one process per CPU core by default
+  - current default local BLAST scheduler rule is evidence-based from four-program real BLAST+ sweeps and later batch/export replay:
+    - `blastx` default local batch workers: keep `1` unless the user explicitly overrides; the current machine's replay showed `2 x 8` regressed versus `1 x 8`
+    - `blastn` default local batch workers: prefer `2` when CPU >= 8 and batch size >= 2; current replay improved from about `44 s` at `1 x 4` to about `8 s` at `2 x 2` / `2 x 4`
+    - `tblastn` default local batch workers: prefer `2` when CPU >= 8 and batch size >= 2; current replay improved from about `75 s` at `1 x 4` to about `27-30 s` at `2 x 2` / `2 x 4`
+    - `blastp` default local batch workers: prefer `2` on larger CPU budgets and multi-query batches, but re-measure because gains are smaller and can drift with remote enrichment variance
+    - current thread caps by program/worker shape:
+      - `blastx`: cap `8`
+      - `blastp`: cap `8`
+      - `blastn`: cap `4` with one worker, cap `2` when batch workers >= 2
+      - `tblastn`: cap `4` with one worker, cap `2` when batch workers >= 2
+  - every shared BLAST execution entry point must align prepared query sequences to the configured BLAST program before submission, not only the top-level interactive wizard path:
+    - `blastn` / `blastx` must convert query items to DNA using the selected source's nucleotide resolver/cache path
+    - `tblastn` / `blastp` must convert query items to protein using the selected source's protein resolver/cache path
+    - direct callers such as replay/performance tests must get the same sequence-kind correction as interactive runs
+  - `lemna` nucleotide query preparation must use the release FASTA chosen for the current local program and cache parsed nucleotide sequences on disk/in memory just like protein FASTA
+  - `lemna` capability detection must self-initialize species/release metadata before reading cached release maps; do not require callers to fetch species candidates first
+  - local `makeblastdb` reliability on Windows must be defensive:
+    - local cached DB prefixes should stay short and stable instead of embedding the full FASTA filename verbatim
+    - build local cached databases with BLAST DB version 4 to avoid fragile LMDB/v5 runtime failures in app-local cache paths
+    - only treat a cached DB as complete when the full core file set exists (`.pin/.phr/.psq` for protein, `.nin/.nhr/.nsq` for nucleotide); a single leftover artifact is not a valid cache hit
+    - if `makeblastdb` fails, remove partial DB artifacts before retry so half-built local caches cannot poison later BLAST runs
+  - current live replay evidence for `lemna` single-query local BLAST with the repaired workflow path:
+    - `local:BLASTN` succeeded on `Sp9509d006g004400_T001` with `1` batch worker and `4` BLAST threads
+    - `local:BLASTX` succeeded on `Sp9509d006g004400_T001` with `1` batch worker and `8` BLAST threads
+    - `local:BLASTP` succeeded on `Sp9509d006g004400_T001` with `1` batch worker and `8` BLAST threads
+    - `local:TBLASTN` succeeded on `Sp9509d006g004400_T001` with `1` batch worker and `4` BLAST threads
+  - current live replay evidence for `lemna` three-query batch local BLAST with query/source auto label, BLAST-hit auto label, UniProt, and InterPro enabled together:
+    - `local:BLASTN` batch succeeded with exports/reports at `2` batch workers and `2` BLAST threads, about `9 rows selected` and about `8 s` full export replay
+    - `local:BLASTX` batch succeeded with exports/reports at `1` batch worker and `8` BLAST threads, about `24 rows selected` and about `8 s` full export replay
+    - `local:BLASTP` batch succeeded in live batch replay at `2` batch workers and `8` BLAST threads, about `25 s`; export chain also succeeded on the earlier `1 x 8` replay
+    - `local:TBLASTN` batch succeeded with exports/reports at `2` batch workers and `2` BLAST threads, about `54 rows selected` and about `7 s` full export replay
+  - BLAST external-reference enrichment workers should scale by enabled feature set instead of one fixed budget:
+    - UniProt accession prefetch, UniProt lookup, and InterPro lookup may use more aggressive network fanout when auto BLAST-hit labelname, UniProt, and InterPro are enabled together
+    - CPU/disk-heavy phases should keep their own more conservative worker caps and must not blindly inherit the network enrichment fanout
+    - small keyword->BLAST replay batches should keep more conservative default network worker ceilings than large batches; live replay evidence showed that pushing UniProt/InterPro worker counts higher for 3-query / about 60-row runs made the total wall time slightly worse instead of better
+  - UniProt and InterPro enrichment progress must expose explicit stage text before the row-level loop begins so long external-reference runs do not look frozen:
+    - UniProt should show an accession-prefetch phase before lookup resolution
+    - InterPro should distinguish query-reference resolution from hit-reference resolution
+  - BLAST query/source labelname worker strategy:
+    - keep the expensive remote Phytozome keyword-row fetch stage parallel and de-duplicated by term/species cache key
+    - after candidate collection, batch-rank aliases instead of calling single-item rank repeatedly
+    - progress text should explicitly say `Collecting BLAST source label candidates...` and then `Ranking BLAST source labels...`
+  - Keyword-to-BLAST real-flow performance work should be measured separately from BLAST execution:
+    - keyword search
+    - keyword auto labelname
+    - selected-row to BLAST-item resolution
+    - BLAST query/source auto labelname + alias supplement
+    - only after that, BLAST execution and external references
+    - keep a dedicated live breakdown test so worker tuning can target the real pre-BLAST bottleneck instead of only the final BLAST stage
+    - when `suppressTaskModals` is true, keyword-row to BLAST-item resolution should also run headless without wrapping an extra progress modal so replay/perf runs do not spend extra TUI orchestration overhead on the already-instrumented fast path
+  - BLAST-hit labelname worker strategy:
+    - prefetch keyword rows for all unresolved hits in one shared term batch
+    - de-duplicate identical hits by stable identification cache key before ranking
+    - batch-rank unresolved hit alias requests and then fan the decision back onto all duplicate rows/HSPs
+    - progress text should explicitly say `Prefetching BLAST hit label candidates...`, `Ranking BLAST hit label aliases...`, and `Resolved BLAST hit label names... x/y`
+  - `internal/labelname` batch ranking should avoid repeated batch-internal normalization work where behavior does not depend on the repeated recomputation; preserve exact ranking output while reducing redundant `TrimSpace`/`ToLower`/split passes
+  - family BLAST post-processing must avoid recomputing the same semantic-token list and reference-score/coverage/target-key tuple inside sort/comparison hot loops; precompute once per row when ranking large result sets
+  - when running replay/live export tests for `blastn` or `tblastn`, do not blindly reuse the protein-target default filter settings:
+    - genome/nucleotide-target programs do not have a biologically equivalent `target_length / UniProt canonical length` surface
+    - replay/export validation should derive filter settings from the BLAST program and disable canonical-length hard rejection plus InterPro conserved-region hard rejection for `blastn` / `tblastn`
+    - this rule is for replay/export validation fidelity; it does not silently change the interactive user defaults
+  - when `suppressTaskModals` is true, BLAST auto-label and alias-supplement paths must run headless and must not open tview task modals; otherwise long replay/live tests can deadlock the Windows tcell/tview loop
+  - current stable `lemna` live replay transcript seed set for local nucleotide/protein BLAST performance tests:
+    - `Sp9509d006g004400_T001`
+    - `Sp9509d012g006190_T001`
+    - `Sp9509d012g006280_T001`
+  - keep environment overrides available for large local machines or unusually large databases, but do not raise defaults without rerunning a four-program sweep
 - When adding a new command or prompt, update the prompt text, help text, and this file together so the behavior stays discoverable and consistent.
 
 ## Documentation and release standards
@@ -619,6 +752,10 @@ Priority 4 (low / optional)
 - Exported `.xlsx`, `.txt`, and PDF data analysis reports are written under an `output/` directory next to the executable being run.
 - If the user requests an extra output folder, create it inside `output/`, not beside the executable.
 - Runtime caches must live under a single hidden-capable `.cache/` directory next to the executable, not scattered across OS temp or user cache roots.
+- Cache layout rule:
+  - `appfs.CacheRoot()` is the single source of truth for the app-local cache root
+  - startup cache reset clears the whole app-local `.cache` tree for the new run; do not add side caches outside that root
+  - modules may also expose narrower subtree cleanup for known-bad artifacts, but that is a supplement to the startup reset, not a replacement
 - Lemna local BLAST assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`.
 - Persistent Phytozome caches should live under `.cache/phytozome/...`.
 

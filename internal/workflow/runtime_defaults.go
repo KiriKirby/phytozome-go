@@ -9,69 +9,27 @@ package workflow
 
 import (
 	"context"
-	"net"
 	"net/http"
-	"os"
-	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/KiriKirby/phytozome-go/internal/netconfig"
 )
 
 func defaultHTTPClient() *http.Client {
-	cpu := currentCPUCount()
-	networkWorkers := defaultNetworkWorkers()
-	maxIdleConns := configuredInt("PHYTOZOME_GO_MAX_IDLE_CONNS", maxInt(networkWorkers*2, 512))
-	maxIdleConnsPerHost := configuredInt("PHYTOZOME_GO_MAX_IDLE_CONNS_PER_HOST", maxInt(networkWorkers, 128))
-	httpTimeout := configuredDurationSeconds("PHYTOZOME_GO_HTTP_TIMEOUT_SECONDS", 60*time.Second)
-	idleConnTimeout := configuredDurationSeconds("PHYTOZOME_GO_HTTP_IDLE_SECONDS", 90*time.Second)
-	tlsHandshakeTimeout := configuredDurationSeconds("PHYTOZOME_GO_HTTP_TLS_SECONDS", 10*time.Second)
-	expectContinueTimeout := configuredDurationSeconds("PHYTOZOME_GO_HTTP_EXPECT_SECONDS", time.Second)
-
-	_ = cpu
-	return &http.Client{
-		Timeout: httpTimeout,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: tlsHandshakeTimeout, KeepAlive: 30 * time.Second}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          maxIdleConns,
-			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-			IdleConnTimeout:       idleConnTimeout,
-			TLSHandshakeTimeout:   tlsHandshakeTimeout,
-			ExpectContinueTimeout: expectContinueTimeout,
-		},
-	}
+	return netconfig.DefaultHTTPClient()
 }
 
 func currentCPUCount() int {
-	cpu := runtime.GOMAXPROCS(0)
-	if cpu < 1 {
-		cpu = runtime.NumCPU()
-	}
-	if cpu < 1 {
-		return 1
-	}
-	return cpu
+	return netconfig.CurrentCPUCount()
 }
 
 func defaultNetworkWorkers() int {
-	cpu := currentCPUCount()
-	workers := maxInt(cpu*16, 96)
-	if envWorkers := configuredInt("PHYTOZOME_GO_MAX_WORKERS", 0); envWorkers > workers {
-		workers = envWorkers
-	}
-	return workers
+	return netconfig.DefaultNetworkWorkers()
 }
 
 func defaultDiskWorkers() int {
-	cpu := currentCPUCount()
-	workers := maxInt(2, minInt(cpu, 8))
-	if envWorkers := configuredInt("PHYTOZOME_GO_DISK_WORKERS", 0); envWorkers > 0 {
-		workers = envWorkers
-	}
-	return workers
+	return netconfig.DefaultDiskWorkers()
 }
 
 func clampWorkers(total int, preferredMax int) int {
@@ -156,21 +114,9 @@ func runParallel(ctx context.Context, total int, workerCount int, fn func(contex
 }
 
 func configuredInt(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
+	return netconfig.ConfiguredInt(name, fallback)
 }
 
 func configuredDurationSeconds(name string, fallback time.Duration) time.Duration {
-	value := configuredInt(name, 0)
-	if value <= 0 {
-		return fallback
-	}
-	return time.Duration(value) * time.Second
+	return netconfig.ConfiguredDurationSeconds(name, fallback)
 }

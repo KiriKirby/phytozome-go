@@ -1,5 +1,6 @@
 bin/
 dist/
+blastplus/
 .cache/
 output/
 *.exe

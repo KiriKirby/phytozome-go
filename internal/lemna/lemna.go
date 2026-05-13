@@ -39,10 +39,25 @@ const (
 )
 
 var (
-	linkPattern        = regexp.MustCompile(`(?is)<a\s+href="([^"]+)">([^<]+)</a>`)
-	spacePattern       = regexp.MustCompile(`\s+`)
-	searchNoisePattern = regexp.MustCompile(`[^a-z0-9]+`)
-	symbolTokenPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{1,8})?\d*\b`)
+	linkPattern           = regexp.MustCompile(`(?is)<a\s+href="([^"]+)">([^<]+)</a>`)
+	spacePattern          = regexp.MustCompile(`\s+`)
+	searchNoisePattern    = regexp.MustCompile(`[^a-z0-9]+`)
+	symbolTokenPattern    = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}(?:-[A-Z0-9]{1,8})?\d*\b`)
+	blastOptionPattern    = regexp.MustCompile(`(?is)<option[^>]*\bvalue=["']?(\d+)["']?[^>]*>([^<]+)</option>`)
+	blastInputPattern     = regexp.MustCompile(`(?is)<input\b[^>]*>`)
+	blastSelectPattern    = regexp.MustCompile(`(?is)<select\b[^>]*\bname=["']?([^"'\s>]+)["']?[^>]*>(.*?)</select>`)
+	blastHTMLAttrPatterns = map[string]*regexp.Regexp{
+		"name":  regexp.MustCompile(`(?is)\bname=["']([^"']*)["']`),
+		"value": regexp.MustCompile(`(?is)\bvalue=["']([^"']*)["']`),
+	}
+	blastSelectedOptionPattern = regexp.MustCompile(`(?is)<option[^>]*\bselected=["']?selected["']?[^>]*\bvalue=["']?([^"'\s>]*)["']?`)
+	blastAnyOptionPattern      = regexp.MustCompile(`(?is)<option[^>]*\bvalue=["']?([^"'\s>]*)["']?[^>]*>`)
+	releaseNumberPattern       = regexp.MustCompile(`\d+`)
+	blastJobIDPatterns         = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)job(?:\s|-)?id[:=\s]*([0-9a-zA-Z_-]+)`),
+		regexp.MustCompile(`(?i)/blast/(?:results|report|job)/([0-9a-zA-Z_-]+)`),
+		regexp.MustCompile(`(?i)rid=([0-9a-zA-Z_-]+)`),
+	}
 )
 
 type Client struct {
@@ -56,12 +71,14 @@ type Client struct {
 	proteinTranscriptCache map[string]proteinTranscriptMaps
 	fastaIndexCache        map[string]map[string]fastaEntry
 	proteinReleaseCache    map[string]map[string]string
-	proteinSequenceCache   map[string]string
+	nucleotideReleaseCache map[string]map[string]string
+	proteinSequenceCache   map[string]model.ProteinSequenceData
 	keywordIndexCache      map[string]lemnaKeywordIndex
 	keywordRowsCache       map[string][]model.KeywordResultRow
 	keywordRowsByGFFCache  map[string][]model.KeywordResultRow
 	blastCapabilitiesCache map[string]BlastCapability
 	localResultsCache      map[string]model.BlastResult
+	localBlastJobCache     map[string]model.BlastJob
 	textCache              map[string]string
 	sf                     singleflight.Group
 }
@@ -136,14 +153,18 @@ type lemnaKeywordIndex struct {
 
 // BlastCapability describes detected BLAST capabilities for a release/species.
 type BlastCapability struct {
-	HasServerNucleotideDB bool
-	BlastNDBID            int
-	HasServerProteinDB    bool
-	ProteinDBID           int
-	HasProteinFasta       bool
-	ProteinFastaURL       string
-	HasNucleotideFasta    bool
-	NucleotideFastaURL    string
+	HasServerNucleotideDB  bool
+	BlastNDBID             int
+	HasServerProteinDB     bool
+	ProteinDBID            int
+	ServerBlastNAvailable  bool
+	ServerBlastXAvailable  bool
+	ServerTBlastNAvailable bool
+	ServerBlastPAvailable  bool
+	HasProteinFasta        bool
+	ProteinFastaURL        string
+	HasNucleotideFasta     bool
+	NucleotideFastaURL     string
 }
 
 // DetectBlastCapabilities inspects cached release metadata and returns a best-effort
@@ -151,6 +172,9 @@ type BlastCapability struct {
 // metadata cache and only attempts lightweight page parsing elsewhere (parsing
 // not implemented here - this is a conservative detection that enables CLI UX).
 func (c *Client) DetectBlastCapabilities(ctx context.Context, species model.SpeciesCandidate) (BlastCapability, error) {
+	if _, err := c.FetchSpeciesCandidates(ctx); err != nil {
+		return BlastCapability{}, err
+	}
 	// Return cached capabilities if present.
 	c.mu.RLock()
 	if c.blastCapabilitiesCache != nil {
@@ -172,6 +196,10 @@ func (c *Client) DetectBlastCapabilities(ctx context.Context, species model.Spec
 		ProteinFastaURL:       rel.ProteinURL,
 		HasNucleotideFasta:    rel.NucleotideURL != "",
 		NucleotideFastaURL:    rel.NucleotideURL,
+	}
+	if cap.HasServerNucleotideDB {
+		cap.ServerBlastNAvailable = true
+		cap.ServerTBlastNAvailable = true
 	}
 
 	c.enrichServerBlastCapability(ctx, rel, &cap)
@@ -427,16 +455,16 @@ func (c *Client) AvailableBlastPrograms(ctx context.Context, species model.Speci
 	}
 
 	progs := make([]string, 0, 4)
-	if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
+	if cap.ServerBlastNAvailable || cap.HasNucleotideFasta {
 		progs = append(progs, "blastn")
 	}
-	if cap.HasServerProteinDB || cap.HasProteinFasta {
+	if cap.ServerBlastXAvailable || cap.HasProteinFasta {
 		progs = append(progs, "blastx")
 	}
-	if cap.HasServerNucleotideDB || cap.HasNucleotideFasta {
+	if cap.ServerTBlastNAvailable || cap.HasNucleotideFasta {
 		progs = append(progs, "tblastn")
 	}
-	if cap.HasServerProteinDB || cap.HasProteinFasta {
+	if cap.ServerBlastPAvailable || cap.HasProteinFasta {
 		progs = append(progs, "blastp")
 	}
 	return progs
@@ -483,9 +511,19 @@ func (c *Client) enrichServerBlastCapability(ctx context.Context, rel releaseInf
 			if cap.BlastNDBID == 0 {
 				cap.BlastNDBID = result.dbID
 			}
+			if result.program == "blastn" {
+				cap.ServerBlastNAvailable = true
+			} else {
+				cap.ServerTBlastNAvailable = true
+			}
 		case "blastx", "blastp":
 			cap.HasServerProteinDB = true
 			cap.ProteinDBID = result.dbID
+			if result.program == "blastx" {
+				cap.ServerBlastXAvailable = true
+			} else {
+				cap.ServerBlastPAvailable = true
+			}
 		}
 	}
 }
@@ -544,8 +582,7 @@ type blastOption struct {
 }
 
 func parseBlastOptions(body string) []blastOption {
-	re := regexp.MustCompile(`(?is)<option[^>]*\bvalue=["']?(\d+)["']?[^>]*>([^<]+)</option>`)
-	matches := re.FindAllStringSubmatch(body, -1)
+	matches := blastOptionPattern.FindAllStringSubmatch(body, -1)
 	options := make([]blastOption, 0, len(matches))
 	for _, match := range matches {
 		if len(match) < 3 {
@@ -588,16 +625,14 @@ func blastFormHasDB(body string, dbID int) bool {
 
 func parseBlastFormDefaults(body string) url.Values {
 	form := url.Values{}
-	inputRe := regexp.MustCompile(`(?is)<input\b[^>]*>`)
-	for _, input := range inputRe.FindAllString(body, -1) {
+	for _, input := range blastInputPattern.FindAllString(body, -1) {
 		name := htmlAttr(input, "name")
 		if name == "" {
 			continue
 		}
 		form.Set(name, htmlAttr(input, "value"))
 	}
-	selectRe := regexp.MustCompile(`(?is)<select\b[^>]*\bname=["']?([^"'\s>]+)["']?[^>]*>(.*?)</select>`)
-	for _, match := range selectRe.FindAllStringSubmatch(body, -1) {
+	for _, match := range blastSelectPattern.FindAllStringSubmatch(body, -1) {
 		if len(match) < 3 {
 			continue
 		}
@@ -613,7 +648,10 @@ func parseBlastFormDefaults(body string) url.Values {
 }
 
 func htmlAttr(tag string, attr string) string {
-	re := regexp.MustCompile(`(?is)\b` + regexp.QuoteMeta(attr) + `=["']([^"']*)["']`)
+	re := blastHTMLAttrPatterns[strings.ToLower(strings.TrimSpace(attr))]
+	if re == nil {
+		return ""
+	}
 	if match := re.FindStringSubmatch(tag); len(match) >= 2 {
 		return html.UnescapeString(match[1])
 	}
@@ -621,12 +659,10 @@ func htmlAttr(tag string, attr string) string {
 }
 
 func selectedOptionValue(selectBody string) string {
-	selectedRe := regexp.MustCompile(`(?is)<option[^>]*\bselected=["']?selected["']?[^>]*\bvalue=["']?([^"'\s>]*)["']?`)
-	if match := selectedRe.FindStringSubmatch(selectBody); len(match) >= 2 {
+	if match := blastSelectedOptionPattern.FindStringSubmatch(selectBody); len(match) >= 2 {
 		return html.UnescapeString(match[1])
 	}
-	optionRe := regexp.MustCompile(`(?is)<option[^>]*\bvalue=["']?([^"'\s>]*)["']?[^>]*>`)
-	if match := optionRe.FindStringSubmatch(selectBody); len(match) >= 2 {
+	if match := blastAnyOptionPattern.FindStringSubmatch(selectBody); len(match) >= 2 {
 		return html.UnescapeString(match[1])
 	}
 	return ""
@@ -641,12 +677,8 @@ func ensureFASTA(sequence string) string {
 }
 
 func extractBlastJobID(value string) string {
-	for _, pattern := range []string{
-		`(?i)job(?:\s|-)?id[:=\s]*([0-9a-zA-Z_-]+)`,
-		`(?i)/blast/(?:results|report|job)/([0-9a-zA-Z_-]+)`,
-		`(?i)rid=([0-9a-zA-Z_-]+)`,
-	} {
-		if match := regexp.MustCompile(pattern).FindStringSubmatch(value); len(match) >= 2 {
+	for _, pattern := range blastJobIDPatterns {
+		if match := pattern.FindStringSubmatch(value); len(match) >= 2 {
 			return match[1]
 		}
 	}
@@ -685,12 +717,14 @@ func NewClient(httpClient *http.Client) *Client {
 		proteinTranscriptCache: make(map[string]proteinTranscriptMaps),
 		fastaIndexCache:        make(map[string]map[string]fastaEntry),
 		proteinReleaseCache:    make(map[string]map[string]string),
-		proteinSequenceCache:   make(map[string]string),
+		nucleotideReleaseCache: make(map[string]map[string]string),
+		proteinSequenceCache:   make(map[string]model.ProteinSequenceData),
 		keywordIndexCache:      make(map[string]lemnaKeywordIndex),
 		keywordRowsCache:       make(map[string][]model.KeywordResultRow),
 		keywordRowsByGFFCache:  make(map[string][]model.KeywordResultRow),
 		blastCapabilitiesCache: make(map[string]BlastCapability),
 		localResultsCache:      make(map[string]model.BlastResult),
+		localBlastJobCache:     make(map[string]model.BlastJob),
 		textCache:              make(map[string]string),
 	}
 	client.keywordEngine = lemnakeyword.New(client)
@@ -873,7 +907,11 @@ func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model
 
 	switch program {
 	case "blastn", "tblastn":
-		if cap.HasServerNucleotideDB {
+		serverAvailable := cap.ServerBlastNAvailable
+		if program == "tblastn" {
+			serverAvailable = cap.ServerTBlastNAvailable
+		}
+		if serverAvailable {
 			job, serr := c.submitBlastToServer(ctx, req)
 			if serr == nil {
 				return job, nil
@@ -893,7 +931,11 @@ func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model
 		}
 		return model.BlastJob{}, fmt.Errorf("%s requires a nucleotide BLAST database, but no server DB id or local nucleotide FASTA was detected for %s", program, req.Species.DisplayLabel())
 	case "blastx", "blastp":
-		if cap.HasServerProteinDB {
+		serverAvailable := cap.ServerBlastXAvailable
+		if program == "blastp" {
+			serverAvailable = cap.ServerBlastPAvailable
+		}
+		if serverAvailable {
 			job, serr := c.submitBlastToServer(ctx, req)
 			if serr == nil {
 				return job, nil
@@ -1194,7 +1236,7 @@ func (c *Client) FetchGeneQuerySequence(ctx context.Context, species model.Speci
 				return nil, err
 			}
 			return &model.QuerySequenceSource{
-				Sequence:          sequence,
+				Sequence:          sequence.Sequence,
 				SourceDatabase:    c.Name(),
 				SourceProteomeID:  species.ProteomeID,
 				SourceJBrowseName: species.JBrowseName,
@@ -1232,7 +1274,7 @@ func (c *Client) ResolveQuerySequence(ctx context.Context, species model.Species
 		return nil, false, err
 	}
 	source := &model.QuerySequenceSource{
-		Sequence:          sequence,
+		Sequence:          sequence.Sequence,
 		SourceDatabase:    c.Name(),
 		SourceProteomeID:  species.ProteomeID,
 		SourceJBrowseName: species.JBrowseName,
@@ -1325,10 +1367,10 @@ func (c *Client) SearchKeywordRowsBroad(ctx context.Context, species model.Speci
 	return c.keywordEngine.SearchKeywordRowsBroad(ctx, species, keyword)
 }
 
-func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
+func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (model.ProteinSequenceData, error) {
 	sequenceID = strings.TrimSpace(sequenceID)
 	if sequenceID == "" {
-		return "", fmt.Errorf("empty lemna.org sequence id")
+		return model.ProteinSequenceData{}, fmt.Errorf("empty lemna.org sequence id")
 	}
 	c.mu.RLock()
 	if cached, ok := c.proteinSequenceCache[sequenceID]; ok {
@@ -1352,6 +1394,12 @@ func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenc
 				c.mu.Unlock()
 				return sequence, nil
 			}
+			if sequence, ok, err := c.findProteinSequenceViaMappings(ctx, release, sequenceID); err == nil && ok {
+				c.mu.Lock()
+				c.proteinSequenceCache[sequenceID] = sequence
+				c.mu.Unlock()
+				return sequence, nil
+			}
 		}
 		candidates, err := c.FetchSpeciesCandidates(ctx)
 		if err != nil {
@@ -1363,22 +1411,60 @@ func (c *Client) FetchProteinSequence(ctx context.Context, targetID int, sequenc
 				continue
 			}
 			sequence, ok, err := c.findProteinSequenceInRelease(ctx, release, sequenceID)
-			if err != nil {
-				continue
-			}
-			if ok {
+			if err == nil && ok {
 				c.mu.Lock()
 				c.proteinSequenceCache[sequenceID] = sequence
 				c.mu.Unlock()
 				return sequence, nil
 			}
+			sequence, ok, err = c.findProteinSequenceViaMappings(ctx, release, sequenceID)
+			if err != nil || !ok {
+				continue
+			}
+			c.mu.Lock()
+			c.proteinSequenceCache[sequenceID] = sequence
+			c.mu.Unlock()
+			return sequence, nil
 		}
-		return "", fmt.Errorf("no lemna.org protein sequence matched %s", sequenceID)
+		return model.ProteinSequenceData{}, fmt.Errorf("no lemna.org protein sequence matched %s", sequenceID)
 	})
 	if err != nil {
-		return "", err
+		return model.ProteinSequenceData{}, err
 	}
-	return value.(string), nil
+	return value.(model.ProteinSequenceData), nil
+}
+
+func (c *Client) FetchNucleotideSequence(ctx context.Context, targetID int, sequenceID string, program string) (model.ProteinSequenceData, error) {
+	sequenceID = strings.TrimSpace(sequenceID)
+	program = strings.ToLower(strings.TrimSpace(program))
+	if sequenceID == "" {
+		return model.ProteinSequenceData{}, fmt.Errorf("empty lemna.org nucleotide sequence id")
+	}
+	if release, err := c.releaseForTargetID(ctx, targetID); err == nil {
+		if sequence, ok, err := c.findNucleotideSequenceInRelease(ctx, release, sequenceID, program); err == nil && ok {
+			return sequence, nil
+		} else if err != nil {
+			return model.ProteinSequenceData{}, err
+		}
+	}
+	candidates, err := c.FetchSpeciesCandidates(ctx)
+	if err != nil {
+		return model.ProteinSequenceData{}, err
+	}
+	for _, species := range candidates {
+		release, err := c.releaseForSpecies(ctx, species)
+		if err != nil {
+			continue
+		}
+		sequence, ok, err := c.findNucleotideSequenceInRelease(ctx, release, sequenceID, program)
+		if err != nil {
+			continue
+		}
+		if ok {
+			return sequence, nil
+		}
+	}
+	return model.ProteinSequenceData{}, fmt.Errorf("no lemna.org nucleotide sequence matched %s for %s", sequenceID, program)
 }
 
 func (c *Client) listDownloadDirs(ctx context.Context, requestURL string) ([]downloadDir, error) {
@@ -1452,6 +1538,41 @@ func nucleotideFileScore(name string) int {
 	default:
 		return 0
 	}
+}
+
+func (c *Client) findNucleotideSequenceInRelease(ctx context.Context, release releaseInfo, sequenceID string, program string) (model.ProteinSequenceData, bool, error) {
+	fastaURL := bestLocalNucleotideURL(release, program)
+	if strings.TrimSpace(fastaURL) == "" {
+		return model.ProteinSequenceData{}, false, nil
+	}
+	sequences, err := c.cachedNucleotideReleaseSequences(ctx, release, program)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	cacheDir, err := ensureCacheDir(release.RootDir, release.ReleaseDir)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	localPath, err := downloadAndPrepareFasta(ctx, c, fastaURL, cacheDir)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	index, err := c.cachedFastaIndex(localPath)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	for _, alias := range sequenceAliases(sequenceID) {
+		for _, normalized := range normalizedIdentifierCandidates(alias) {
+			if sequence := strings.TrimSpace(sequences[normalized]); sequence != "" {
+				record := model.ProteinSequenceData{Sequence: sequence}
+				if entry, ok := index[normalized]; ok {
+					record.OriginalHeader = formatOriginalFastaDefline(entry.Defline)
+				}
+				return record, true, nil
+			}
+		}
+	}
+	return model.ProteinSequenceData{}, false, nil
 }
 
 func (c *Client) releaseForSpecies(ctx context.Context, species model.SpeciesCandidate) (releaseInfo, error) {
@@ -1773,21 +1894,146 @@ func deriveProteinTranscriptMapsFromRows(rows []model.KeywordResultRow) (map[str
 	return protToTrans, transToGene
 }
 
-func (c *Client) findProteinSequenceInRelease(ctx context.Context, release releaseInfo, sequenceID string) (string, bool, error) {
+func (c *Client) findProteinSequenceInRelease(ctx context.Context, release releaseInfo, sequenceID string) (model.ProteinSequenceData, bool, error) {
 	aliases := sequenceAliases(sequenceID)
 	if len(aliases) == 0 {
-		return "", false, nil
+		return model.ProteinSequenceData{}, false, nil
 	}
 	sequences, err := c.cachedProteinReleaseSequences(ctx, release)
 	if err != nil {
-		return "", false, err
+		return model.ProteinSequenceData{}, false, err
+	}
+	index, err := c.cachedProteinReleaseFastaIndex(ctx, release)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
 	}
 	for _, alias := range aliases {
 		if sequence := strings.TrimSpace(sequences[alias]); sequence != "" {
-			return sequence, true, nil
+			record := model.ProteinSequenceData{Sequence: sequence}
+			if entry, ok := index[alias]; ok {
+				record.OriginalHeader = formatOriginalFastaDefline(entry.Defline)
+			}
+			return record, true, nil
 		}
 	}
-	return "", false, nil
+	return model.ProteinSequenceData{}, false, nil
+}
+
+func (c *Client) findProteinSequenceViaMappings(ctx context.Context, release releaseInfo, sequenceID string) (model.ProteinSequenceData, bool, error) {
+	protToTrans, transToGene, err := c.cachedProteinTranscriptMaps(ctx, release)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	if len(protToTrans) == 0 && len(transToGene) == 0 {
+		return model.ProteinSequenceData{}, false, nil
+	}
+
+	aliases := sequenceAliases(sequenceID)
+	if len(aliases) == 0 {
+		return model.ProteinSequenceData{}, false, nil
+	}
+
+	proteinIDs := make([]string, 0, len(aliases)*2)
+	addProteinID := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		for _, existing := range proteinIDs {
+			if strings.EqualFold(existing, value) {
+				return
+			}
+		}
+		proteinIDs = append(proteinIDs, value)
+	}
+
+	for _, alias := range aliases {
+		if transcriptID, ok := lookupNormalizedMapValue(protToTrans, alias); ok {
+			addProteinID(alias)
+			addProteinID(transcriptID)
+		}
+	}
+
+	for _, alias := range aliases {
+		if _, ok := lookupNormalizedMapValue(transToGene, alias); ok {
+			for proteinID, transcriptID := range protToTrans {
+				if !identifierEqualsAny(transcriptID, aliases) {
+					continue
+				}
+				addProteinID(proteinID)
+			}
+		}
+	}
+
+	if len(proteinIDs) == 0 {
+		for proteinID, transcriptID := range protToTrans {
+			if identifierEqualsAny(transcriptID, aliases) || identifierEqualsAny(stripTranscriptSuffix(transcriptID), aliases) {
+				addProteinID(proteinID)
+			}
+		}
+	}
+
+	if len(proteinIDs) == 0 {
+		return model.ProteinSequenceData{}, false, nil
+	}
+
+	sequences, err := c.cachedProteinReleaseSequences(ctx, release)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+	index, err := c.cachedProteinReleaseFastaIndex(ctx, release)
+	if err != nil {
+		return model.ProteinSequenceData{}, false, err
+	}
+
+	for _, proteinID := range proteinIDs {
+		for _, alias := range normalizedIdentifierCandidates(proteinID) {
+			if sequence := strings.TrimSpace(sequences[alias]); sequence != "" {
+				record := model.ProteinSequenceData{Sequence: sequence}
+				if entry, ok := index[alias]; ok {
+					record.OriginalHeader = formatOriginalFastaDefline(entry.Defline)
+				}
+				return record, true, nil
+			}
+		}
+	}
+	return model.ProteinSequenceData{}, false, nil
+}
+
+func identifierEqualsAny(value string, aliases []string) bool {
+	for _, candidate := range normalizedIdentifierCandidates(value) {
+		for _, alias := range aliases {
+			for _, aliasCandidate := range normalizedIdentifierCandidates(alias) {
+				if strings.EqualFold(candidate, aliasCandidate) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (c *Client) cachedProteinReleaseFastaIndex(ctx context.Context, release releaseInfo) (map[string]fastaEntry, error) {
+	cacheDir, err := ensureCacheDir(release.RootDir, release.ReleaseDir)
+	if err != nil {
+		return nil, err
+	}
+	localPath, err := downloadAndPrepareFasta(ctx, c, release.ProteinURL, cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	return c.cachedFastaIndex(localPath)
+}
+
+func formatOriginalFastaDefline(defline string) string {
+	defline = strings.TrimSpace(defline)
+	if defline == "" {
+		return ""
+	}
+	if strings.HasPrefix(defline, ">") {
+		return defline
+	}
+	return ">" + defline
 }
 
 func (c *Client) cachedProteinReleaseSequences(ctx context.Context, release releaseInfo) (map[string]string, error) {
@@ -1852,6 +2098,69 @@ func (c *Client) cachedProteinReleaseSequences(ctx context.Context, release rele
 	return cloneStringMap(value.(map[string]string)), nil
 }
 
+func (c *Client) cachedNucleotideReleaseSequences(ctx context.Context, release releaseInfo, program string) (map[string]string, error) {
+	key := strings.TrimSpace(bestLocalNucleotideURL(release, program))
+	if key == "" {
+		return nil, fmt.Errorf("missing nucleotide FASTA URL for %s", release.ReleaseDir)
+	}
+	cacheKey := program + "|" + key
+	c.mu.RLock()
+	if cached, ok := c.nucleotideReleaseCache[cacheKey]; ok {
+		c.mu.RUnlock()
+		return cloneStringMap(cached), nil
+	}
+	c.mu.RUnlock()
+
+	if cached, ok := readCachedJSON[nucleotideReleaseSequencesDisk]("nucleotide-release-sequences", cacheKey); ok && len(cached.Sequences) > 0 {
+		copyMap := cloneStringMap(cached.Sequences)
+		c.mu.Lock()
+		if c.nucleotideReleaseCache == nil {
+			c.nucleotideReleaseCache = make(map[string]map[string]string)
+		}
+		c.nucleotideReleaseCache[cacheKey] = copyMap
+		c.mu.Unlock()
+		return cloneStringMap(copyMap), nil
+	}
+
+	value, err, _ := c.sf.Do("nucleotide-release-seq:"+cacheKey, func() (any, error) {
+		c.mu.RLock()
+		if cached, ok := c.nucleotideReleaseCache[cacheKey]; ok {
+			c.mu.RUnlock()
+			return cloneStringMap(cached), nil
+		}
+		c.mu.RUnlock()
+
+		if cached, ok := readCachedJSON[nucleotideReleaseSequencesDisk]("nucleotide-release-sequences", cacheKey); ok && len(cached.Sequences) > 0 {
+			copyMap := cloneStringMap(cached.Sequences)
+			c.mu.Lock()
+			if c.nucleotideReleaseCache == nil {
+				c.nucleotideReleaseCache = make(map[string]map[string]string)
+			}
+			c.nucleotideReleaseCache[cacheKey] = copyMap
+			c.mu.Unlock()
+			return cloneStringMap(copyMap), nil
+		}
+
+		sequences, err := c.loadNucleotideReleaseSequences(ctx, release, program)
+		if err != nil {
+			return nil, err
+		}
+		copyMap := cloneStringMap(sequences)
+		c.mu.Lock()
+		if c.nucleotideReleaseCache == nil {
+			c.nucleotideReleaseCache = make(map[string]map[string]string)
+		}
+		c.nucleotideReleaseCache[cacheKey] = copyMap
+		c.mu.Unlock()
+		writeCachedJSON("nucleotide-release-sequences", cacheKey, nucleotideReleaseSequencesDisk{Sequences: copyMap})
+		return cloneStringMap(copyMap), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return cloneStringMap(value.(map[string]string)), nil
+}
+
 func (c *Client) loadProteinReleaseSequences(ctx context.Context, release releaseInfo) (map[string]string, error) {
 	reader, closeFn, err := c.openMaybeGzip(ctx, release.ProteinURL)
 	if err != nil {
@@ -1901,6 +2210,64 @@ func (c *Client) loadProteinReleaseSequences(ctx context.Context, release releas
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan protein FASTA %s: %w", release.ProteinURL, err)
+	}
+	flush()
+	return sequences, nil
+}
+
+func (c *Client) loadNucleotideReleaseSequences(ctx context.Context, release releaseInfo, program string) (map[string]string, error) {
+	fastaURL := bestLocalNucleotideURL(release, program)
+	if strings.TrimSpace(fastaURL) == "" {
+		return nil, fmt.Errorf("missing nucleotide FASTA URL for %s", release.ReleaseDir)
+	}
+	reader, closeFn, err := c.openMaybeGzip(ctx, fastaURL)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
+	sequences := make(map[string]string)
+	var header string
+	var seq strings.Builder
+	flush := func() {
+		header = strings.TrimSpace(header)
+		sequence := strings.TrimSpace(seq.String())
+		if header == "" || sequence == "" {
+			return
+		}
+		token := header
+		if fields := strings.Fields(header); len(fields) > 0 {
+			token = fields[0]
+		}
+		for _, alias := range normalizedIdentifierCandidates(token) {
+			if alias != "" {
+				sequences[alias] = sequence
+			}
+		}
+		for _, value := range strings.FieldsFunc(header, func(r rune) bool {
+			return r == '|' || r == ';' || r == ',' || r == ' ' || r == '\t'
+		}) {
+			for _, alias := range normalizedIdentifierCandidates(value) {
+				if alias != "" {
+					sequences[alias] = sequence
+				}
+			}
+		}
+	}
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, ">") {
+			flush()
+			header = strings.TrimPrefix(line, ">")
+			seq.Reset()
+			continue
+		}
+		seq.WriteString(line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan nucleotide FASTA %s: %w", fastaURL, err)
 	}
 	flush()
 	return sequences, nil
@@ -2017,7 +2384,7 @@ func releaseScore(name string) int {
 	if strings.Contains(lower, "primary") {
 		score += 100
 	}
-	parts := regexp.MustCompile(`\d+`).FindAllString(lower, -1)
+	parts := releaseNumberPattern.FindAllString(lower, -1)
 	for _, part := range parts {
 		n, _ := strconv.Atoi(part)
 		score += n

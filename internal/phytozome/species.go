@@ -50,7 +50,7 @@ type Client struct {
 	mu                     sync.RWMutex
 	speciesCandidatesCache []model.SpeciesCandidate
 	geneRecordCache        map[string]geneRecord
-	proteinSequenceCache   map[string]string
+	proteinSequenceCache   map[string]model.ProteinSequenceData
 	keywordEngine          *phytozomekeyword.Engine
 	sf                     singleflight.Group
 }
@@ -62,7 +62,7 @@ func NewClient(httpClient *http.Client) *Client {
 	client := &Client{
 		baseHTTP:             httpClient,
 		geneRecordCache:      make(map[string]geneRecord),
-		proteinSequenceCache: make(map[string]string),
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
 	}
 	client.keywordEngine = phytozomekeyword.New(client)
 	return client

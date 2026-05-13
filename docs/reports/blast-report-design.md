@@ -1151,7 +1151,6 @@ Every `model.FamilyBlastSettings` field must be shown:
 | `MergeRowsByTarget` | whether rows from member queries are merged by target key |
 | `KeepBestHitPerTarget` | whether one best-ranked row is kept when a target appears multiple times |
 | `MinimumGroupSize` | minimum number of member queries needed for a family group |
-| `StripArabidopsisPrefix` | whether leading `At`/`AT` is removed only for family-name derivation |
 | `StripTrailingQueryIndex` | whether trailing numeric member indexes are stripped |
 | `StripAfterNumberSuffix` | whether suffixes after the first member number are stripped |
 | `UseUniProtReference` | whether UniProt evidence contributes to best-hit merge scoring |
@@ -1167,12 +1166,11 @@ Family-name derivation:
 
 1. take first whitespace-delimited field
 2. trim separators
-3. optionally strip `At`/`AT`
-4. optionally strip text after number suffix such as `GENE10-like -> GENE10`
-5. optionally strip trailing numeric member index such as `GENE10 -> GENE`
-6. trim trailing punctuation
-7. uppercase final family name
-8. keep group only if member count >= `MinimumGroupSize`
+3. optionally strip text after number suffix such as `GENE10-like -> GENE10`
+4. optionally strip trailing numeric member index such as `GENE10 -> GENE`
+5. trim trailing punctuation
+6. uppercase final family name
+7. keep group only if member count >= `MinimumGroupSize`
 
 Required diagrams/charts:
 
@@ -1589,7 +1587,6 @@ Required table columns:
 
 TXT header explanation:
 
-- If query source is Arabidopsis and label formatting prepends `At`, describe that header-label behavior.
 - If `LabelName` was missing and export filename became the TXT header label fallback, state this explicitly.
 - If family member query labels override the group TXT header label, show each member label and source.
 

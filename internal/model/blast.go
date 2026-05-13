@@ -48,6 +48,10 @@ type BlastResultRow struct {
 	SourceDatabase                      string
 	BlastProgram                        string
 	LabelName                           string
+	LabelNameType                       string
+	PhgoAliases                         string
+	BlastLabelName                      string
+	BlastGeneID                         string
 	FamilyName                          string
 	FamilyConsensusSupport              int
 	FamilyConsensusSize                 int
@@ -249,7 +253,6 @@ type FamilyBlastSettings struct {
 	PrependOnlyFirstQuery      bool
 	CustomizeGroups            bool
 	MinimumGroupSize           int
-	StripArabidopsisPrefix     bool
 	StripLeadingSpeciesPrefix  bool
 	StripTrailingQueryIndex    bool
 	StripAfterNumberSuffix     bool
@@ -270,7 +273,6 @@ func DefaultFamilyBlastSettings() FamilyBlastSettings {
 		PrependOnlyFirstQuery:      true,
 		CustomizeGroups:            false,
 		MinimumGroupSize:           2,
-		StripArabidopsisPrefix:     false,
 		StripLeadingSpeciesPrefix:  true,
 		StripTrailingQueryIndex:    true,
 		StripAfterNumberSuffix:     true,

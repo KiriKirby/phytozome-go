@@ -8,6 +8,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -200,6 +201,112 @@ func TestButtonRowPrimaryLabelUpdatesOnlyPrimaryButtons(t *testing.T) {
 	}
 }
 
+func TestNormalizeDetailPagesPrefersStructuredPages(t *testing.T) {
+	row := TableRow{
+		Detail: "legacy",
+		DetailPages: []DetailPage{
+			{Title: "其他信息", Items: []DetailItem{{Label: "name", Value: "PAL1"}}},
+			{Title: "FASTA", Items: []DetailItem{{
+				Label:       "FASTA",
+				Value:       "Sequence not loaded yet.",
+				ActionLabel: "autoload",
+			}}},
+		},
+	}
+	pages := normalizeDetailPages([]TableColumn{{ID: "name", Header: "name"}}, row, 3)
+	if len(pages) != 2 {
+		t.Fatalf("pages = %d, want 2", len(pages))
+	}
+	if pages[0].Items[0].Value != "PAL1" {
+		t.Fatalf("first detail item = %#v", pages[0].Items[0])
+	}
+	if pages[1].Items[0].Value != "Sequence not loaded yet." {
+		t.Fatalf("fasta item = %#v", pages[1].Items[0])
+	}
+	if pages[1].Items[0].ActionLabel != "autoload" {
+		t.Fatalf("fasta action label = %q, want autoload", pages[1].Items[0].ActionLabel)
+	}
+}
+
+func TestDetailOverlayAutoLoadsCurrentPage(t *testing.T) {
+	var calls int
+	overlay := newDetailOverlay(nil, "Row details", []DetailPage{
+		{Title: "Details", Items: []DetailItem{{Label: "name", Value: "PAL1"}}},
+		{Title: "FASTA", Items: []DetailItem{{
+			Label:    "FASTA",
+			Value:    "Sequence not loaded yet.",
+			AutoLoad: true,
+		}}},
+	}, func() error { return nil }, func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+		calls++
+		return DetailItem{Label: "FASTA", Value: ">PAL1\nMPEPTIDE"}, true, nil
+	}, func(int, int) {}, func() {})
+
+	overlay.SetPage(1)
+
+	if calls != 1 {
+		t.Fatalf("autoload calls = %d, want 1", calls)
+	}
+	if got := overlay.pages[1].Items[0].Value; got != ">PAL1\nMPEPTIDE" {
+		t.Fatalf("autoload value = %q", got)
+	}
+}
+
+func TestDetailListMouseWheelScrollsContentWithoutChangingSelection(t *testing.T) {
+	items := []DetailItem{
+		{Label: "item1", Value: strings.Repeat("A", 120)},
+		{Label: "item2", Value: strings.Repeat("B", 120)},
+	}
+	list := newDetailListPrimitive(items, 0, nil)
+	list.SetRect(0, 0, 24, 4)
+	before := list.CurrentIndex()
+	consumed, _ := list.MouseHandler()(tview.MouseScrollDown, tcell.NewEventMouse(2, 2, tcell.WheelDown, 0), nil)
+	if !consumed {
+		t.Fatal("mouse wheel should be consumed inside detail list")
+	}
+	if list.CurrentIndex() != before {
+		t.Fatalf("mouse wheel changed selection from %d to %d", before, list.CurrentIndex())
+	}
+	if list.offset <= 0 {
+		t.Fatalf("mouse wheel did not advance scroll offset: %d", list.offset)
+	}
+}
+
+func TestDetailListManualScrollDisablesAutoFollowUntilSelectionChanges(t *testing.T) {
+	items := []DetailItem{
+		{Label: "item1", Value: strings.Repeat("A", 120)},
+		{Label: "item2", Value: strings.Repeat("B", 120)},
+	}
+	list := newDetailListPrimitive(items, 0, nil)
+	list.SetRect(0, 0, 24, 4)
+	list.Scroll(3, 24, 4)
+	if list.follow {
+		t.Fatal("manual scroll should disable follow mode")
+	}
+	before := list.offset
+	sim := tcell.NewSimulationScreen("UTF-8")
+	if err := sim.Init(); err != nil {
+		t.Fatalf("init simulation screen: %v", err)
+	}
+	defer sim.Fini()
+	list.Draw(sim)
+	if list.offset != before {
+		t.Fatalf("draw should preserve manual scroll offset, got %d want %d", list.offset, before)
+	}
+	list.SetCurrent(1)
+	if !list.follow {
+		t.Fatal("selection change should restore follow mode")
+	}
+}
+
+func TestWrapDetailValueLinesPreservesLongSequenceChunks(t *testing.T) {
+	lines := wrapDetailValueLines("ABCDEFGHIJKL", 5)
+	want := []string{"ABCDE", "FGHIJ", "KL"}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("wrapped lines = %#v, want %#v", lines, want)
+	}
+}
+
 func TestRowSelectionPageCanExposeExtraActionButton(t *testing.T) {
 	page := RowSelectionPage{
 		Title:         "Keyword results",
@@ -344,6 +451,16 @@ func TestResolveInputFileTextKeepsOrdinaryText(t *testing.T) {
 	}
 }
 
+func TestResolveInputFileTextKeepsSingleLineProteinSequence(t *testing.T) {
+	text, err := resolveInputFileText("MDVSNTMLLVAVVAAYWLWFQRISRWLKGPRVWPVLGSLPGLIEQRDRMHDWITENLRACGGTYQTCICAVPFLAKQGLVTVTCDPKNIEHMLKTRFDNYPKGPTWQAVFHDFLGQ")
+	if err != nil {
+		t.Fatalf("single-line protein sequence should be accepted: %v", err)
+	}
+	if text != "MDVSNTMLLVAVVAAYWLWFQRISRWLKGPRVWPVLGSLPGLIEQRDRMHDWITENLRACGGTYQTCICAVPFLAKQGLVTVTCDPKNIEHMLKTRFDNYPKGPTWQAVFHDFLGQ" {
+		t.Fatalf("text = %q", text)
+	}
+}
+
 func TestResolveInputFileTextReadsFilePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queries.txt")
 	if err := os.WriteFile(path, []byte("ATPAL1\nATPAL2\n"), 0o600); err != nil {
@@ -463,6 +580,155 @@ func TestRecoveryModalPageConfigurationIncludesBackAndSkip(t *testing.T) {
 	}
 }
 
+func TestModalButtonsKeepDefaultCloseAlongsideBackAndOtherActions(t *testing.T) {
+	row := modalButtons([]buttonSpec{
+		{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
+		{Label: ButtonHelp, Shortcut: ShortcutHelp, Visible: true},
+	}, true, ButtonApply, ShortcutApply, func(NavAction) {}, func() {})
+
+	if len(row.buttons) != 4 {
+		t.Fatalf("modal button count = %d, want 4", len(row.buttons))
+	}
+	if row.buttons[0].Label != ButtonClose || row.buttons[0].Shortcut != ShortcutBack {
+		t.Fatalf("first modal button = %#v, want Close (Esc)", row.buttons[0])
+	}
+	if row.buttons[1].Label != ButtonBack {
+		t.Fatalf("second modal button = %#v, want Back", row.buttons[1])
+	}
+	if row.buttons[2].Label != ButtonHelp {
+		t.Fatalf("third modal button = %#v, want Help", row.buttons[2])
+	}
+	if row.buttons[3].Label != ButtonApply {
+		t.Fatalf("confirm modal button = %#v, want Apply", row.buttons[3])
+	}
+}
+
+func TestModalButtonsDoNotDuplicateCloseWhenExplicitCloseActionExists(t *testing.T) {
+	row := modalButtons([]buttonSpec{
+		{Label: ButtonClose, Shortcut: ShortcutBack, Visible: true},
+	}, true, ButtonOK, ShortcutConfirm, func(NavAction) {}, func() {})
+
+	closeCount := 0
+	for _, button := range row.buttons {
+		if button.Label == ButtonClose {
+			closeCount++
+		}
+	}
+	if closeCount != 1 {
+		t.Fatalf("close button count = %d, want 1", closeCount)
+	}
+}
+
+func TestCloseOnlyModalButtonsUseCloseInsteadOfBack(t *testing.T) {
+	row := closeOnlyModalButtons([]buttonSpec{
+		{Label: ButtonHelp, Shortcut: ShortcutHelp, Visible: true},
+	}, true, ButtonApply, ShortcutApply, func() {}, func() {})
+
+	if len(row.buttons) != 3 {
+		t.Fatalf("close-only modal button count = %d, want 3", len(row.buttons))
+	}
+	if row.buttons[0].Label != ButtonClose || row.buttons[0].Shortcut != ShortcutBack {
+		t.Fatalf("first close-only modal button = %#v, want Close (Esc)", row.buttons[0])
+	}
+	for _, button := range row.buttons {
+		if button.Label == ButtonBack {
+			t.Fatalf("close-only modal should not contain Back button: %#v", row.buttons)
+		}
+	}
+}
+
+func TestDetailOverlayAddsExplicitCloseButton(t *testing.T) {
+	overlay := newDetailOverlay(nil, "Row details", []DetailPage{
+		{Title: "Details", Items: []DetailItem{{Label: "name", Value: "PAL1"}}},
+	}, func() error { return nil }, nil, func(int, int) {}, func() {})
+
+	if len(overlay.buttons.buttons) != 3 {
+		t.Fatalf("detail overlay button count = %d, want 3", len(overlay.buttons.buttons))
+	}
+	if overlay.buttons.buttons[1].Label != ButtonClose || overlay.buttons.buttons[1].Shortcut != ShortcutBack {
+		t.Fatalf("detail overlay close button = %#v, want Close (Esc)", overlay.buttons.buttons[1])
+	}
+	if overlay.buttons.buttons[2].Label != ButtonRunBLAST || overlay.buttons.buttons[2].Shortcut != ShortcutBlast {
+		t.Fatalf("detail overlay third button = %#v, want Run BLAST (Ctrl+B)", overlay.buttons.buttons[2])
+	}
+	if overlay.buttons.buttons[2].Visible {
+		t.Fatalf("detail overlay blast button should be hidden outside FASTA tabs: %#v", overlay.buttons.buttons[2])
+	}
+}
+
+func TestDetailOverlayShowsBlastButtonOnlyOnFASTATab(t *testing.T) {
+	overlay := newDetailOverlay(nil, "Row details", []DetailPage{
+		{Title: "Details", Items: []DetailItem{{Label: "name", Value: "PAL1"}}},
+		{Title: "FASTA", Items: []DetailItem{{Label: "FASTA", Value: ">PAL1\nMPEPTIDE"}}},
+	}, func() error { return nil }, nil, func(int, int) {}, func() {})
+	overlay.SetPage(0)
+	if overlay.buttons.buttons[2].Visible {
+		t.Fatal("blast button should be hidden on non-FASTA page")
+	}
+	overlay.SetPage(1)
+	if !overlay.buttons.buttons[2].Visible {
+		t.Fatal("blast button should be visible on FASTA page")
+	}
+}
+
+func TestLocalizedHelpModalAddsExplicitCloseButton(t *testing.T) {
+	modal := newLocalizedHelpModal(nil, []localizedHelpPage{{
+		Label:    "English",
+		Shortcut: "1",
+		Title:    "Help",
+		Text:     "Test",
+	}}, func() {})
+
+	buttons := modal.helpButtons.buttons
+	if len(buttons) < 3 {
+		t.Fatalf("help modal button count = %d, want at least 3", len(buttons))
+	}
+	if buttons[len(buttons)-2].Label != ButtonClose || buttons[len(buttons)-2].Shortcut != ShortcutBack {
+		t.Fatalf("help modal close button = %#v, want Close (Esc)", buttons[len(buttons)-2])
+	}
+	if buttons[len(buttons)-1].Label != ButtonOK || buttons[len(buttons)-1].Shortcut != ShortcutConfirm {
+		t.Fatalf("help modal confirm button = %#v, want OK (Enter)", buttons[len(buttons)-1])
+	}
+}
+
+func TestShortcutMatchesEventSupportsCtrlShiftCopyVariants(t *testing.T) {
+	tests := []*tcell.EventKey{
+		tcell.NewEventKey(tcell.KeyCtrlY, 0, 0),
+		tcell.NewEventKey(tcell.KeyCtrlC, 0, 0),
+		tcell.NewEventKey(tcell.KeyRune, 'C', tcell.ModCtrl|tcell.ModShift),
+		tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModCtrl|tcell.ModShift),
+	}
+	for index, event := range tests {
+		if event.Key() == tcell.KeyCtrlY && !shortcutMatchesEvent(ShortcutCopy, event) {
+			t.Fatalf("displayed copy shortcut variant %d was not recognized: %#v", index, event)
+		}
+		if !isCopyShortcut(event) {
+			t.Fatalf("isCopyShortcut variant %d was not recognized: %#v", index, event)
+		}
+	}
+}
+
+func TestTaskPageAllowCancelWhenCancelErrorProvided(t *testing.T) {
+	page := TaskPage{CancelError: ErrTaskCancelled}
+	if !taskPageAllowCancel(page) {
+		t.Fatal("task page with CancelError should expose cancel controls")
+	}
+}
+
+func TestTaskPageAllowCancelWhenFlagProvided(t *testing.T) {
+	page := TaskPage{AllowCancel: true}
+	if !taskPageAllowCancel(page) {
+		t.Fatal("task page with AllowCancel should expose cancel controls")
+	}
+}
+
+func TestTaskPageNoCancelWithoutFlagOrError(t *testing.T) {
+	page := TaskPage{}
+	if taskPageAllowCancel(page) {
+		t.Fatal("task page without cancel flag or cancel error should not expose cancel controls")
+	}
+}
+
 func TestBlastHeaderSplitsIntoTwoRowsWithSlash(t *testing.T) {
 	top, bottom := tableHeaderLines("align_len /\nquery_length (%)")
 	if top != "align_len /" {
@@ -566,7 +832,7 @@ func TestRowSelectionTableKeepsTrailingAreaDrawable(t *testing.T) {
 		SetSeparator(tview.Borders.Vertical).
 		SetSelectable(true, true).
 		SetFixed(2, 2).
-		SetEvaluateAllRows(true)}
+		SetEvaluateAllRows(false)}
 	table.SetCell(0, 0, paddedTableCell("[x]"))
 	table.SetCell(0, 1, paddedTableCell("row"))
 	table.SetCell(0, 2, paddedTableCell("short"))
@@ -603,7 +869,7 @@ func TestRowSelectionTableDoesNotBlankWideViewport(t *testing.T) {
 		SetSeparator(tview.Borders.Vertical).
 		SetSelectable(true, true).
 		SetFixed(2, 2).
-		SetEvaluateAllRows(true)}
+		SetEvaluateAllRows(false)}
 	table.SetCell(0, 0, paddedTableCell("[x]"))
 	table.SetCell(0, 1, paddedTableCell("row"))
 	table.SetCell(0, 2, paddedTableCell("very_very_very_very_wide_header"))
@@ -629,6 +895,37 @@ func TestRowSelectionTableDoesNotBlankWideViewport(t *testing.T) {
 	line := screenLine(screen, 0, 80)
 	if !containsText(line, "fit") {
 		t.Fatalf("trailing complete data column should remain visible on wide screens: %q", line)
+	}
+}
+
+func BenchmarkRowSelectionColumnWidthsLargeTable(b *testing.B) {
+	columns := make([]TableColumn, 12)
+	for i := range columns {
+		columns[i] = TableColumn{
+			ID:       fmt.Sprintf("col_%02d", i),
+			Header:   fmt.Sprintf("column_%02d", i),
+			Sortable: true,
+		}
+	}
+	rows := make([]TableRow, 4000)
+	for i := range rows {
+		cells := make([]string, len(columns))
+		for c := range columns {
+			cells[c] = fmt.Sprintf("row_%04d_col_%02d_value_%d", i, c, (i+c)%97)
+		}
+		rows[i] = TableRow{
+			Cells: cells,
+			Group: fmt.Sprintf("group_%02d", i%24),
+		}
+	}
+	layout := newRowSelectionLayout(columns)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		widths := rowSelectionColumnWidths(columns, rows, layout, true)
+		if len(widths) != len(columns)+rowSelectionFirstDataColumn {
+			b.Fatalf("unexpected width count: got %d want %d", len(widths), len(columns)+rowSelectionFirstDataColumn)
+		}
 	}
 }
 

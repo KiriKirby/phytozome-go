@@ -20,10 +20,19 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
+
+	"github.com/KiriKirby/phytozome-go/internal/progressctx"
 )
 
 const latestURL = "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/"
+
+var (
+	toolsOnPathMu    sync.RWMutex
+	toolsOnPathCache = make(map[string]struct{})
+)
 
 type MissingToolsError struct {
 	Tools []string
@@ -58,6 +67,15 @@ func ToolsDir() (string, error) {
 }
 
 func EnsureToolsOnPath(required ...string) error {
+	cacheKey := toolsOnPathCacheKey(required)
+	if cacheKey != "" {
+		toolsOnPathMu.RLock()
+		_, ok := toolsOnPathCache[cacheKey]
+		toolsOnPathMu.RUnlock()
+		if ok {
+			return nil
+		}
+	}
 	missing := make([]string, 0, len(required))
 	for _, tool := range required {
 		if tool == "" {
@@ -68,6 +86,7 @@ func EnsureToolsOnPath(required ...string) error {
 		}
 	}
 	if len(missing) == 0 {
+		storeToolsOnPathCache(cacheKey)
 		return nil
 	}
 
@@ -95,7 +114,38 @@ func EnsureToolsOnPath(required ...string) error {
 	if len(stillMissing) > 0 {
 		return &MissingToolsError{Tools: stillMissing}
 	}
+	storeToolsOnPathCache(cacheKey)
 	return nil
+}
+
+func storeToolsOnPathCache(key string) {
+	if strings.TrimSpace(key) == "" {
+		return
+	}
+	toolsOnPathMu.Lock()
+	toolsOnPathCache[key] = struct{}{}
+	toolsOnPathMu.Unlock()
+}
+
+func toolsOnPathCacheKey(required []string) string {
+	tools := make([]string, 0, len(required))
+	seen := make(map[string]struct{}, len(required))
+	for _, tool := range required {
+		tool = strings.ToLower(strings.TrimSpace(tool))
+		if tool == "" {
+			continue
+		}
+		if _, ok := seen[tool]; ok {
+			continue
+		}
+		seen[tool] = struct{}{}
+		tools = append(tools, tool)
+	}
+	if len(tools) == 0 {
+		return ""
+	}
+	sort.Strings(tools)
+	return os.Getenv("PATH") + "\x00" + strings.Join(tools, "\x00")
 }
 
 func InstallManaged(ctx context.Context, httpClient *http.Client) (string, error) {
@@ -114,20 +164,16 @@ func InstallManaged(ctx context.Context, httpClient *http.Client) (string, error
 		prependPath(binDir)
 		return binDir, nil
 	}
-
-	body, err := fetchText(ctx, httpClient, latestURL)
-	if err != nil {
-		return "", err
-	}
-	if !strings.Contains(body, archiveName) {
-		return "", fmt.Errorf("official BLAST+ archive %s was not found in %s", archiveName, latestURL)
-	}
 	downloadURL := latestURL + archiveName
+	archivePath := filepath.Join(toolsDir, archiveName)
 	targetDir := filepath.Join(toolsDir, strings.TrimSuffix(archiveName, ".tar.gz"))
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return "", fmt.Errorf("create managed BLAST+ dir: %w", err)
 	}
-	if err := downloadAndExtractTarGz(ctx, httpClient, downloadURL, targetDir); err != nil {
+	if err := downloadArchive(ctx, httpClient, downloadURL, archivePath); err != nil {
+		return "", err
+	}
+	if err := extractTarGz(ctx, archivePath, targetDir); err != nil {
 		return "", err
 	}
 	binDir, found, err := findManagedBinDir(toolsDir)
@@ -162,27 +208,14 @@ func archiveNameForPlatform() (string, error) {
 	return "", fmt.Errorf("automatic BLAST+ install is not supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 }
 
-func fetchText(ctx context.Context, httpClient *http.Client, url string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", fmt.Errorf("create BLAST+ request: %w", err)
+func downloadArchive(ctx context.Context, httpClient *http.Client, url string, archivePath string) error {
+	if _, err := os.Stat(archivePath); err == nil {
+		progressctx.Report(ctx, 40, fmt.Sprintf("Using cached BLAST+ archive: %s", filepath.Base(archivePath)))
+		return nil
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", url, err)
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		return fmt.Errorf("create BLAST+ archive dir: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("fetch %s: unexpected status %s", url, resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", url, err)
-	}
-	return string(body), nil
-}
-
-func downloadAndExtractTarGz(ctx context.Context, httpClient *http.Client, url string, targetDir string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("create BLAST+ download request: %w", err)
@@ -195,14 +228,59 @@ func downloadAndExtractTarGz(ctx context.Context, httpClient *http.Client, url s
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: unexpected status %s", url, resp.Status)
 	}
-	gz, err := gzip.NewReader(resp.Body)
+	tmpPath := archivePath + ".part"
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("create BLAST+ archive file: %w", err)
+	}
+	total := resp.ContentLength
+	progressctx.Report(ctx, 1, "Starting BLAST+ download...")
+	counter := &progressWriter{
+		ctx:     ctx,
+		total:   total,
+		base:    1,
+		span:    39,
+		prefix:  "Downloading BLAST+",
+		sink:    out,
+		lastPct: -1,
+	}
+	if _, err := io.CopyBuffer(counter, resp.Body, make([]byte, 1024*1024)); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write BLAST+ archive: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close BLAST+ archive: %w", err)
+	}
+	if err := os.Rename(tmpPath, archivePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("finalize BLAST+ archive: %w", err)
+	}
+	progressctx.Report(ctx, 40, fmt.Sprintf("Downloaded BLAST+ archive: %s", filepath.Base(archivePath)))
+	return nil
+}
+
+func extractTarGz(ctx context.Context, archivePath string, targetDir string) error {
+	progressctx.Report(ctx, 41, "Opening BLAST+ archive...")
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("open BLAST+ archive: %w", err)
+	}
+	defer file.Close()
+
+	gz, err := gzip.NewReader(file)
 	if err != nil {
 		return fmt.Errorf("open BLAST+ archive: %w", err)
 	}
 	defer gz.Close()
 
 	tr := tar.NewReader(gz)
+	entryCount := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		header, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -242,8 +320,67 @@ func downloadAndExtractTarGz(ctx context.Context, httpClient *http.Client, url s
 				return fmt.Errorf("close BLAST+ file %s: %w", path, err)
 			}
 		}
+		entryCount++
+		progressctx.Report(ctx, minInt(99, 41+entryCount), fmt.Sprintf("Extracting BLAST+ archive... %d files", entryCount))
 	}
+	progressctx.Report(ctx, 100, "BLAST+ extraction completed.")
 	return nil
+}
+
+type progressWriter struct {
+	ctx     context.Context
+	total   int64
+	written int64
+	base    int
+	span    int
+	prefix  string
+	sink    io.Writer
+	lastPct int
+}
+
+func (w *progressWriter) Write(p []byte) (int, error) {
+	if err := w.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := w.sink.Write(p)
+	if n > 0 {
+		w.written += int64(n)
+		w.report()
+	}
+	return n, err
+}
+
+func (w *progressWriter) report() {
+	if w.total > 0 {
+		pct := int((w.written * 100) / w.total)
+		if pct == w.lastPct {
+			return
+		}
+		w.lastPct = pct
+		progressctx.Report(w.ctx, w.base+(w.span*pct)/100, fmt.Sprintf("%s... %d%% (%s/%s)", w.prefix, pct, humanBytes(w.written), humanBytes(w.total)))
+		return
+	}
+	progressctx.Report(w.ctx, w.base, fmt.Sprintf("%s... %s", w.prefix, humanBytes(w.written)))
+}
+
+func humanBytes(v int64) string {
+	const unit = 1024
+	if v < unit {
+		return fmt.Sprintf("%d B", v)
+	}
+	div, exp := int64(unit), 0
+	for n := v / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(v)/float64(div), "KMGTPE"[exp])
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func findManagedBinDir(root string) (string, bool, error) {

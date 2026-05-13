@@ -130,7 +130,7 @@ func TestKeywordExportPerformanceMatrixLive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
 			}
-			applyKeywordIdentifications(groups, labels)
+			applyKeywordLabelIdentifications(groups, labels)
 			labelDuration := time.Since(labelStarted)
 
 			var selectedRows []model.KeywordResultRow
@@ -216,13 +216,13 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 	}
 
 	type combo struct {
-		name        string
-		source      string
-		species     model.SpeciesCandidate
-		items       []blastQueryItem
-		request     model.BlastRequest
-		references  externalReferenceConfig
-		settings    exportSettings
+		name       string
+		source     string
+		species    model.SpeciesCandidate
+		items      []blastQueryItem
+		request    model.BlastRequest
+		references externalReferenceConfig
+		settings   exportSettings
 	}
 
 	combos := []combo{
@@ -251,17 +251,89 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 			settings: exportSettings{WriteExcel: true, WriteText: true, WriteRawExcel: true, WriteReport: true},
 		},
 		{
-			name:    "blast-phy-excel-only",
-			source:  "phytozome",
-			species: phySpecies,
-			request: replayBlastPRequest(phySpecies, "BLASTP"),
+			name:    "blast-lem-blastn-refs-excel-text-raw-report",
+			source:  "lemna",
+			species: lemSpecies,
+			request: model.BlastRequest{
+				Species:          lemSpecies,
+				SequenceKind:     model.SequenceDNA,
+				TargetType:       "genome",
+				Program:          "local:BLASTN",
+				EValue:           "1e-10",
+				ComparisonMatrix: "BLOSUM62",
+				WordLength:       "default",
+				AlignmentsToShow: 20,
+				AllowGaps:        true,
+				FilterQuery:      true,
+			},
+			references: externalReferenceConfig{
+				AutoLabelBlastHits: true,
+				UseUniProt:         true,
+				UseInterPro:        true,
+				InterProSettings:   model.DefaultInterProConservedRegionSettings(),
+			},
+			settings: exportSettings{WriteExcel: true, WriteText: true, WriteRawExcel: true, WriteReport: true},
+		},
+		{
+			name:    "blast-lem-blastx-refs-excel-text-raw-report",
+			source:  "lemna",
+			species: lemSpecies,
+			request: model.BlastRequest{
+				Species:          lemSpecies,
+				SequenceKind:     model.SequenceDNA,
+				TargetType:       "proteome",
+				Program:          "local:BLASTX",
+				EValue:           "1e-10",
+				ComparisonMatrix: "BLOSUM62",
+				WordLength:       "default",
+				AlignmentsToShow: 20,
+				AllowGaps:        true,
+				FilterQuery:      true,
+			},
+			references: externalReferenceConfig{
+				AutoLabelBlastHits: true,
+				UseUniProt:         true,
+				UseInterPro:        true,
+				InterProSettings:   model.DefaultInterProConservedRegionSettings(),
+			},
+			settings: exportSettings{WriteExcel: true, WriteText: true, WriteRawExcel: true, WriteReport: true},
+		},
+		{
+			name:    "blast-lem-tblastn-refs-excel-text-raw-report",
+			source:  "lemna",
+			species: lemSpecies,
+			request: model.BlastRequest{
+				Species:          lemSpecies,
+				SequenceKind:     model.SequenceProtein,
+				TargetType:       "genome",
+				Program:          "local:TBLASTN",
+				EValue:           "1e-10",
+				ComparisonMatrix: "BLOSUM62",
+				WordLength:       "default",
+				AlignmentsToShow: 20,
+				AllowGaps:        true,
+				FilterQuery:      true,
+			},
+			references: externalReferenceConfig{
+				AutoLabelBlastHits: true,
+				UseUniProt:         true,
+				UseInterPro:        true,
+				InterProSettings:   model.DefaultInterProConservedRegionSettings(),
+			},
+			settings: exportSettings{WriteExcel: true, WriteText: true, WriteRawExcel: true, WriteReport: true},
+		},
+		{
+			name:     "blast-phy-excel-only",
+			source:   "phytozome",
+			species:  phySpecies,
+			request:  replayBlastPRequest(phySpecies, "BLASTP"),
 			settings: exportSettings{WriteExcel: true},
 		},
 		{
-			name:    "blast-lem-excel-text",
-			source:  "lemna",
-			species: lemSpecies,
-			request: replayBlastPRequest(lemSpecies, "local:BLASTP"),
+			name:     "blast-lem-excel-text",
+			source:   "lemna",
+			species:  lemSpecies,
+			request:  replayBlastPRequest(lemSpecies, "local:BLASTP"),
 			settings: exportSettings{WriteExcel: true, WriteText: true},
 		},
 	}
@@ -282,6 +354,9 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 	for _, tc := range combos {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			if strings.EqualFold(tc.source, "lemna") && !replayEnsureBlastPlusPathOnPATH() {
+				t.Skip("BLAST+ blastp/makeblastdb not available; skipping local lemna BLAST export performance combo")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 			defer cancel()
 
@@ -309,7 +384,7 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("autoIdentifyKeywordLabelsWithProgress: %v", err)
 			}
-			applyKeywordIdentifications(groups, labels)
+			applyKeywordLabelIdentifications(groups, labels)
 			selectedKeywordRows := make([]model.KeywordResultRow, 0, len(groups))
 			for _, group := range groups {
 				if len(group.Rows) == 0 {
@@ -324,7 +399,7 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 			if err != nil {
 				t.Fatalf("resolveKeywordRowsToBlastItems: %v", err)
 			}
-			items, err = w.prepareKeywordBlastItems(ctx, tc.species, items)
+			items, err = prepareKeywordBlastPerfItems(ctx, w, tc.species, items)
 			if err != nil {
 				t.Fatalf("prepareKeywordBlastItems: %v", err)
 			}
@@ -340,7 +415,7 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 			}
 			blastDuration := time.Since(blastStarted)
 
-			filterSettings := model.DefaultBlastFilterSettings()
+			filterSettings := replayExportFilterSettings(tc.request)
 			rowsByRun, rowNumbersByRun, filterFlagsByRun, selectedByRun := replayDefaultFilteredRows(runs, filterSettings)
 			selectedRows := replayCountSelectedRows(rowsByRun)
 			if selectedRows == 0 {
@@ -406,6 +481,23 @@ func TestBlastExportPerformanceMatrixLive(t *testing.T) {
 			logExportDirArtifacts(t, outputDir)
 		})
 	}
+}
+
+func replayExportFilterSettings(request model.BlastRequest) model.BlastFilterSettings {
+	settings := model.DefaultBlastFilterSettings()
+	switch normalizeWorkflowBlastProgram(request.Program) {
+	case "blastn", "tblastn":
+		// Genome/nucleotide-target programs do not produce a protein-vs-canonical-length
+		// comparison surface that is biologically equivalent to blastp/blastx hits.
+		settings.UseTargetCanonicalLengthRatio = false
+		settings.RequireTargetCanonicalLengthRatio = false
+		// InterPro conserved-region hard rejection is tuned for protein-target workflows.
+		settings.InterProDomainMode = "off"
+		settings.RequireInterProConservedRegion = false
+		settings.RejectInterProMissing = false
+		settings.RejectInterProUncertain = false
+	}
+	return settings
 }
 
 func TestExportPerformanceSweepLog(t *testing.T) {

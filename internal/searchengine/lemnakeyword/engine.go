@@ -49,6 +49,7 @@ var (
 	lemnaGenePattern       = regexp.MustCompile(`(?i)^[A-Z]{2}\d{4}D\d{3}G\d{6}$`)
 	labelSymbolPattern     = regexp.MustCompile(`\b[A-Z][A-Z0-9-]{1,14}\b`)
 	riceLocusPattern       = regexp.MustCompile(`(?i)^(?:LOC_)?(?:OS)?\d{2}G\d{5}(?:\.\d+)?$`)
+	riceLocusPartsPattern  = regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`)
 	refSeqProteinPattern   = regexp.MustCompile(`(?i)^(?:XP_?)\d+(?:\.\d+)?$`)
 	cytochromeP450Pattern  = regexp.MustCompile(`(?i)^CYP\d+[A-Z]\d+$`)
 )
@@ -350,50 +351,59 @@ func (wideSearchProgram) Match(term string) bool {
 }
 
 func (wideSearchProgram) Search(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-	controlledStructuredTerm := riceLocusPattern.MatchString(normalizeRiceLocusCandidate(term)) ||
-		refSeqProteinPattern.MatchString(strings.TrimSpace(term)) ||
-		cytochromeP450Pattern.MatchString(strings.TrimSpace(term)) ||
-		(labelSymbolPattern.MatchString(strings.TrimSpace(term)) && !strings.ContainsAny(strings.TrimSpace(term), " \t"))
+	term = strings.TrimSpace(term)
+	riceLocus := riceLocusPattern.MatchString(normalizeRiceLocusCandidate(term))
+	refSeqProtein := refSeqProteinPattern.MatchString(term)
+	cytochromeP450 := cytochromeP450Pattern.MatchString(term)
+	labelSymbol := labelSymbolPattern.MatchString(term) && !strings.ContainsAny(term, " \t")
+	lemnaTranscript := lemnaTranscriptPattern.MatchString(term)
+	lemnaGene := lemnaGenePattern.MatchString(term)
+	specificIdentifier := looksLikeSpecificIdentifier(term)
+	reportURL := false
+	if _, _, ok := LemnaGeneReportKeyword(term); ok {
+		reportURL = true
+	}
+	controlledStructuredTerm := riceLocus || refSeqProtein || cytochromeP450 || labelSymbol
 
 	steps := []func(context.Context, *Engine, model.SpeciesCandidate, string) ([]model.KeywordResultRow, error){
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if _, _, ok := LemnaGeneReportKeyword(term); !ok {
+			if !reportURL {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByReportURL(ctx, species, term, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !lemnaTranscriptPattern.MatchString(strings.TrimSpace(term)) {
+			if !lemnaTranscript {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByIdentifier(ctx, species, term, identifierKindTranscript, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !lemnaGenePattern.MatchString(strings.TrimSpace(term)) {
+			if !lemnaGene {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByIdentifier(ctx, species, term, identifierKindGene, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !riceLocusPattern.MatchString(normalizeRiceLocusCandidate(term)) {
+			if !riceLocus {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByLabel(ctx, species, term, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !refSeqProteinPattern.MatchString(strings.TrimSpace(term)) {
+			if !refSeqProtein {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByLabel(ctx, species, term, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !(labelSymbolPattern.MatchString(strings.TrimSpace(term)) && !strings.ContainsAny(strings.TrimSpace(term), " \t")) {
+			if !labelSymbol {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByLabel(ctx, species, term, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !cytochromeP450Pattern.MatchString(strings.TrimSpace(term)) {
+			if !cytochromeP450 {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByLabel(ctx, species, term, 20)
@@ -405,7 +415,7 @@ func (wideSearchProgram) Search(ctx context.Context, engine *Engine, species mod
 			return engine.finder.SearchKeywordRowsByLabel(ctx, species, term, 20)
 		},
 		func(ctx context.Context, engine *Engine, species model.SpeciesCandidate, term string) ([]model.KeywordResultRow, error) {
-			if !looksLikeSpecificIdentifier(term) {
+			if !specificIdentifier {
 				return nil, nil
 			}
 			return engine.finder.SearchKeywordRowsByIdentifier(ctx, species, term, identifierKindAny, 20)
@@ -559,7 +569,7 @@ func normalizeRiceLocusCandidate(term string) string {
 	if strings.HasPrefix(upper, "OS") && len(upper) >= 8 {
 		upper = upper[2:]
 	}
-	parts := regexp.MustCompile(`(?i)^(\d{2})G(\d{5})(\.\d+)?$`).FindStringSubmatch(upper)
+	parts := riceLocusPartsPattern.FindStringSubmatch(upper)
 	if len(parts) == 0 {
 		return ""
 	}

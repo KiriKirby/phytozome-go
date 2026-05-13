@@ -496,7 +496,6 @@ func TestReplayMonolignolVariants_LemnaLocalBlastP(t *testing.T) {
 		InterProSettings: model.DefaultInterProConservedRegionSettings(),
 	}
 	baseFamily := model.DefaultFamilyBlastSettings()
-	baseFamily.StripArabidopsisPrefix = true
 	baseFilter := model.DefaultBlastFilterSettings()
 
 	cases := []struct {
@@ -1003,7 +1002,6 @@ func replayRunFamily(run blastQueryRun, settings model.FamilyBlastSettings) stri
 
 func replayFamilyFromStrings(settings model.FamilyBlastSettings, values ...string) string {
 	replaySettings := settings
-	replaySettings.StripArabidopsisPrefix = true
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
@@ -1051,15 +1049,16 @@ func TestLiveKeywordRice4CLWorkflowAutoLabels(t *testing.T) {
 
 	phyCases := []struct {
 		name      string
+		nameType  string
 		keywords  []string
 		forceWide bool
 		minRows   int
 	}{
-		{"phy-aliases", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, 5},
-		{"phy-locuses", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, 5},
-		{"phy-xp", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, 5},
-		{"phy-mixed", []string{"Os4CL1", "Os02g46970.1", "XP_015625716.1", "Os4CL4", "XP_015650830.1"}, false, 5},
-		{"phy-wide", []string{"4CL"}, true, 1},
+		{"phy-aliases", "alias", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, 5},
+		{"phy-locuses", "locus", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, 5},
+		{"phy-xp", "accession", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, 5},
+		{"phy-mixed", "mixed", []string{"Os4CL1", "Os02g46970.1", "XP_015625716.1", "Os4CL4", "XP_015650830.1"}, false, 5},
+		{"phy-wide", "keyword", []string{"4CL"}, true, 1},
 	}
 	for _, tc := range phyCases {
 		tc := tc
@@ -1077,33 +1076,37 @@ func TestLiveKeywordRice4CLWorkflowAutoLabels(t *testing.T) {
 			if len(labels) != len(tc.keywords) {
 				t.Fatalf("labels=%d, want %d", len(labels), len(tc.keywords))
 			}
+			labelNames := keywordIdentificationLabels(labels)
 			totalRows := 0
 			for i, group := range groups {
 				totalRows += len(group.Rows)
 				if len(group.Rows) == 0 {
 					t.Fatalf("group %d keyword=%q returned no rows", i, group.SearchTerm)
 				}
-				if strings.TrimSpace(labels[i]) == "" {
+				if strings.TrimSpace(labelNames[i]) == "" {
 					t.Fatalf("group %d keyword=%q auto label is empty", i, group.SearchTerm)
 				}
 			}
 			if totalRows < tc.minRows {
 				t.Fatalf("total rows=%d, want >= %d", totalRows, tc.minRows)
 			}
+			t.Logf("live keyword matrix source=phytozome name_type=%s queries=%d total_rows=%d labels=%v", tc.nameType, len(tc.keywords), totalRows, labelNames)
 		})
 	}
 
 	lemCases := []struct {
 		name           string
+		nameType       string
 		keywords       []string
 		forceWide      bool
 		expectNonEmpty bool
+		allowEmpty     map[string]bool
 	}{
-		{"lem-aliases", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, true},
-		{"lem-mixed-aliases", []string{"Os4CL1", "os4cl2", "Os4CL3", "os4cl4", "Os4CL5"}, false, true},
-		{"lem-wide-4cl", []string{"4CL"}, true, true},
-		{"lem-locus-controlled-zero", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, false},
-		{"lem-xp", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, true},
+		{"lem-aliases", "alias", []string{"Os4CL1", "Os4CL2", "Os4CL3", "Os4CL4", "Os4CL5"}, false, true, nil},
+		{"lem-locus-controlled-zero", "locus", []string{"Os08g14760.1", "Os02g46970.1", "Os02g08100.1", "Os06g44620.1", "Os08g34790.1"}, false, false, nil},
+		{"lem-xp", "accession", []string{"XP_015650724.1", "XP_015624111.1", "XP_015625716.1", "XP_015643415.1", "XP_015650830.1"}, false, true, nil},
+		{"lem-mixed", "mixed", []string{"Os4CL1", "Os02g46970.1", "XP_015625716.1", "Os4CL4", "XP_015650830.1"}, false, true, map[string]bool{"Os02g46970.1": true}},
+		{"lem-wide-4cl", "keyword", []string{"4CL"}, true, true, nil},
 	}
 	for _, tc := range lemCases {
 		tc := tc
@@ -1121,18 +1124,25 @@ func TestLiveKeywordRice4CLWorkflowAutoLabels(t *testing.T) {
 			if len(labels) != len(tc.keywords) {
 				t.Fatalf("labels=%d, want %d", len(labels), len(tc.keywords))
 			}
+			labelNames := keywordIdentificationLabels(labels)
+			totalRows := 0
 			for i, group := range groups {
+				totalRows += len(group.Rows)
 				if tc.expectNonEmpty {
+					if tc.allowEmpty != nil && tc.allowEmpty[group.SearchTerm] && len(group.Rows) == 0 {
+						continue
+					}
 					if len(group.Rows) == 0 {
 						t.Fatalf("group %d keyword=%q returned no rows", i, group.SearchTerm)
 					}
-					if strings.TrimSpace(labels[i]) == "" {
+					if strings.TrimSpace(labelNames[i]) == "" {
 						t.Fatalf("group %d keyword=%q auto label is empty", i, group.SearchTerm)
 					}
 				} else if len(group.Rows) != 0 {
 					t.Fatalf("group %d keyword=%q rows=%d, want controlled zero results to avoid false-positive remaps", i, group.SearchTerm, len(group.Rows))
 				}
 			}
+			t.Logf("live keyword matrix source=lemna name_type=%s queries=%d total_rows=%d labels=%v", tc.nameType, len(tc.keywords), totalRows, labelNames)
 		})
 	}
 }

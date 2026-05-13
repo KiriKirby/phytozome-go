@@ -8,40 +8,18 @@
 package lemna
 
 import (
-	"net"
 	"net/http"
 	"runtime"
-	"time"
+
+	"github.com/KiriKirby/phytozome-go/internal/netconfig"
 )
 
 func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          512,
-			MaxIdleConnsPerHost:   128,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: time.Second,
-		},
-	}
+	return netconfig.DefaultHTTPClient()
 }
 
 func networkWorkerCount(total int) int {
-	if total <= 0 {
-		return 0
-	}
-	workers := currentCPUCount() * 16
-	if workers < 96 {
-		workers = 96
-	}
-	if total < workers {
-		return total
-	}
-	return workers
+	return netconfig.NetworkWorkerCount(total)
 }
 
 func defaultLocalBlastThreads() int {
@@ -56,12 +34,5 @@ func defaultLocalBlastThreads() int {
 }
 
 func currentCPUCount() int {
-	cpu := runtime.GOMAXPROCS(0)
-	if cpu < 1 {
-		cpu = runtime.NumCPU()
-	}
-	if cpu < 1 {
-		return 1
-	}
-	return cpu
+	return netconfig.CurrentCPUCount()
 }

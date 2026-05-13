@@ -1560,7 +1560,6 @@ Auto-identification precedence:
 1. explicit row `label_name`
 2. first alias
 3. gene/transcript/sequence identifier
-4. lemna-to-Phytozome Arabidopsis fallback only if that fallback already ran during the actual label step
 
 Label traceability table:
 

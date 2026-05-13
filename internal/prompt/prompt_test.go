@@ -8,6 +8,8 @@
 package prompt
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -121,6 +123,18 @@ func TestBlastRowsDefaultBackTargetReturnsToQueryInput(t *testing.T) {
 	}
 }
 
+func TestExportSettingsStructSupportsDefaultPhgoHeaderPreference(t *testing.T) {
+	settings := ExportSettings{
+		WriteText:     true,
+		WriteExcel:    true,
+		WriteRawExcel: false,
+		UsePhgoHeader: true,
+	}
+	if !settings.UsePhgoHeader {
+		t.Fatalf("expected phgo header preference to be enabled in export settings test fixture: %#v", settings)
+	}
+}
+
 func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
 	rows := []model.KeywordResultRow{{SearchTerm: "alpha", LabelName: "C4H", TranscriptID: "AT1G01010.1"}}
 	columns, tableRows := buildKeywordSelectionTable(rows)
@@ -141,6 +155,26 @@ func TestBuildKeywordSelectionTableKeepsRealRowsOnly(t *testing.T) {
 	}
 }
 
+func TestSelectKeywordRowsDefaultSelectionPicksFirstRowPerGroup(t *testing.T) {
+	groups := []model.KeywordSearchGroup{
+		{SearchTerm: "alpha", Rows: []model.KeywordResultRow{{SearchTerm: "alpha"}, {SearchTerm: "alpha"}}},
+		{SearchTerm: "beta", Rows: []model.KeywordResultRow{{SearchTerm: "beta"}, {SearchTerm: "beta"}}},
+	}
+	totalRows := countKeywordResultRows(groups)
+	selected := make([]bool, totalRows)
+	offset := 0
+	for _, group := range groups {
+		if len(group.Rows) > 0 {
+			selected[offset] = true
+		}
+		offset += len(group.Rows)
+	}
+	want := []bool{true, false, true, false}
+	if !slices.Equal(selected, want) {
+		t.Fatalf("default keyword selection = %v, want %v", selected, want)
+	}
+}
+
 func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
 	row := model.KeywordResultRow{
 		SearchTerm:     "alpha",
@@ -153,10 +187,26 @@ func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
 		Description:    "desc",
 	}
 	detail := keywordRowDetail(row)
-	for _, want := range []string{"search_type: keyword", "label_name: C4H", "protein_id: prot123", "transcript: AT1G01010.1"} {
+	for _, want := range []string{"search_type: keyword", "label_name: C4H", "geneid: prot123", "transcript: AT1G01010.1"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("keyword detail missing %q: %s", want, detail)
 		}
+	}
+	pages := keywordRowDetailPages(row)
+	if len(pages) != 3 {
+		t.Fatalf("detail pages = %d, want 3", len(pages))
+	}
+	if pages[0].Title != "Source" || pages[1].Title != "Annotation" || pages[2].Title != "FASTA" {
+		t.Fatalf("unexpected page titles: %#v", pages)
+	}
+	if len(pages[0].Items) == 0 {
+		t.Fatal("expected detail items on first page")
+	}
+	if got := pages[2].Items[0].Value; got != "Sequence not loaded yet." {
+		t.Fatalf("unexpected FASTA placeholder: %q", got)
+	}
+	if !pages[2].Items[0].AutoLoad {
+		t.Fatal("expected FASTA page to auto-load")
 	}
 }
 
@@ -232,6 +282,76 @@ func TestBlastDisplayLeavesUniProtCellsBlankWithoutUniProtData(t *testing.T) {
 	}
 	if strings.Contains(detail, "Should stay blank") || strings.Contains(detail, "UniProt canonical length: 480") {
 		t.Fatalf("detail should blank UniProt values without accession: %s", detail)
+	}
+	pages := blastRowDetailPages(rows[0])
+	if len(pages) != 3 {
+		t.Fatalf("detail pages = %d, want 3", len(pages))
+	}
+	if pages[0].Title != "Source" || pages[1].Title != "UniProt" || pages[2].Title != "FASTA" {
+		t.Fatalf("unexpected page titles: %#v", pages)
+	}
+	if got := pages[1].Items[0].Value; got != "" {
+		t.Fatalf("expected blank UniProt detail cell without accession, got %q", got)
+	}
+	if !pages[2].Items[0].AutoLoad {
+		t.Fatal("expected blast FASTA page to auto-load")
+	}
+}
+
+func TestKeywordRowDetailPagesExposeExtraColumnsAsSeparateTab(t *testing.T) {
+	row := model.KeywordResultRow{
+		SourceDatabase: "lemna",
+		SearchTerm:     "alpha",
+		LabelName:      "PAL1",
+		TranscriptID:   "TR1",
+		Description:    "desc",
+		Genome:         "Spirodela",
+		ExtraColumns: map[string]string{
+			"attr_Alias": "alias1",
+			"gff_source": "maker",
+		},
+	}
+	pages := keywordRowDetailPages(row)
+	if len(pages) != 4 {
+		t.Fatalf("detail pages = %d, want 4", len(pages))
+	}
+	if pages[2].Title != "Extra" {
+		t.Fatalf("third page title = %q, want Extra", pages[2].Title)
+	}
+	if len(pages[2].Items) != 2 {
+		t.Fatalf("extra page items = %d, want 2", len(pages[2].Items))
+	}
+}
+
+func TestDetailPageIsFASTADetectsLastTabOnly(t *testing.T) {
+	if !detailPageIsFASTA(2, 0, 3) {
+		t.Fatal("expected last page first item to be FASTA")
+	}
+	if detailPageIsFASTA(1, 0, 3) {
+		t.Fatal("non-last page must not be treated as FASTA")
+	}
+	if detailPageIsFASTA(2, 1, 3) {
+		t.Fatal("non-first item must not be treated as FASTA loader target")
+	}
+}
+
+func TestDetailFASTACacheKeyIsStableAndCacheable(t *testing.T) {
+	row := model.BlastResultRow{
+		SourceDatabase: "lemna",
+		TargetID:       42,
+		SequenceID:     "SEQ1",
+		TranscriptID:   "TR1",
+		Protein:        "PROT1",
+	}
+	key := blastDetailFASTACacheKey(row)
+	if key == "" {
+		t.Fatal("expected non-empty cache key")
+	}
+	p := New(nil, nil)
+	p.detailFASTACache[key] = ">PROT1\nMPEPTIDE"
+	got := p.detailFASTACache[blastDetailFASTACacheKey(row)]
+	if !strings.Contains(got, "MPEPTIDE") {
+		t.Fatalf("cache lookup failed: %q", got)
 	}
 }
 
@@ -493,6 +613,51 @@ func TestDefaultBlastFilterSuggestionKeepsBestIsoformPerTargetGene(t *testing.T)
 	}
 }
 
+func TestDefaultBlastFilterSuggestionProcessesRowsByRun(t *testing.T) {
+	runA := []model.BlastResultRow{{
+		Protein:                             "RunA1",
+		PercentIdentity:                     80,
+		AlignLength:                         280,
+		QueryLength:                         300,
+		EValue:                              "1e-90",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A1",
+		TargetUniProtCanonicalLengthPercent: "100.0",
+		InterProReferenceEnabled:            true,
+		InterProConservedRegionStatus:       "present",
+	}}
+	runB := []model.BlastResultRow{{
+		Protein:                             "RunB1",
+		PercentIdentity:                     80,
+		AlignLength:                         280,
+		QueryLength:                         300,
+		EValue:                              "1e-90",
+		UniProtReferenceEnabled:             true,
+		UniProtAccession:                    "A0A2",
+		TargetUniProtCanonicalLengthPercent: "45.0",
+		InterProReferenceEnabled:            true,
+		InterProConservedRegionStatus:       "present",
+	}}
+	got := defaultBlastFilterSuggestion(BlastFilterRequest{
+		RowsByRun:     [][]model.BlastResultRow{runA, runB},
+		SelectedByRun: [][]bool{{true}, {true}},
+		Settings:      model.DefaultBlastFilterSettings(),
+		CurrentRun:    1,
+	})
+	if len(got.SelectedByRun) != 2 || len(got.FlagsByRun) != 2 {
+		t.Fatalf("rows-by-run output lengths = %d/%d, want 2/2", len(got.SelectedByRun), len(got.FlagsByRun))
+	}
+	if !got.SelectedByRun[0][0] || got.FlagsByRun[0][0] {
+		t.Fatalf("run A should be kept, got selected=%v flags=%v", got.SelectedByRun[0], got.FlagsByRun[0])
+	}
+	if got.SelectedByRun[1][0] || !got.FlagsByRun[1][0] {
+		t.Fatalf("run B should be filtered, got selected=%v flags=%v", got.SelectedByRun[1], got.FlagsByRun[1])
+	}
+	if len(got.Selected) != 1 || got.Selected[0] || len(got.Flags) != 1 || !got.Flags[0] {
+		t.Fatalf("current run projection wrong: selected=%v flags=%v", got.Selected, got.Flags)
+	}
+}
+
 func indexOfString(values []string, target string) int {
 	for i, value := range values {
 		if value == target {
@@ -505,5 +670,51 @@ func indexOfString(values []string, target string) int {
 func TestBackNavigationSentinelRemainsStable(t *testing.T) {
 	if ErrBackToQueryInput == nil {
 		t.Fatal("ErrBackToQueryInput should remain a stable non-nil navigation sentinel")
+	}
+}
+
+func BenchmarkDefaultBlastFilterSuggestionRowsByRun(b *testing.B) {
+	settings := model.DefaultBlastFilterSettings()
+	runs := make([][]model.BlastResultRow, 6)
+	selectedByRun := make([][]bool, len(runs))
+	for runIndex := range runs {
+		rows := make([]model.BlastResultRow, 900)
+		selected := make([]bool, len(rows))
+		for i := range rows {
+			selected[i] = true
+			rows[i] = model.BlastResultRow{
+				Protein:                             fmt.Sprintf("Sp9509d%06dg%06d_T%03d", runIndex, i/3, i%3+1),
+				QueryID:                             fmt.Sprintf("query_%d", i%75),
+				QueryLength:                         300 + i%31,
+				AlignLength:                         210 + i%43,
+				TargetLength:                        295 + i%37,
+				PercentIdentity:                     65 + float64(i%25),
+				Bitscore:                            200 + float64(i%50),
+				EValue:                              fmt.Sprintf("1e-%d", 40+i%30),
+				UniProtReferenceEnabled:             true,
+				UniProtAccession:                    fmt.Sprintf("Q%05d", i%300),
+				UniProtReviewed:                     []string{"reviewed", "unreviewed"}[i%2],
+				TargetUniProtCanonicalLengthPercent: []string{"98.0", "105.0", "72.0", "135.0"}[i%4],
+				InterProReferenceEnabled:            true,
+				InterProConservedRegionStatus:       []string{"present", "partial", "missing", "uncertain"}[i%4],
+				InterProCoveragePercent:             []string{"82.0", "67.0", "45.0", ""}[i%4],
+			}
+		}
+		runs[runIndex] = rows
+		selectedByRun[runIndex] = selected
+	}
+	request := BlastFilterRequest{
+		RowsByRun:     runs,
+		SelectedByRun: selectedByRun,
+		Settings:      settings,
+		CurrentRun:    0,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := defaultBlastFilterSuggestion(request)
+		if len(got.SelectedByRun) != len(runs) {
+			b.Fatalf("unexpected run count: got %d want %d", len(got.SelectedByRun), len(runs))
+		}
 	}
 }

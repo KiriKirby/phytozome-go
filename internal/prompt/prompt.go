@@ -16,9 +16,11 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
@@ -30,12 +32,15 @@ type Prompter struct {
 	blastProgramPath    string
 	rowStates           map[string]tui.RowSelectionState
 	blastRunStates      map[string]tui.BlastRunSelectionState
-	keywordSelection    []bool
+	keywordSelections   map[string][]bool
 	blastSelections     map[string][]bool
 	blastRunSelected    map[string][][]bool
 	blastFilterSettings model.BlastFilterSettings
 	blastFilterFlags    map[string][]bool
 	blastRunFilterFlags map[string][][]bool
+	loadKeywordFASTA    func(row model.KeywordResultRow) (string, error)
+	loadBlastFASTA      func(row model.BlastResultRow) (string, error)
+	detailFASTACache    map[string]string
 }
 
 var BlastFilterSuggest func(BlastFilterRequest) (BlastFilterSuggestion, error)
@@ -63,6 +68,15 @@ func ColumnHelpEnglish(id string) string {
 	return strings.TrimSpace(help)
 }
 
+func (p *Prompter) SetDetailLoaders(keyword func(row model.KeywordResultRow) (string, error), blast func(row model.BlastResultRow) (string, error)) {
+	p.loadKeywordFASTA = keyword
+	p.loadBlastFASTA = blast
+}
+
+func detailPageIsFASTA(pageIndex int, itemIndex int, totalPages int) bool {
+	return itemIndex == 0 && pageIndex >= 0 && pageIndex == totalPages-1
+}
+
 var columnHelpText = map[string]string{
 	"search_tern": columnHelp(
 		"Original keyword, identifier, URL, or pasted term that produced this row. Use it to trace every result back to the exact input that generated it, especially when mixed protein IDs and report links are searched together.",
@@ -70,9 +84,19 @@ var columnHelpText = map[string]string{
 		"この行を生成した元のキーワード、ID、URL、または貼り付け入力です。リンクと protein ID を混ぜて検索した場合でも、各結果を実際の入力へ追跡できます。",
 	),
 	"label_name": columnHelp(
-		"User-facing label assigned to this query or search term. It is used for grouping results, naming exported peptide records, keeping batch BLAST queries readable, and carrying meaningful gene/function names into downstream files.",
-		"给当前查询或搜索词分配的用户标签名。它用于结果分组、导出肽序列记录命名、让批量 BLAST query 更容易阅读，并把有意义的基因或功能名称带入下游文件。",
-		"この query または検索語に付けた表示用ラベルです。結果のグループ化、出力ペプチド名、バッチ BLAST query の可読性、下流ファイルへの遺伝子名・機能名の引き継ぎに使います。",
+		"User-facing label assigned to this row. In keyword tables it labels the search item; in BLAST result tables it labels the hit itself, not the query that produced the hit.",
+		"给这一行分配的用户可读标签。在 keyword 表格里它标记搜索项；在 BLAST 结果表格里它标记 hit 自己，不是产生这个 hit 的 query。",
+		"この行に付けた表示用ラベルです。keyword table では検索項目を示し、BLAST result table では hit 自身を示します。hit を生んだ query ではありません。",
+	),
+	"labelname_type": columnHelp(
+		"How label_name was obtained for this row, such as manual input, phgo_alias, source alias, auto_define parsing, BLAST-hit auto labeling, or identifier fallback.",
+		"label_name 的获得方式，例如手动输入、phgo_alias、源 alias、auto_define，或编号回退。",
+		"label_name の取得方法です。manual input、phgo_alias、source alias、auto_define、identifier fallback などを示します。",
+	),
+	"phgo_alias": columnHelp(
+		"Authoritative alias list produced by the phytozome GO labelname system. In keyword tables it belongs to the keyword result item; in BLAST tables it belongs to the BLAST hit row, while family BLAST grouping uses the stored query-source aliases instead.",
+		"phytozome GO labelname 系统生成的权威别名列表。在 keyword 表格中它属于该 keyword 结果项；在 BLAST 表格中它属于 BLAST hit 结果项，而 family BLAST 分组使用的是已保存的查询来源项别名。",
+		"phytozome GO の labelname system が生成する authoritative alias list です。keyword table では keyword result item の別名、BLAST table では BLAST hit row の別名であり、Family BLAST grouping は保存済み query-source aliases を使います。",
 	),
 	"source_database": columnHelp(
 		"Original database that produced this row, such as Phytozome or lemna. External references like UniProt and InterPro add columns later, but this field tells you where the primary hit came from.",
@@ -95,9 +119,19 @@ var columnHelpText = map[string]string{
 		"BLAST ヒット内の HSP セグメント番号です。1 つの subject に複数の high-scoring segment pair がある場合、この行がどのアラインメント片段かを示します。",
 	),
 	"protein": columnHelp(
-		"Target protein or sequence identifier from the original database. This is the main local identifier to open the source report, fetch peptide sequence, connect to gene/transcript metadata, and map to external references.",
-		"原始数据库中的目标蛋白或序列编号。这是打开原始报告、获取肽序列、连接基因/转录本信息以及映射外部参考数据库时最主要的本地编号。",
-		"元データベースにおけるターゲットタンパク質または配列 ID です。ソースレポートを開く、ペプチド配列を取得する、遺伝子/転写産物情報につなぐ、外部参照へマップする際の主要 ID です。",
+		"Target gene/protein/sequence identifier from the original database. The table header is geneid because this is the main local gene-side identifier used for review, source reports, peptide retrieval, and external references.",
+		"原始数据库中的目标 gene/protein/sequence 编号。表头显示为 geneid，因为这是复查、源报告、肽序列获取和外部参考映射使用的主要本地 gene 侧编号。",
+		"元データベースの target gene/protein/sequence identifier です。review、source report、peptide retrieval、external references に使う主要な local gene-side ID なので、表では geneid と表示します。",
+	),
+	"blast_labelname": columnHelp(
+		"Labelname of the query gene or sequence that produced this BLAST hit. This is separate from the hit row's own label_name.",
+		"产生这个 BLAST hit 的查询 gene 或 sequence 的 labelname。它和 hit 自己的 label_name 分开。",
+		"この BLAST hit を生んだ query gene/sequence の labelname です。hit 自身の label_name とは別です。",
+	),
+	"blast_geneid": columnHelp(
+		"Gene/protein identifier of the query sequence that produced this BLAST hit. This identifies the source gene used for BLAST grouping, family merging, export metadata, and query-sequence headers.",
+		"产生这个 BLAST hit 的查询序列的 gene/protein 编号。",
+		"この BLAST hit を生んだ query sequence の gene/protein identifier です。",
 	),
 	"subject_id": columnHelp(
 		"Subject identifier reported directly by BLAST. When it is empty or less readable, the program may display the protein identifier elsewhere, but this field preserves the BLAST-level subject name for debugging and traceability.",
@@ -275,9 +309,9 @@ var columnHelpText = map[string]string{
 		"hit の元データベースレポート URL です。alias、遺伝子モデル、transcript/protein ページ、注釈文脈、browser link を直接確認したいときに使います。",
 	),
 	"protein_id": columnHelp(
-		"Protein identifier from the source database record. In keyword results it is the stable handle used for peptide retrieval, external reference mapping, and later BLAST or export steps.",
-		"源数据库记录中的蛋白编号。在 keyword 结果中，它是获取肽序列、映射外部参考库以及后续 BLAST 或导出的稳定标识。",
-		"ソースデータベースレコードの protein ID です。keyword 結果では、ペプチド取得、外部参照マッピング、後続 BLAST/出力に使う安定した識別子です。",
+		"Gene/protein identifier from the source database record. The visible column name is geneid to keep source identifiers consistently gene-oriented in tables.",
+		"源数据库记录中的 gene/protein identifier。可见列名显示为 geneid，使表格里的源编号命名保持以 gene 为中心。",
+		"source database record の gene/protein identifier です。table では source identifier の呼び方を gene-oriented に統一するため geneid と表示します。",
 	),
 	"transcript": columnHelp(
 		"Transcript or transcript-like identifier shown in keyword results. It helps distinguish isoforms and connect keyword hits to the source gene model.",
@@ -309,6 +343,16 @@ var columnHelpText = map[string]string{
 		"源数据库报告的 alias。第一项 alias 常用于自动 label name，完整 alias 列表可帮助识别熟悉的基因符号，例如通路酶名称。",
 		"ソースデータベースが報告する alias です。最初の alias は自動 label name に使われることが多く、全 alias 一覧は経路酵素名など既知の gene symbol の認識に役立ちます。",
 	),
+	"symbols": columnHelp(
+		"Phytozome symbols reported directly by the source gene record. They are preserved as their own source field and are used for labelname only when synonyms are unavailable.",
+		"Phytozome 基因记录直接报告的 symbols。它们作为独立源字段保留，只在 synonyms 不可用时才作为 labelname 的候选来源。",
+		"Phytozome の gene record が直接報告する symbols です。独立した source field として保持し、synonyms がない場合だけ labelname 候補に使います。",
+	),
+	"synonyms": columnHelp(
+		"Phytozome synonyms reported directly by the source gene record. They are the first Phytozome keyword alias source sent to labelname for each item.",
+		"Phytozome 基因记录直接报告的 synonyms。它们是每个 Phytozome keyword 项目优先发送给 labelname 的 alias 来源。",
+		"Phytozome の gene record が直接報告する synonyms です。各 Phytozome keyword 項目で最初に labelname へ渡す alias source です。",
+	),
 	"uniprot": columnHelp(
 		"Source-database UniProt cross-reference when the original database already provides one. This is separate from the added UniProt external-reference columns and can help diagnose mapping agreement or disagreement.",
 		"原始数据库自身提供的 UniProt 交叉引用。它不同于后续添加的 UniProt 外部参考列，可用于检查映射是否一致。",
@@ -325,9 +369,9 @@ var columnHelpText = map[string]string{
 		"レコードに対するソースデータベースの追加 comments です。主要 description ではないものの、注釈品質や特殊ケースを理解する助けになる場合があります。",
 	),
 	"auto_define": columnHelp(
-		"Program-generated definition or label derived from available source information. It is a convenience field for readable output and should be checked against source aliases, descriptions, and external references.",
-		"程序根据可用源信息生成的定义或标签。这是为了让输出更可读的便利字段，需要与源 alias、description 和外部参考信息一起确认。",
-		"利用可能なソース情報からプログラムが生成した定義またはラベルです。出力を読みやすくするための補助項目であり、source aliases、description、外部参照と照合して確認します。",
+		"Automatic definition already reported by the selected source row, such as Phytozome auto_defline or lemna product/name text. For Phytozome keyword labelname it is only used as a fallback after synonyms and symbols are unavailable.",
+		"所选源结果行已经报告的自动定义，例如 Phytozome auto_defline 或 lemna product/name 文本。对 Phytozome keyword 的 labelname 来说，它只在 synonyms 和 symbols 都不可用后作为回退来源。",
+		"選択された source row がすでに持つ automatic definition です。Phytozome auto_defline や lemna product/name text などで、Phytozome keyword の labelname では synonyms と symbols がない場合の fallback としてのみ使います。",
 	),
 	"sequence_header_label": columnHelp(
 		"Header label used when this row's sequence is exported or reused. It is designed to keep exported FASTA records identifiable in downstream BLAST, alignment, or phylogenetic tools.",
@@ -550,6 +594,7 @@ type ExportSettings struct {
 	WriteText     bool
 	WriteExcel    bool
 	WriteRawExcel bool
+	UsePhgoHeader bool
 }
 
 type BlastFilterSettingsResult struct {
@@ -558,9 +603,10 @@ type BlastFilterSettingsResult struct {
 }
 
 type ExternalReferenceSettings struct {
-	UseUniProt       bool
-	UseInterPro      bool
-	InterProSettings model.InterProConservedRegionSettings
+	AutoLabelBlastHits bool
+	UseUniProt         bool
+	UseInterPro        bool
+	InterProSettings   model.InterProConservedRegionSettings
 }
 
 type BlastFilterRequest struct {
@@ -589,9 +635,19 @@ type blastFilterClearResult struct {
 }
 
 type blastFilterEvaluation struct {
-	Reject bool
-	Score  int
-	EValue float64
+	Reject         bool
+	Score          int
+	EValue         float64
+	QueryCoverage  float64
+	ReferenceScore int
+}
+
+type blastFilterPreparedRun struct {
+	rows         []model.BlastResultRow
+	selected     []bool
+	flags        []bool
+	evaluations  []blastFilterEvaluation
+	rankingOrder []string
 }
 
 type tableColumnValue[T any] struct {
@@ -608,11 +664,13 @@ func New(in io.Reader, out io.Writer) *Prompter {
 		out:                 out,
 		rowStates:           make(map[string]tui.RowSelectionState),
 		blastRunStates:      make(map[string]tui.BlastRunSelectionState),
+		keywordSelections:   make(map[string][]bool),
 		blastSelections:     make(map[string][]bool),
 		blastRunSelected:    make(map[string][][]bool),
 		blastFilterSettings: model.DefaultBlastFilterSettings(),
 		blastFilterFlags:    make(map[string][]bool),
 		blastRunFilterFlags: make(map[string][][]bool),
+		detailFASTACache:    make(map[string]string),
 	}
 }
 
@@ -1112,13 +1170,15 @@ func (p *Prompter) DetailedReportAction(backTarget error) (string, error) {
 func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenceSettings, error) {
 	defaultInterPro := model.DefaultInterProConservedRegionSettings()
 	result, err := tui.RunExternalReferenceModal(tui.ExternalReferencePage{
-		Path:            p.blastTUIPath("BLAST input", "External references"),
-		Title:           p.t("External references"),
-		Message:         p.t("Choose which external evidence columns to add to the BLAST result table. These references enrich the table; they do not remove rows."),
-		UniProtLabel:    p.t("Add UniProt annotation columns"),
-		UniProtInitial:  true,
-		InterProLabel:   p.t("Add InterPro domain-evidence columns"),
-		InterProInitial: true,
+		Path:             p.blastTUIPath("BLAST input", "External references"),
+		Title:            p.t("External references"),
+		Message:          p.t("Choose which external evidence columns to add to the BLAST result table. These references enrich the table; they do not remove rows."),
+		AutoLabelLabel:   p.t("Auto identify BLAST hit labelnames"),
+		AutoLabelInitial: true,
+		UniProtLabel:     p.t("Add UniProt annotation columns"),
+		UniProtInitial:   true,
+		InterProLabel:    p.t("Add InterPro domain-evidence columns"),
+		InterProInitial:  true,
 		InterProSettings: tui.InterProConservedRegionSettings{
 			UsePfamAccession:       defaultInterPro.UsePfamAccession,
 			UseInterProAccession:   defaultInterPro.UseInterProAccession,
@@ -1143,9 +1203,10 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 		return ExternalReferenceSettings{}, navErr
 	}
 	return ExternalReferenceSettings{
-		UseUniProt:       result.UseUniProt,
-		UseInterPro:      result.UseInterPro,
-		InterProSettings: parseInterProSettings(result.InterProSettings),
+		AutoLabelBlastHits: result.AutoLabelBlastHits,
+		UseUniProt:         result.UseUniProt,
+		UseInterPro:        result.UseInterPro,
+		InterProSettings:   parseInterProSettings(result.InterProSettings),
 	}, nil
 }
 
@@ -1161,7 +1222,6 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 		PrependOnlyFirstQuery:      defaults.PrependOnlyFirstQuery,
 		CustomizeGroups:            defaults.CustomizeGroups,
 		MinimumGroupSize:           strconv.Itoa(defaults.MinimumGroupSize),
-		StripArabidopsisPrefix:     defaults.StripArabidopsisPrefix,
 		StripLeadingSpeciesPrefix:  defaults.StripLeadingSpeciesPrefix,
 		StripTrailingQueryIndex:    defaults.StripTrailingQueryIndex,
 		StripAfterNumberSuffix:     defaults.StripAfterNumberSuffix,
@@ -1199,7 +1259,6 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 				PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
 				CustomizeGroups:            settings.CustomizeGroups,
 				MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
-				StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
 				StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
 				StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
 				StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
@@ -1225,7 +1284,6 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 				PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
 				CustomizeGroups:            true,
 				MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
-				StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
 				StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
 				StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
 				StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
@@ -1277,7 +1335,6 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 			PrependOnlyFirstQuery:      settings.PrependOnlyFirstQuery,
 			CustomizeGroups:            settings.CustomizeGroups,
 			MinimumGroupSize:           parseIntDefault(settings.MinimumGroupSize, defaults.MinimumGroupSize),
-			StripArabidopsisPrefix:     settings.StripArabidopsisPrefix,
 			StripLeadingSpeciesPrefix:  settings.StripLeadingSpeciesPrefix,
 			StripTrailingQueryIndex:    settings.StripTrailingQueryIndex,
 			StripAfterNumberSuffix:     settings.StripAfterNumberSuffix,
@@ -1650,6 +1707,7 @@ func (p *Prompter) blastFilterSuggestionWithProgress(request BlastFilterRequest)
 		Description: "Applying the current filter settings and rebuilding row checkbox suggestions.",
 		Initial:     "Preparing filter evaluation...",
 		Total:       total,
+		CancelError: ErrBackToRowSelection,
 	}, func(ctx context.Context, update func(current int, message string)) (BlastFilterSuggestion, error) {
 		update(0, "Evaluating BLAST result rows...")
 		suggestion, err := p.blastFilterSuggestion(request)
@@ -1676,6 +1734,7 @@ func (p *Prompter) clearBlastFilterWithProgress(rowCount int) (blastFilterClearR
 		Description: "Removing filter suggestion marks and reselecting all rows.",
 		Initial:     "Clearing filter marks...",
 		Total:       rowCount,
+		CancelError: ErrBackToRowSelection,
 	}, func(ctx context.Context, update func(current int, message string)) (blastFilterClearResult, error) {
 		selected := make([]bool, rowCount)
 		flags := make([]bool, rowCount)
@@ -1712,6 +1771,7 @@ func (p *Prompter) clearBlastRunFiltersWithProgress(rowCounts []int) (blastFilte
 		Description: "Removing filter suggestion marks and reselecting all rows for every BLAST query.",
 		Initial:     "Clearing filter marks...",
 		Total:       total,
+		CancelError: ErrBackToRowSelection,
 	}, func(ctx context.Context, update func(current int, message string)) (blastFilterClearResult, error) {
 		selectedByRun := make([][]bool, len(rowCounts))
 		flagsByRun := make([][]bool, len(rowCounts))
@@ -1749,14 +1809,42 @@ func defaultBlastFilterSuggestion(request BlastFilterRequest) BlastFilterSuggest
 	if len(request.RowsByRun) > 0 {
 		selectedByRun := make([][]bool, len(request.RowsByRun))
 		flagsByRun := make([][]bool, len(request.RowsByRun))
-		for runIndex, rows := range request.RowsByRun {
-			selected := []bool(nil)
-			if runIndex < len(request.SelectedByRun) {
-				selected = request.SelectedByRun[runIndex]
+		workerCount := minIntPrompt(len(request.RowsByRun), maxIntPrompt(1, minIntPrompt(runtime.GOMAXPROCS(0), 8)))
+		type runResult struct {
+			runIndex   int
+			suggestion BlastFilterSuggestion
+		}
+		jobs := make(chan int)
+		results := make(chan runResult, len(request.RowsByRun))
+		var workers sync.WaitGroup
+		for range workerCount {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				for runIndex := range jobs {
+					rows := request.RowsByRun[runIndex]
+					selected := []bool(nil)
+					if runIndex < len(request.SelectedByRun) {
+						selected = request.SelectedByRun[runIndex]
+					}
+					results <- runResult{
+						runIndex:   runIndex,
+						suggestion: blastFilterSuggestRows(rows, selected, settings),
+					}
+				}
+			}()
+		}
+		go func() {
+			for runIndex := range request.RowsByRun {
+				jobs <- runIndex
 			}
-			suggestion := blastFilterSuggestRows(rows, selected, settings)
-			selectedByRun[runIndex] = suggestion.Selected
-			flagsByRun[runIndex] = suggestion.Flags
+			close(jobs)
+			workers.Wait()
+			close(results)
+		}()
+		for result := range results {
+			selectedByRun[result.runIndex] = result.suggestion.Selected
+			flagsByRun[result.runIndex] = result.suggestion.Flags
 		}
 		out := BlastFilterSuggestion{
 			SelectedByRun: selectedByRun,
@@ -1779,23 +1867,14 @@ func DefaultBlastFilterSuggestion(request BlastFilterRequest) BlastFilterSuggest
 }
 
 func blastFilterSuggestRows(rows []model.BlastResultRow, selected []bool, settings model.BlastFilterSettings) BlastFilterSuggestion {
-	outSelected := normalizePromptSelection(nil, len(rows), true)
-	flags := make([]bool, len(rows))
-	evaluations := make([]blastFilterEvaluation, len(rows))
-	for i, row := range rows {
-		evaluations[i] = evaluateBlastFilterRow(row, settings)
-		flags[i] = evaluations[i].Reject
-		if flags[i] {
-			outSelected[i] = false
-		}
-	}
+	prepared := prepareBlastFilterRun(rows, selected, settings)
 	if settings.KeepBestIsoformPerTargetGene {
-		applyBestIsoformLimit(rows, evaluations, outSelected, flags, settings)
+		applyBestIsoformLimit(prepared, settings)
 	}
 	if settings.KeepTopHitsPerQuery && settings.TopHitsPerQuery > 0 {
-		applyTopHitLimit(rows, evaluations, outSelected, flags, settings)
+		applyTopHitLimit(prepared, settings)
 	}
-	return BlastFilterSuggestion{Selected: outSelected, Flags: flags, Settings: settings}
+	return BlastFilterSuggestion{Selected: prepared.selected, Flags: prepared.flags, Settings: settings}
 }
 
 func normalizePromptSelection(selected []bool, length int, defaultValue bool) []bool {
@@ -1807,6 +1886,20 @@ func normalizePromptSelection(selected []bool, length int, defaultValue bool) []
 		copy(out, selected)
 	}
 	return out
+}
+
+func minIntPrompt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxIntPrompt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilterSettings) blastFilterEvaluation {
@@ -1822,6 +1915,7 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 		hardFailed = true
 	}
 	coverage := blastRowQueryCoverage(row)
+	evaluation.QueryCoverage = coverage
 	if settings.MinAlignQueryCoveragePercent <= 0 {
 		// Query coverage can be enabled as an extra strict hard rule by setting a value.
 	} else if coverage >= settings.MinAlignQueryCoveragePercent {
@@ -1940,6 +2034,7 @@ func evaluateBlastFilterRow(row model.BlastResultRow, settings model.BlastFilter
 	if settings.EnableSoftScore && evaluation.Score < settings.MinSoftScore {
 		evaluation.Reject = true
 	}
+	evaluation.ReferenceScore = blastFilterReferenceScore(row, settings)
 	return evaluation
 }
 
@@ -2004,31 +2099,51 @@ func blastRowHasAnyInterProDomain(row model.BlastResultRow) bool {
 	return false
 }
 
-func applyTopHitLimit(rows []model.BlastResultRow, evaluations []blastFilterEvaluation, selected []bool, flags []bool, settings model.BlastFilterSettings) {
-	groups := make(map[string][]int, len(rows))
+func prepareBlastFilterRun(rows []model.BlastResultRow, selected []bool, settings model.BlastFilterSettings) blastFilterPreparedRun {
+	outSelected := normalizePromptSelection(nil, len(rows), true)
+	flags := make([]bool, len(rows))
+	evaluations := make([]blastFilterEvaluation, len(rows))
 	for i, row := range rows {
+		evaluations[i] = evaluateBlastFilterRow(row, settings)
+		flags[i] = evaluations[i].Reject
+		if flags[i] {
+			outSelected[i] = false
+		}
+	}
+	return blastFilterPreparedRun{
+		rows:         rows,
+		selected:     outSelected,
+		flags:        flags,
+		evaluations:  evaluations,
+		rankingOrder: blastFilterRankingOrder(settings),
+	}
+}
+
+func applyTopHitLimit(run blastFilterPreparedRun, settings model.BlastFilterSettings) {
+	groups := make(map[string][]int, len(run.rows))
+	for i, row := range run.rows {
 		key := blastFilterQueryKey(row)
 		groups[key] = append(groups[key], i)
 	}
 	for _, indexes := range groups {
-		sortBlastFilterIndexes(rows, evaluations, indexes, settings)
+		sortBlastFilterIndexes(run, indexes, settings)
 		kept := 0
 		for _, index := range indexes {
-			if flags[index] {
+			if run.flags[index] {
 				continue
 			}
 			kept++
 			if kept > settings.TopHitsPerQuery {
-				flags[index] = true
-				selected[index] = false
+				run.flags[index] = true
+				run.selected[index] = false
 			}
 		}
 	}
 }
 
-func applyBestIsoformLimit(rows []model.BlastResultRow, evaluations []blastFilterEvaluation, selected []bool, flags []bool, settings model.BlastFilterSettings) {
-	groups := make(map[string][]int, len(rows))
-	for i, row := range rows {
+func applyBestIsoformLimit(run blastFilterPreparedRun, settings model.BlastFilterSettings) {
+	groups := make(map[string][]int, len(run.rows))
+	for i, row := range run.rows {
 		key := blastFilterTargetGeneKey(row)
 		if key == "" {
 			continue
@@ -2039,63 +2154,59 @@ func applyBestIsoformLimit(rows []model.BlastResultRow, evaluations []blastFilte
 		if len(indexes) <= 1 {
 			continue
 		}
-		sortBlastFilterIndexes(rows, evaluations, indexes, settings)
+		sortBlastFilterIndexes(run, indexes, settings)
 		kept := false
 		for _, index := range indexes {
-			if flags[index] {
+			if run.flags[index] {
 				continue
 			}
 			if !kept {
 				kept = true
 				continue
 			}
-			flags[index] = true
-			selected[index] = false
+			run.flags[index] = true
+			run.selected[index] = false
 		}
 	}
 }
 
-func sortBlastFilterIndexes(rows []model.BlastResultRow, evaluations []blastFilterEvaluation, indexes []int, settings model.BlastFilterSettings) {
+func sortBlastFilterIndexes(run blastFilterPreparedRun, indexes []int, settings model.BlastFilterSettings) {
 	sort.SliceStable(indexes, func(i, j int) bool {
-		return blastFilterIndexLess(rows, evaluations, indexes[i], indexes[j], settings)
+		return blastFilterIndexLess(run, indexes[i], indexes[j], settings)
 	})
 }
 
-func blastFilterIndexLess(rows []model.BlastResultRow, evaluations []blastFilterEvaluation, leftIndex int, rightIndex int, settings model.BlastFilterSettings) bool {
-	left := evaluations[leftIndex]
-	right := evaluations[rightIndex]
+func blastFilterIndexLess(run blastFilterPreparedRun, leftIndex int, rightIndex int, settings model.BlastFilterSettings) bool {
+	left := run.evaluations[leftIndex]
+	right := run.evaluations[rightIndex]
 	if left.Reject != right.Reject {
 		return !left.Reject
 	}
-	for _, field := range blastFilterRankingOrder(settings) {
+	for _, field := range run.rankingOrder {
 		switch field {
 		case "score":
 			if settings.PreferHigherFilterScoreWhenRanking && left.Score != right.Score {
 				return left.Score > right.Score
 			}
 		case "identity":
-			if settings.PreferHigherIdentityWhenTies && rows[leftIndex].PercentIdentity != rows[rightIndex].PercentIdentity {
-				return rows[leftIndex].PercentIdentity > rows[rightIndex].PercentIdentity
+			if settings.PreferHigherIdentityWhenTies && run.rows[leftIndex].PercentIdentity != run.rows[rightIndex].PercentIdentity {
+				return run.rows[leftIndex].PercentIdentity > run.rows[rightIndex].PercentIdentity
 			}
 		case "coverage":
-			leftCoverage := blastRowQueryCoverage(rows[leftIndex])
-			rightCoverage := blastRowQueryCoverage(rows[rightIndex])
-			if settings.PreferHigherCoverageWhenTies && leftCoverage != rightCoverage {
-				return leftCoverage > rightCoverage
+			if settings.PreferHigherCoverageWhenTies && left.QueryCoverage != right.QueryCoverage {
+				return left.QueryCoverage > right.QueryCoverage
 			}
 		case "reference":
-			leftEvidence := blastFilterReferenceScore(rows[leftIndex], settings)
-			rightEvidence := blastFilterReferenceScore(rows[rightIndex], settings)
-			if settings.PreferHigherReferenceScoreWhenTies && leftEvidence != rightEvidence {
-				return leftEvidence > rightEvidence
+			if settings.PreferHigherReferenceScoreWhenTies && left.ReferenceScore != right.ReferenceScore {
+				return left.ReferenceScore > right.ReferenceScore
 			}
 		case "evalue":
 			if settings.PreferLowerEValueWhenTies && left.EValue != right.EValue {
 				return left.EValue < right.EValue
 			}
 		case "bitscore":
-			if settings.PreferHigherBitscoreWhenTies && rows[leftIndex].Bitscore != rows[rightIndex].Bitscore {
-				return rows[leftIndex].Bitscore > rows[rightIndex].Bitscore
+			if settings.PreferHigherBitscoreWhenTies && run.rows[leftIndex].Bitscore != run.rows[rightIndex].Bitscore {
+				return run.rows[leftIndex].Bitscore > run.rows[rightIndex].Bitscore
 			}
 		}
 	}
@@ -2631,7 +2742,7 @@ func (p *Prompter) SequenceInput() (string, error) {
 	result, err := tui.RunMultiLinePage(tui.MultiLinePage{
 		Path:        p.blastTUIPath("BLAST input"),
 		Title:       p.t("BLAST input"),
-		Description: p.t("Paste one or more BLAST queries, one per line, or paste a FASTA entry / Phytozome gene or transcript report URL.") + "\n" + p.t("You can also type load \"file.txt\" to read from the program directory."),
+		Description: p.t("Paste one or more BLAST queries, one per line, or paste a FASTA entry / Phytozome gene or transcript report URL.") + "\n" + p.t("You can also type load \"file.fasta\" to read from the program directory."),
 		AllowEmpty:  true,
 		AllowBack:   true,
 		AllowHome:   true,
@@ -2717,14 +2828,16 @@ func (p *Prompter) phytozomeContext() bool {
 func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (KeywordRowSelection, error) {
 	totalRows := countKeywordResultRows(groups)
 	selected := make([]bool, totalRows)
-	for i := range selected {
-		selected[i] = true
-	}
 	flatRows := make([]model.KeywordResultRow, 0, totalRows)
+	offset := 0
 	for _, group := range groups {
+		if len(group.Rows) > 0 {
+			selected[offset] = true
+		}
 		for _, row := range group.Rows {
 			flatRows = append(flatRows, row)
 		}
+		offset += len(group.Rows)
 	}
 	groupLabels := make([]string, 0, len(groups))
 	for _, group := range groups {
@@ -2734,8 +2847,8 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 	}
 	columns, tableRows := buildKeywordSelectionTable(flatRows)
 	stateKey := tableStateKey("keyword", columns, tableRows)
-	if len(p.keywordSelection) == totalRows {
-		selected = append([]bool(nil), p.keywordSelection...)
+	if cached, ok := p.keywordSelections[stateKey]; ok && len(cached) == totalRows {
+		selected = append([]bool(nil), cached...)
 	}
 	for {
 		result, err := tui.RunRowSelectionPage(tui.RowSelectionPage{
@@ -2756,17 +2869,42 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 			ExtraShortcut: tui.ShortcutBlast,
 			ExtraAction:   "blast",
 			State:         p.rowStates[stateKey],
+			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				if !detailPageIsFASTA(pageIndex, itemIndex, len(keywordRowDetailPages(model.KeywordResultRow{}))) || rowIndex < 0 || rowIndex >= len(flatRows) {
+					return tui.DetailItem{}, false, nil
+				}
+				row := flatRows[rowIndex]
+				cacheKey := keywordDetailFASTACacheKey(row)
+				if cached := strings.TrimSpace(p.detailFASTACache[cacheKey]); cached != "" {
+					return detailFASTALoadedItem(cached), true, nil
+				}
+				if p.loadKeywordFASTA == nil {
+					return tui.DetailItem{
+						Label:       "FASTA",
+						Value:       "Sequence loading is unavailable in this context.",
+						ActionLabel: "Click here",
+						ActionHint:  "or press Enter to retry",
+						ActionKey:   "Enter",
+					}, true, nil
+				}
+				sequence, err := p.loadKeywordFASTA(row)
+				if err != nil {
+					return tui.DetailItem{}, true, err
+				}
+				p.detailFASTACache[cacheKey] = strings.TrimSpace(sequence)
+				return detailFASTALoadedItem(sequence), true, nil
+			},
 		})
 		if err != nil {
 			return KeywordRowSelection{}, err
 		}
 		p.rowStates[stateKey] = result.State
 		if navErr := tuiNavError(result.Nav, ErrBackToQueryInput); navErr != nil {
-			p.keywordSelection = append([]bool(nil), result.Selected...)
+			p.keywordSelections[stateKey] = append([]bool(nil), result.Selected...)
 			return KeywordRowSelection{}, navErr
 		}
 		selected = result.Selected
-		p.keywordSelection = append([]bool(nil), selected...)
+		p.keywordSelections[stateKey] = append([]bool(nil), selected...)
 		chosen := make([]model.KeywordResultRow, 0, totalRows)
 		for i, ok := range selected {
 			if ok {
@@ -2842,18 +2980,49 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 	filterCleared := false
 	for {
 		result, err := tui.RunBlastRunSelectionPage(tui.BlastRunSelectionPage{
-			Path:         p.blastTUIPath("BLAST input", "BLAST results", "Row selection"),
-			Title:        "BLAST row selection",
-			Description:  "Choose a BLAST query on the left and review its result rows on the right.",
-			Items:        items,
-			AllowFilter:  blastRunsHaveAllExternalReferences(runs),
-			FilterText:   tui.ButtonFilter,
-			AllowBack:    true,
-			AllowHome:    true,
-			ConfirmText:  tui.ButtonView,
-			GenerateText: tui.ButtonExport,
-			DoneAllText:  tui.ButtonExportAll,
-			State:        p.blastRunStates[stateKey],
+			Path:          p.blastTUIPath("BLAST input", "BLAST results", "Row selection"),
+			Title:         "BLAST row selection",
+			Description:   "Choose a BLAST query on the left and review its result rows on the right.",
+			Items:         items,
+			AllowFilter:   blastRunsHaveAllExternalReferences(runs),
+			FilterText:    tui.ButtonFilter,
+			AllowBack:     true,
+			AllowHome:     true,
+			ConfirmText:   tui.ButtonView,
+			GenerateText:  tui.ButtonExport,
+			ExtraText:     tui.ButtonRunBLAST,
+			ExtraShortcut: tui.ShortcutBlast,
+			ExtraAction:   "blast",
+			DoneAllText:   tui.ButtonExportAll,
+			State:         p.blastRunStates[stateKey],
+			LoadDetail: func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				if runIndex < 0 || runIndex >= len(runs) || rowIndex < 0 || rowIndex >= len(runs[runIndex].Rows) {
+					return tui.DetailItem{}, false, nil
+				}
+				if !detailPageIsFASTA(pageIndex, itemIndex, len(blastRowDetailPages(runs[runIndex].Rows[rowIndex]))) {
+					return tui.DetailItem{}, false, nil
+				}
+				row := runs[runIndex].Rows[rowIndex]
+				cacheKey := blastDetailFASTACacheKey(row)
+				if cached := strings.TrimSpace(p.detailFASTACache[cacheKey]); cached != "" {
+					return detailFASTALoadedItem(cached), true, nil
+				}
+				if p.loadBlastFASTA == nil {
+					return tui.DetailItem{
+						Label:       "FASTA",
+						Value:       "Sequence loading is unavailable in this context.",
+						ActionLabel: "Click here",
+						ActionHint:  "or press Enter to retry",
+						ActionKey:   "Enter",
+					}, true, nil
+				}
+				sequence, err := p.loadBlastFASTA(row)
+				if err != nil {
+					return tui.DetailItem{}, true, err
+				}
+				p.detailFASTACache[cacheKey] = strings.TrimSpace(sequence)
+				return detailFASTALoadedItem(sequence), true, nil
+			},
 		})
 		if err != nil {
 			return BlastRowSelection{}, err
@@ -2928,6 +3097,20 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 			p.blastRunSelected[stateKey] = cloneBoolMatrixPrompt(suggestion.SelectedByRun)
 			p.blastRunFilterFlags[stateKey] = cloneBoolMatrixPrompt(suggestion.FlagsByRun)
 			continue
+		}
+		if result.Action == "blast" {
+			rows := make([]model.BlastResultRow, 0)
+			for runIndex := range items {
+				if runIndex >= len(runs) || runIndex >= len(result.SelectedByRun) {
+					continue
+				}
+				for rowIndex, ok := range result.SelectedByRun[runIndex] {
+					if ok && rowIndex >= 0 && rowIndex < len(runs[runIndex].Rows) {
+						rows = append(rows, runs[runIndex].Rows[rowIndex])
+					}
+				}
+			}
+			return BlastRowSelection{Rows: rows}, nil
 		}
 		if result.RunIndex < 0 || result.RunIndex >= len(runs) {
 			result.RunIndex = 0
@@ -3016,6 +3199,97 @@ func splitPromptDisplayLines(value string) []string {
 	return out
 }
 
+func keywordDetailFASTACacheKey(row model.KeywordResultRow) string {
+	return strings.Join([]string{
+		"keyword",
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strings.TrimSpace(row.SequenceID),
+		strings.TrimSpace(row.TranscriptID),
+		strings.TrimSpace(row.GeneIdentifier),
+	}, "|")
+}
+
+func blastDetailFASTACacheKey(row model.BlastResultRow) string {
+	return strings.Join([]string{
+		"blast",
+		strings.ToLower(strings.TrimSpace(row.SourceDatabase)),
+		strconv.Itoa(row.TargetID),
+		strings.TrimSpace(row.SequenceID),
+		strings.TrimSpace(row.TranscriptID),
+		strings.TrimSpace(row.Protein),
+	}, "|")
+}
+
+func detailFASTALoadItem() tui.DetailItem {
+	return tui.DetailItem{
+		Label:    "FASTA",
+		Value:    "Sequence not loaded yet.",
+		AutoLoad: true,
+	}
+}
+
+func detailFASTALoadedItem(value string) tui.DetailItem {
+	return tui.DetailItem{
+		Label: "FASTA",
+		Value: strings.TrimSpace(value),
+	}
+}
+
+func detailPageFromIDs(title string, ids []string, values map[string]string, label func(id string) string, display func(id string, value string) string, include func(id string) bool) tui.DetailPage {
+	items := make([]tui.DetailItem, 0, len(ids))
+	for _, id := range ids {
+		if include != nil && !include(id) {
+			continue
+		}
+		items = append(items, tui.DetailItem{
+			Label: label(id),
+			Value: display(id, values[id]),
+		})
+	}
+	if len(items) == 0 {
+		return tui.DetailPage{}
+	}
+	return tui.DetailPage{Title: title, Items: items}
+}
+
+func appendDetailPageIfNotEmpty(pages []tui.DetailPage, page tui.DetailPage) []tui.DetailPage {
+	if len(page.Items) == 0 {
+		return pages
+	}
+	return append(pages, page)
+}
+
+func keywordExtraDetailPage(row model.KeywordResultRow) tui.DetailPage {
+	if len(row.ExtraColumns) == 0 {
+		return tui.DetailPage{}
+	}
+	keys := make([]string, 0, len(row.ExtraColumns))
+	for key := range row.ExtraColumns {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	items := make([]tui.DetailItem, 0, len(keys))
+	for _, key := range keys {
+		items = append(items, tui.DetailItem{
+			Label: ColumnDetailLabel(key, ColumnDisplayOptions{}),
+			Value: displayPreviewValue(row.ExtraColumns[key]),
+		})
+	}
+	return tui.DetailPage{Title: "Extra", Items: items}
+}
+
+func blastRowPrimaryDetailIDs(row model.BlastResultRow) []string {
+	all := blastDetailColumnIDsForRow(row)
+	out := make([]string, 0, len(all))
+	for _, id := range all {
+		if blastColumnIsUniProtReference(id) || blastColumnIsInterProReference(id) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 func uniquePromptDisplayLines(lines []string) []string {
 	out := make([]string, 0, len(lines))
 	seen := map[string]struct{}{}
@@ -3078,6 +3352,34 @@ func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll boo
 			DoneAllText:  tui.ButtonExportAll,
 			Hints:        []string{"Ctrl+G exports selected rows"},
 			State:        p.rowStates[stateKey],
+			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				if rowIndex < 0 || rowIndex >= len(rows) {
+					return tui.DetailItem{}, false, nil
+				}
+				if !detailPageIsFASTA(pageIndex, itemIndex, len(blastRowDetailPages(rows[rowIndex]))) {
+					return tui.DetailItem{}, false, nil
+				}
+				row := rows[rowIndex]
+				cacheKey := blastDetailFASTACacheKey(row)
+				if cached := strings.TrimSpace(p.detailFASTACache[cacheKey]); cached != "" {
+					return detailFASTALoadedItem(cached), true, nil
+				}
+				if p.loadBlastFASTA == nil {
+					return tui.DetailItem{
+						Label:       "FASTA",
+						Value:       "Sequence loading is unavailable in this context.",
+						ActionLabel: "Click here",
+						ActionHint:  "or press Enter to retry",
+						ActionKey:   "Enter",
+					}, true, nil
+				}
+				sequence, err := p.loadBlastFASTA(row)
+				if err != nil {
+					return tui.DetailItem{}, true, err
+				}
+				p.detailFASTACache[cacheKey] = strings.TrimSpace(sequence)
+				return detailFASTALoadedItem(sequence), true, nil
+			},
 		})
 		if err != nil {
 			return BlastRowSelection{}, err
@@ -3210,7 +3512,12 @@ func buildKeywordSelectionTable(rows []model.KeywordResultRow) ([]tui.TableColum
 		for _, def := range defs {
 			cells = append(cells, def.Value(row))
 		}
-		tableRows = append(tableRows, tui.TableRow{Cells: cells, Group: strings.TrimSpace(row.SearchTerm), Detail: keywordRowDetail(row)})
+		tableRows = append(tableRows, tui.TableRow{
+			Cells:       cells,
+			Group:       strings.TrimSpace(row.SearchTerm),
+			Detail:      keywordRowDetail(row),
+			DetailPages: keywordRowDetailPages(row),
+		})
 	}
 	return columns, tableRows
 }
@@ -3233,7 +3540,11 @@ func buildBlastSelectionTable(rows []model.BlastResultRow) ([]tui.TableColumn, [
 		for _, def := range defs {
 			cells = append(cells, def.Value(row))
 		}
-		tableRows = append(tableRows, tui.TableRow{Cells: cells, Detail: blastRowDetail(row)})
+		tableRows = append(tableRows, tui.TableRow{
+			Cells:       cells,
+			Detail:      blastRowDetail(row),
+			DetailPages: blastRowDetailPages(row),
+		})
 	}
 	return columns, tableRows
 }
@@ -3300,12 +3611,44 @@ func blastDisplayColumns(rows []model.BlastResultRow) []tableColumnValue[model.B
 				return blastLabelName(row)
 			},
 		},
+		"labelname_type": {
+			ID:       "labelname_type",
+			Header:   ColumnCompactHeader("labelname_type", options),
+			Sortable: true,
+			Value: func(row model.BlastResultRow) string {
+				return strings.TrimSpace(row.LabelNameType)
+			},
+		},
+		"phgo_alias": {
+			ID:       "phgo_alias",
+			Header:   ColumnCompactHeader("phgo_alias", options),
+			Sortable: true,
+			Value: func(row model.BlastResultRow) string {
+				return strings.TrimSpace(row.PhgoAliases)
+			},
+		},
 		"protein": {
 			ID:       "protein",
 			Header:   ColumnCompactHeader("protein", options),
 			Sortable: true,
 			Value: func(row model.BlastResultRow) string {
 				return firstNonEmptyText(row.Protein, row.SubjectID)
+			},
+		},
+		"blast_labelname": {
+			ID:       "blast_labelname",
+			Header:   ColumnCompactHeader("blast_labelname", options),
+			Sortable: true,
+			Value: func(row model.BlastResultRow) string {
+				return strings.TrimSpace(row.BlastLabelName)
+			},
+		},
+		"blast_geneid": {
+			ID:       "blast_geneid",
+			Header:   ColumnCompactHeader("blast_geneid", options),
+			Sortable: true,
+			Value: func(row model.BlastResultRow) string {
+				return strings.TrimSpace(row.BlastGeneID)
 			},
 		},
 		"percent_identity": {
@@ -3660,6 +4003,22 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 				return keywordLabelName(row)
 			},
 		},
+		"labelname_type": {
+			ID:       "labelname_type",
+			Header:   ColumnCompactHeader("labelname_type", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return strings.TrimSpace(row.LabelNameType)
+			},
+		},
+		"phgo_alias": {
+			ID:       "phgo_alias",
+			Header:   ColumnCompactHeader("phgo_alias", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return keywordPhgoAliases(row)
+			},
+		},
 		"transcript": {
 			ID:       "transcript",
 			Header:   ColumnCompactHeader("transcript", options),
@@ -3761,7 +4120,7 @@ func (p *Prompter) ExportBaseName(label string, backTarget error) (string, error
 	result, err := tui.RunTextInputPage(tui.TextInputPage{
 		Path:        p.tuiPath("Startup", "Export", "File name"),
 		Title:       promptLabel,
-		Description: p.t("Enter one base name without extension. The program will create both '<name>.xlsx' and '<name>.txt'."),
+		Description: p.t("Enter one base name without extension. The program will create both '<name>.xlsx' and '<name>.fasta'."),
 		Label:       p.t("File name"),
 		AllowEmpty:  false,
 		AllowBack:   true,
@@ -3789,7 +4148,7 @@ func (p *Prompter) ExportSettings(label string, allowFolder bool, allowEmptyFile
 	}
 	message := "Enter export settings before generating files."
 	if mentionBlastHeaderFallback {
-		message = "Enter export settings before generating files. If this BLAST query has no label name, this file name will also be used inside the TXT/FASTA title header; using a gene label name is recommended."
+		message = "Enter export settings before generating files. If this BLAST query has no label name, this file name will also be used inside the FASTA title header; using a gene label name is recommended."
 	}
 	result, err := tui.RunExportSettingsModal(tui.ExportSettingsPage{
 		Path:           p.tuiPath("Startup", "Export", "Settings"),
@@ -3806,6 +4165,7 @@ func (p *Prompter) ExportSettings(label string, allowFolder bool, allowEmptyFile
 		WriteText:      true,
 		WriteExcel:     true,
 		WriteRawExcel:  false,
+		UsePhgoHeader:  true,
 	})
 	if err != nil {
 		return ExportSettings{}, err
@@ -3824,6 +4184,7 @@ func (p *Prompter) ExportSettings(label string, allowFolder bool, allowEmptyFile
 		WriteText:     result.WriteText,
 		WriteExcel:    result.WriteExcel,
 		WriteRawExcel: result.WriteRawExcel,
+		UsePhgoHeader: result.UsePhgoHeader,
 	}, nil
 }
 
@@ -4158,6 +4519,10 @@ func keywordLabelName(row model.KeywordResultRow) string {
 	return strings.TrimSpace(row.LabelName)
 }
 
+func keywordPhgoAliases(row model.KeywordResultRow) string {
+	return strings.TrimSpace(row.PhgoAliases)
+}
+
 func blastLabelName(row model.BlastResultRow) string {
 	return strings.TrimSpace(row.LabelName)
 }
@@ -4167,12 +4532,16 @@ func keywordRowDetail(row model.KeywordResultRow) string {
 		"search_term":           row.SearchTerm,
 		"search_type":           row.SearchType,
 		"label_name":            keywordLabelName(row),
+		"labelname_type":        strings.TrimSpace(row.LabelNameType),
+		"phgo_alias":            keywordPhgoAliases(row),
 		"protein_id":            row.ProteinID,
 		"transcript":            row.TranscriptID,
 		"gene_identifier":       row.GeneIdentifier,
 		"genome":                row.Genome,
 		"location":              row.Location,
 		"alias":                 row.Aliases,
+		"symbols":               row.Symbols,
+		"synonyms":              row.Synonyms,
 		"uniprot":               row.UniProt,
 		"description":           row.Description,
 		"comments":              row.Comments,
@@ -4203,11 +4572,60 @@ func keywordRowDetail(row model.KeywordResultRow) string {
 	return strings.Join(lines, "\n")
 }
 
+func keywordRowDetailPages(row model.KeywordResultRow) []tui.DetailPage {
+	values := map[string]string{
+		"search_term":           row.SearchTerm,
+		"search_type":           row.SearchType,
+		"label_name":            keywordLabelName(row),
+		"labelname_type":        strings.TrimSpace(row.LabelNameType),
+		"phgo_alias":            keywordPhgoAliases(row),
+		"protein_id":            row.ProteinID,
+		"transcript":            row.TranscriptID,
+		"gene_identifier":       row.GeneIdentifier,
+		"genome":                row.Genome,
+		"location":              row.Location,
+		"alias":                 row.Aliases,
+		"symbols":               row.Symbols,
+		"synonyms":              row.Synonyms,
+		"uniprot":               row.UniProt,
+		"description":           row.Description,
+		"comments":              row.Comments,
+		"auto_define":           row.AutoDefine,
+		"gene_report_url":       row.GeneReportURL,
+		"sequence_header_label": row.SequenceHeaderLabel,
+		"sequence_id":           row.SequenceID,
+	}
+	include := func(id string) bool {
+		if id == "protein_id" && strings.TrimSpace(values[id]) == "" {
+			return false
+		}
+		return true
+	}
+	label := func(id string) string {
+		return ColumnDetailLabel(id, ColumnDisplayOptions{})
+	}
+	display := func(id string, value string) string {
+		return displayPreviewValue(value)
+	}
+	sourceIDs := []string{"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "protein_id", "transcript", "gene_identifier", "genome", "location", "description", "comments", "auto_define", "gene_report_url"}
+	annotationIDs := []string{"alias", "symbols", "synonyms", "uniprot", "sequence_header_label", "sequence_id"}
+	pages := make([]tui.DetailPage, 0, 4)
+	pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("Source", sourceIDs, values, label, display, include))
+	pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("Annotation", annotationIDs, values, label, display, include))
+	pages = appendDetailPageIfNotEmpty(pages, keywordExtraDetailPage(row))
+	pages = append(pages, tui.DetailPage{Title: "FASTA", Items: []tui.DetailItem{detailFASTALoadItem()}})
+	return pages
+}
+
 func blastRowDetail(row model.BlastResultRow) string {
 	values := map[string]string{
 		"source_database":                         row.SourceDatabase,
 		"blast_program":                           row.BlastProgram,
 		"label_name":                              blastLabelName(row),
+		"labelname_type":                          strings.TrimSpace(row.LabelNameType),
+		"phgo_alias":                              strings.TrimSpace(row.PhgoAliases),
+		"blast_labelname":                         strings.TrimSpace(row.BlastLabelName),
+		"blast_geneid":                            strings.TrimSpace(row.BlastGeneID),
 		"hit_number":                              fmt.Sprintf("%d", row.HitNumber),
 		"hsp_number":                              fmt.Sprintf("%d", row.HSPNumber),
 		"protein":                                 row.Protein,
@@ -4282,6 +4700,101 @@ func blastRowDetail(row model.BlastResultRow) string {
 		lines = append(lines, blastDetailLabel(id, row)+": "+blastDetailDisplayValue(id, row, values[id]))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
+	values := map[string]string{
+		"source_database":                         row.SourceDatabase,
+		"blast_program":                           row.BlastProgram,
+		"label_name":                              blastLabelName(row),
+		"labelname_type":                          strings.TrimSpace(row.LabelNameType),
+		"phgo_alias":                              strings.TrimSpace(row.PhgoAliases),
+		"blast_labelname":                         strings.TrimSpace(row.BlastLabelName),
+		"blast_geneid":                            strings.TrimSpace(row.BlastGeneID),
+		"hit_number":                              fmt.Sprintf("%d", row.HitNumber),
+		"hsp_number":                              fmt.Sprintf("%d", row.HSPNumber),
+		"protein":                                 row.Protein,
+		"subject_id":                              firstNonEmptyText(row.SubjectID, row.Protein),
+		"species":                                 row.Species,
+		"e_value":                                 row.EValue,
+		"percent_identity":                        fmt.Sprintf("%.2f", row.PercentIdentity),
+		"uniprot_accession":                       strings.TrimSpace(row.UniProtAccession),
+		"uniprot_entry_name":                      strings.TrimSpace(row.UniProtEntryName),
+		"uniprot_reviewed":                        strings.TrimSpace(row.UniProtReviewed),
+		"uniprot_protein_name":                    strings.TrimSpace(row.UniProtProteinName),
+		"uniprot_gene_names":                      strings.TrimSpace(row.UniProtGeneNames),
+		"uniprot_organism":                        strings.TrimSpace(row.UniProtOrganism),
+		"uniprot_organism_id":                     strings.TrimSpace(row.UniProtOrganismID),
+		"uniprot_keywords":                        strings.TrimSpace(row.UniProtKeywords),
+		"uniprot_ec":                              strings.TrimSpace(row.UniProtEC),
+		"uniprot_go":                              strings.TrimSpace(row.UniProtGO),
+		"uniprot_go_ids":                          strings.TrimSpace(row.UniProtGOIDs),
+		"uniprot_function":                        strings.TrimSpace(row.UniProtFunction),
+		"uniprot_catalytic_activity":              strings.TrimSpace(row.UniProtCatalyticActivity),
+		"uniprot_pathway":                         strings.TrimSpace(row.UniProtPathway),
+		"uniprot_subcellular_location":            strings.TrimSpace(row.UniProtSubcellularLocation),
+		"uniprot_protein_existence":               strings.TrimSpace(row.UniProtProteinExistence),
+		"uniprot_annotation_score":                strings.TrimSpace(row.UniProtAnnotationScore),
+		"uniprot_fragment":                        strings.TrimSpace(row.UniProtFragment),
+		"uniprot_sequence_caution":                strings.TrimSpace(row.UniProtSequenceCaution),
+		"uniprot_pfam":                            strings.TrimSpace(row.UniProtPfam),
+		"uniprot_interpro":                        strings.TrimSpace(row.UniProtInterPro),
+		"uniprot_domain":                          strings.TrimSpace(row.UniProtDomain),
+		"uniprot_region":                          strings.TrimSpace(row.UniProtRegion),
+		"uniprot_motif":                           strings.TrimSpace(row.UniProtMotif),
+		"uniprot_active_site":                     strings.TrimSpace(row.UniProtActiveSite),
+		"uniprot_binding_site":                    strings.TrimSpace(row.UniProtBindingSite),
+		"uniprot_alphafolddb":                     strings.TrimSpace(row.UniProtAlphaFoldDB),
+		"uniprot_pdb":                             strings.TrimSpace(row.UniProtPDB),
+		"interpro_conserved_region_status":        strings.TrimSpace(row.InterProConservedRegionStatus),
+		"interpro_entry_name":                     strings.TrimSpace(row.InterProEntryName),
+		"interpro_entry_type":                     strings.TrimSpace(row.InterProEntryType),
+		"interpro_coverage_percent":               strings.TrimSpace(row.InterProCoveragePercent),
+		"interpro_match_regions":                  strings.TrimSpace(row.InterProMatchRegions),
+		"interpro_accessions":                     strings.TrimSpace(row.InterProAccessions),
+		"interpro_signature_accessions":           strings.TrimSpace(row.InterProSignatureAccessions),
+		"interpro_pfam_accessions":                strings.TrimSpace(row.InterProPfamAccessions),
+		"target_uniprot_canonical_length_percent": strings.TrimSpace(row.TargetUniProtCanonicalLengthPercent),
+		"align_query_length_percent":              blastAlignQueryLengthPercent(row),
+		"target_length":                           fmt.Sprintf("%d", row.TargetLength),
+		"align_len":                               fmt.Sprintf("%d", row.AlignLength),
+		"strands":                                 row.Strands,
+		"query_id":                                row.QueryID,
+		"query_from":                              fmt.Sprintf("%d", row.QueryFrom),
+		"query_to":                                fmt.Sprintf("%d", row.QueryTo),
+		"target_from":                             fmt.Sprintf("%d", row.TargetFrom),
+		"target_to":                               fmt.Sprintf("%d", row.TargetTo),
+		"bitscore":                                fmt.Sprintf("%.2f", row.Bitscore),
+		"mismatches":                              fmt.Sprintf("%d", row.Mismatches),
+		"gap_openings":                            fmt.Sprintf("%d", row.GapOpenings),
+		"identical":                               fmt.Sprintf("%d", row.Identical),
+		"positives":                               fmt.Sprintf("%d", row.Positives),
+		"gaps":                                    fmt.Sprintf("%d", row.Gaps),
+		"query_length":                            fmt.Sprintf("%d", row.QueryLength),
+		"uniprot_canonical_length":                strings.TrimSpace(row.UniProtCanonicalLength),
+		"jbrowse_name":                            row.JBrowseName,
+		"target_id":                               fmt.Sprintf("%d", row.TargetID),
+		"sequence_id":                             row.SequenceID,
+		"transcript_id":                           row.TranscriptID,
+		"defline":                                 row.Defline,
+		"gene_report_url":                         row.GeneReportURL,
+	}
+	label := func(id string) string {
+		return blastDetailLabel(id, row)
+	}
+	display := func(id string, value string) string {
+		return blastDetailDisplayValue(id, row, value)
+	}
+	pages := make([]tui.DetailPage, 0, 4)
+	pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("Source", blastRowPrimaryDetailIDs(row), values, label, display, nil))
+	if row.UniProtReferenceEnabled {
+		pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("UniProt", blastDetailUniProtColumnIDs, values, label, display, nil))
+	}
+	if row.InterProReferenceEnabled {
+		pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("InterPro", blastDetailInterProColumnIDs, values, label, display, nil))
+	}
+	pages = append(pages, tui.DetailPage{Title: "FASTA", Items: []tui.DetailItem{detailFASTALoadItem()}})
+	return pages
 }
 
 func blastDetailDisplayValue(id string, row model.BlastResultRow, value string) string {

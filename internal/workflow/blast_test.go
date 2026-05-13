@@ -20,10 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KiriKirby/phytozome-go/internal/labelname"
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
+	"github.com/KiriKirby/phytozome-go/internal/source"
 	"github.com/KiriKirby/phytozome-go/internal/uniprot"
 )
 
@@ -65,18 +67,19 @@ func TestNormalizeGeneReportURL(t *testing.T) {
 	}
 }
 
-func TestBuildQuerySequenceLabel(t *testing.T) {
-	if got := buildQuerySequenceLabel("A.thaliana", "C4H"); got != "AtC4H" {
-		t.Fatalf("unexpected arabidopsis label: %q", got)
+func TestPrependQuerySequenceRecordPreservesProvidedLabel(t *testing.T) {
+	source := &model.QuerySequenceSource{
+		OrganismShort: "A.thaliana",
+		Annotation:    "TAIR10",
+		ProteinID:     "AT2G37040.1",
+		Sequence:      "MSTN",
 	}
-	if got := buildQuerySequenceLabel("A.thaliana", "AtCESA1"); got != "AtCESA1" {
-		t.Fatalf("unexpected prefixed arabidopsis label: %q", got)
+	records := prependQuerySequenceRecord(nil, source, "ATPAL1")
+	if len(records) != 1 {
+		t.Fatalf("expected one query record, got %d", len(records))
 	}
-	if got := buildQuerySequenceLabel("A.thaliana", "ATPAL1"); got != "AtPAL1" {
-		t.Fatalf("unexpected uppercase arabidopsis label: %q", got)
-	}
-	if got := buildQuerySequenceLabel("S.polyrhiza", "Spipo1"); got != "Spipo1" {
-		t.Fatalf("unexpected non-arabidopsis label: %q", got)
+	if !strings.Contains(records[0].Header, "(ATPAL1)") {
+		t.Fatalf("query header did not preserve provided label: %q", records[0].Header)
 	}
 }
 
@@ -100,6 +103,7 @@ func TestExportSettingsFromPromptKeepsFileTypeToggles(t *testing.T) {
 		WriteText:     true,
 		WriteExcel:    false,
 		WriteRawExcel: true,
+		UsePhgoHeader: true,
 	}, "C4H", "out")
 
 	if settings.BaseName != "C4H" || settings.OutputDir != "out" || !settings.WriteReport {
@@ -108,23 +112,26 @@ func TestExportSettingsFromPromptKeepsFileTypeToggles(t *testing.T) {
 	if !settings.WriteText || settings.WriteExcel || !settings.WriteRawExcel {
 		t.Fatalf("file type toggles not preserved: %#v", settings)
 	}
+	if !settings.UsePhgoHeader {
+		t.Fatalf("phgo header toggle not preserved: %#v", settings)
+	}
 }
 
 func TestFilesSummaryIncludesRawText(t *testing.T) {
 	summary := filesSummary(exportFileResult{
-		TextPath:     filepath.Join("out", "PAL.txt"),
+		TextPath:     filepath.Join("out", "PAL.fasta"),
 		RawExcelPath: filepath.Join("out", "PAL_raw.xlsx"),
-		RawTextPath:  filepath.Join("out", "PAL_raw.txt"),
+		RawTextPath:  filepath.Join("out", "PAL_raw.fasta"),
 	})
 
-	if !strings.Contains(summary, "Raw text") || !strings.Contains(summary, "PAL_raw.txt") {
+	if !strings.Contains(summary, "Raw text") || !strings.Contains(summary, "PAL_raw.fasta") {
 		t.Fatalf("raw text missing from files summary:\n%s", summary)
 	}
 }
 
 func TestInspectBlastGeneratedFilesIncludesRawText(t *testing.T) {
 	dir := t.TempDir()
-	rawTextPath := filepath.Join(dir, "PAL_raw.txt")
+	rawTextPath := filepath.Join(dir, "PAL_raw.fasta")
 	if err := os.WriteFile(rawTextPath, []byte(">PAL1\nMAAA\n"), 0o600); err != nil {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
@@ -136,14 +143,14 @@ func TestInspectBlastGeneratedFilesIncludesRawText(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("generated file count = %d, want 1", len(files))
 	}
-	if files[0].Name != "PAL_raw.txt" || files[0].Type != "raw BLAST peptide text" {
+	if files[0].Name != "PAL_raw.fasta" || files[0].Type != "raw BLAST peptide text" {
 		t.Fatalf("raw text file metadata not captured: %#v", files[0])
 	}
 }
 
 func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
 	dir := t.TempDir()
-	rawTextPath := filepath.Join(dir, "keyword_raw.txt")
+	rawTextPath := filepath.Join(dir, "keyword_raw.fasta")
 	if err := os.WriteFile(rawTextPath, []byte(">hit\nMAAA\n"), 0o600); err != nil {
 		t.Fatalf("write raw text fixture: %v", err)
 	}
@@ -155,7 +162,7 @@ func TestInspectKeywordGeneratedFilesIncludesRawText(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("generated file count = %d, want 1", len(files))
 	}
-	if files[0].Name != "keyword_raw.txt" || files[0].Type != "raw peptide text" {
+	if files[0].Name != "keyword_raw.fasta" || files[0].Type != "raw peptide text" {
 		t.Fatalf("raw keyword text file metadata not captured: %#v", files[0])
 	}
 }
@@ -340,19 +347,6 @@ func TestDetectFamilyBlastGroupsStripsMemberIndex(t *testing.T) {
 	}
 	if got["4CL"] != 2 {
 		t.Fatalf("4CL group size = %d, want 2; groups=%#v", got["4CL"], groups)
-	}
-}
-
-func TestDetectFamilyBlastGroupsCanStripArabidopsisPrefixWhenEnabled(t *testing.T) {
-	items := []blastQueryItem{{LabelName: "ATPAL1"}, {LabelName: "ATPAL2"}}
-	settings := model.DefaultFamilyBlastSettings()
-	settings.StripArabidopsisPrefix = true
-	groups := detectFamilyBlastGroups(items, settings)
-	if len(groups) != 1 {
-		t.Fatalf("group count = %d, want 1: %#v", len(groups), groups)
-	}
-	if groups[0].Name != "PAL" {
-		t.Fatalf("family name = %q, want PAL", groups[0].Name)
 	}
 }
 
@@ -644,25 +638,6 @@ func TestBlastTXTHeaderLabelFallsBackToFileName(t *testing.T) {
 	}
 }
 
-func TestPrependQuerySequenceRecordUsesProvidedHeaderLabel(t *testing.T) {
-	source := &model.QuerySequenceSource{
-		OrganismShort: "A.thaliana",
-		Annotation:    "TAIR10",
-		ProteinID:     "AT2G37040.1",
-		Sequence:      "MSTN",
-	}
-	records := prependQuerySequenceRecord(nil, source, "AtPAL1")
-	if len(records) != 1 {
-		t.Fatalf("expected one query record, got %d", len(records))
-	}
-	if !strings.Contains(records[0].Header, "(AtPAL1)") {
-		t.Fatalf("query header did not use label: %q", records[0].Header)
-	}
-	if strings.Contains(records[0].Header, "ATPAL1_export") {
-		t.Fatalf("query header was polluted by file name: %q", records[0].Header)
-	}
-}
-
 func TestFamilyTXTHeaderLabelPrefersQueryIdentityBeforeFallback(t *testing.T) {
 	source := &model.QuerySequenceSource{
 		LabelName:    "",
@@ -738,7 +713,7 @@ func TestAutoIdentifyKeywordLabelsUsesBestAliasCandidate(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyKeywordLabelsPrefersReadableCuratedLemnaLabel(t *testing.T) {
+func TestAutoIdentifyKeywordLabelsDoesNotSpecialCaseLemnaLocalRows(t *testing.T) {
 	groups := []model.KeywordSearchGroup{{
 		SearchTerm: "CYP73A38",
 		Rows: []model.KeywordResultRow{{
@@ -751,8 +726,27 @@ func TestAutoIdentifyKeywordLabelsPrefersReadableCuratedLemnaLabel(t *testing.T)
 	}}
 
 	labels := autoIdentifyKeywordLabels(groups)
-	if len(labels) != 1 || labels[0] != "C4H" {
-		t.Fatalf("unexpected curated lemna auto labels: %#v", labels)
+	if len(labels) != 1 || labels[0] != "P48522" {
+		t.Fatalf("generic keyword auto labels should not apply Lemna-specific fallback ordering: %#v", labels)
+	}
+}
+
+func TestAutoIdentifyKeywordLabelsFallsBackToPhytozomeRowMetadataWhenSynonymsMissing(t *testing.T) {
+	groups := []model.KeywordSearchGroup{{
+		SearchTerm: "Os4CL1",
+		Rows: []model.KeywordResultRow{{
+			SourceDatabase: "phytozome",
+			UniProt:        "LOC_Os08g14760.1: P17814; LOC_Os08g14760.1: 4CL1_ORYSJ",
+			Description:    "AMP-binding domain containing protein, expressed",
+			AutoDefine:     "(1 of 8) 6.2.1.12 - 4-coumarate--CoA ligase. / 4-coumaryl-CoA synthetase.",
+			TranscriptID:   "LOC_Os08g14760.1",
+			GeneIdentifier: "LOC_Os08g14760",
+		}},
+	}}
+
+	labels := autoIdentifyKeywordLabels(groups)
+	if len(labels) != 1 || labels[0] != "4CL1" {
+		t.Fatalf("expected phytozome keyword fallback to preserve row metadata label, got %#v", labels)
 	}
 }
 
@@ -764,6 +758,140 @@ func TestKeywordProteinSequenceHeaderUsesLabelName(t *testing.T) {
 	}
 	if got := keywordProteinSequenceHeader(row); got != ">Spirodela polyrhiza|Sp9509d020g000340_T001 (C4H)" {
 		t.Fatalf("unexpected keyword sequence header: %q", got)
+	}
+}
+
+func TestApplyOriginalHeadersRestoresOriginalHeader(t *testing.T) {
+	records := []model.ProteinSequenceRecord{{
+		Header:         ">phgo://species/PAL1/AT2G37040/1",
+		OriginalHeader: ">Arabidopsis thaliana TAIR10|AT2G37040.1 (PAL1)",
+		SourceKey:      "keyword|phytozome|AT2G37040.1|AT2G37040.1|AT2G37040",
+		Sequence:       "MPEPTIDE",
+	}}
+	got := applyOriginalHeaders(records)
+	if got[0].Header != records[0].OriginalHeader {
+		t.Fatalf("header = %q, want original %q", got[0].Header, records[0].OriginalHeader)
+	}
+}
+
+func TestBlastProteinSequenceHeaderPrefersBestAvailableIdentifier(t *testing.T) {
+	tests := []struct {
+		name string
+		row  model.BlastResultRow
+		want string
+	}{
+		{
+			name: "protein",
+			row:  model.BlastResultRow{Protein: "AT2G37040.1", SequenceID: "seq", TranscriptID: "tx", SubjectID: "sub"},
+			want: ">AT2G37040.1",
+		},
+		{
+			name: "sequence id fallback",
+			row:  model.BlastResultRow{SequenceID: "Sp9509d020g000340_T001", TranscriptID: "tx", SubjectID: "sub"},
+			want: ">Sp9509d020g000340_T001",
+		},
+		{
+			name: "transcript fallback",
+			row:  model.BlastResultRow{TranscriptID: "LOC_Os01g01010.1", SubjectID: "sub"},
+			want: ">LOC_Os01g01010.1",
+		},
+		{
+			name: "subject fallback",
+			row:  model.BlastResultRow{SubjectID: "transcript1"},
+			want: ">transcript1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := blastProteinSequenceHeader(tt.row); got != tt.want {
+				t.Fatalf("blastProteinSequenceHeader()=%q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKeywordSequenceRecordSourceKeyIsStable(t *testing.T) {
+	row := model.KeywordResultRow{
+		SourceDatabase: "phytozome",
+		SequenceID:     "AT2G37040.1",
+		TranscriptID:   "AT2G37040.1",
+		GeneIdentifier: "AT2G37040",
+	}
+	got := keywordSequenceRecordSourceKey(row)
+	want := "keyword|phytozome|AT2G37040.1|AT2G37040.1|AT2G37040"
+	if got != want {
+		t.Fatalf("keywordSequenceRecordSourceKey()=%q want %q", got, want)
+	}
+}
+
+func TestBuildKeywordSequenceAuditMatchesBySourceKeyNotHeader(t *testing.T) {
+	rows := []model.KeywordResultRow{{
+		SourceDatabase:      "phytozome",
+		SearchTerm:          "PAL",
+		LabelName:           "PAL1",
+		SequenceHeaderLabel: "Arabidopsis thaliana TAIR10",
+		TranscriptID:        "AT2G37040.1",
+		SequenceID:          "AT2G37040.1",
+		GeneIdentifier:      "AT2G37040",
+	}}
+	records := []model.ProteinSequenceRecord{{
+		Header:         ">some-real-source-header",
+		OriginalHeader: ">some-real-source-header",
+		SourceKey:      keywordSequenceRecordSourceKey(rows[0]),
+		Sequence:       "MPEPTIDE",
+	}}
+	audit := buildKeywordSequenceAudit(rows, records)
+	if audit.WrittenCount != 1 || audit.SkippedCount != 0 {
+		t.Fatalf("unexpected audit counts: %#v", audit)
+	}
+	if len(audit.Records) != 1 || audit.Records[0].Status != "written" {
+		t.Fatalf("unexpected audit records: %#v", audit.Records)
+	}
+}
+
+func TestBuildPhgoHeaderIncludesRowNumber(t *testing.T) {
+	got := buildPhgoHeader("Sp7498", "PAL1", "AT2G37040", 7)
+	want := ">phgo://Sp7498/PAL1/AT2G37040/7"
+	if got != want {
+		t.Fatalf("buildPhgoHeader()=%q want %q", got, want)
+	}
+}
+
+func TestBuildPhgoHeaderOmitsRowNumberWhenZero(t *testing.T) {
+	got := buildPhgoHeader("Sp7498", "PAL1", "AT2G37040", 0)
+	want := ">phgo://Sp7498/PAL1/AT2G37040"
+	if got != want {
+		t.Fatalf("buildPhgoHeader()=%q want %q", got, want)
+	}
+}
+
+func TestBlastPhgoHeaderUsesBlastGeneIDOnly(t *testing.T) {
+	got := blastPhgoHeader(model.BlastResultRow{
+		Species:      "Sp7498",
+		LabelName:    "PAL1",
+		BlastGeneID:  "AT2G37040",
+		TranscriptID: "AT2G37040.1",
+		Protein:      "PAC:123456",
+		SequenceID:   "PAC:123456",
+		SubjectID:    "PAC:123456",
+	}, 7)
+	want := ">phgo://Sp7498/PAL1/AT2G37040/7"
+	if got != want {
+		t.Fatalf("blastPhgoHeader()=%q want %q", got, want)
+	}
+}
+
+func TestKeywordPhgoHeaderPrefersTranscriptID(t *testing.T) {
+	got := keywordPhgoHeader(model.KeywordResultRow{
+		SequenceHeaderLabel: "Athaliana_TAIR10",
+		LabelName:           "PAL1",
+		TranscriptID:        "AT2G37040.1",
+		GeneIdentifier:      "AT2G37040 (PAC:123456)",
+	}, 7)
+	want := ">phgo://Athaliana_TAIR10/PAL1/AT2G37040.1/7"
+	if got != want {
+		t.Fatalf("keywordPhgoHeader()=%q want %q", got, want)
 	}
 }
 
@@ -783,20 +911,6 @@ func TestMatchPhytozomeSpeciesForLemnaRequiresUniqueScientificName(t *testing.T)
 	}
 }
 
-func TestArabidopsisGeneSearchTermNormalizesIDs(t *testing.T) {
-	tests := map[string]string{
-		"At1g80820":          "At1g80820",
-		"gene:AT1G80820.1":   "At1g80820",
-		"foo|AT1G80820.1 xx": "At1g80820",
-		"Sp9509d005g008190":  "",
-	}
-	for input, want := range tests {
-		if got := arabidopsisGeneSearchTerm(input); got != want {
-			t.Fatalf("arabidopsisGeneSearchTerm(%q)=%q want %q", input, got, want)
-		}
-	}
-}
-
 func TestAutoIdentifyBlastLabelFromPhytozomeUsesBestAliasCandidate(t *testing.T) {
 	w := &BlastWizard{}
 	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
@@ -805,7 +919,14 @@ func TestAutoIdentifyBlastLabelFromPhytozomeUsesBestAliasCandidate(t *testing.T)
 			TranscriptID: "AT2G37040.1",
 		}},
 	}}
-	item := blastQueryItem{RawInput: ">A.thaliana TAIR10|AT2G37040.1\nMPEPTIDE"}
+	item := blastQueryItem{
+		RawInput: ">A.thaliana TAIR10|AT2G37040.1\nMPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID:    "AT2G37040.1",
+			TranscriptID: "AT2G37040.1",
+			GeneID:       "AT2G37040",
+		},
+	}
 
 	got := w.autoIdentifyBlastLabelFromPhytozome(context.Background(), src, model.SpeciesCandidate{ProteomeID: 167}, item)
 	if got != "PAL1" {
@@ -813,49 +934,15 @@ func TestAutoIdentifyBlastLabelFromPhytozomeUsesBestAliasCandidate(t *testing.T)
 	}
 }
 
-func TestBestAliasPrefersCanonicalFamilyStyleOverInternalPrefix(t *testing.T) {
-	if got := bestAlias("ATPAL1; PAL1"); got != "PAL1" {
-		t.Fatalf("bestAlias()=%q want PAL1", got)
-	}
-	if got := bestAlias("CYP84A1; FAH1; F5H1"); got != "F5H1" {
-		t.Fatalf("bestAlias()=%q want F5H1", got)
-	}
-	if got := bestAlias("CYP98A3; REF8"); got != "CYP98A3" {
-		t.Fatalf("bestAlias()=%q want CYP98A3", got)
-	}
-}
-
-func TestLabelFromAutoDefineFindsCompactFunctionalAlias(t *testing.T) {
-	if got := labelFromAutoDefine("(1 of 2) K09755 - ferulate-5-hydroxylase (CYP84A, F5H)"); got != "F5H" {
-		t.Fatalf("labelFromAutoDefine()=%q want F5H", got)
-	}
-	if got := labelFromAutoDefine("(1 of 1) K09754 - coumaroylquinate(coumaroylshikimate) 3'-monooxygenase (CYP98A3, C3'H)"); got != "C3'H" {
-		t.Fatalf("labelFromAutoDefine()=%q want C3'H", got)
-	}
-}
-
-func TestAutoIdentifyBlastLabelPrefersFastaParentheticalLabel(t *testing.T) {
+func TestAutoIdentifyBlastLabelUsesQuerySourceBeforeFastaHeaderFallback(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{
 		RawInput:    ">Arabidopsis thaliana TAIR10|AT5G62380.1 (AtVND6)\nMESLAHIPP",
-		QuerySource: &model.QuerySequenceSource{Aliases: "SOMETHINGELSE; VND6", LabelName: "SOMETHINGELSE"},
+		QuerySource: &model.QuerySequenceSource{SourceDatabase: "phytozome", Synonyms: "SOMETHINGELSE1; VND6"},
 	}
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "VND6" {
+	if got != "SOMETHINGELSE1" {
 		t.Fatalf("unexpected label: %q", got)
-	}
-}
-
-func TestFastaHeaderLabelNameOnlyStripsMixedCaseAt(t *testing.T) {
-	tests := map[string]string{
-		"Arabidopsis thaliana TAIR10|AT5G62380.1 (AtVND6)": "VND6",
-		"Arabidopsis thaliana TAIR10|AT5G62380.1 (VND6)":   "VND6",
-		"Arabidopsis thaliana TAIR10|AT5G62380.1 (ATVND6)": "ATVND6",
-	}
-	for input, want := range tests {
-		if got := fastaHeaderLabelName(input); got != want {
-			t.Fatalf("fastaHeaderLabelName(%q)=%q want %q", input, got, want)
-		}
 	}
 }
 
@@ -864,20 +951,36 @@ func TestAutoIdentifyBlastLabelUsesResolvedPhytozomeAliases(t *testing.T) {
 	item := blastQueryItem{QuerySource: &model.QuerySequenceSource{
 		SourceDatabase: "phytozome",
 		NormalizedURL:  "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT3G10340",
-		Aliases:        "PAL4; ATPAL4",
-		LabelName:      "PAL4",
+		Synonyms:       "ATPAL4",
+		Symbols:        "PAL4",
 	}}
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "PAL4" {
+	if got != "ATPAL4" {
 		t.Fatalf("unexpected label: %q", got)
 	}
 }
 
-func TestAutoIdentifyBlastLabelResultKeepsFastaHeaderLabelAndRetainsKeywordAliases(t *testing.T) {
+func TestPhytozomeRawBlastAliasesAreNotReusableUntilRanked(t *testing.T) {
+	items := []blastQueryItem{{QuerySource: &model.QuerySequenceSource{
+		SourceDatabase: "phytozome",
+		Synonyms:       "ATPAL4; PAL4",
+		Symbols:        "PAL4",
+		AutoDefine:     "phenylalanine ammonia-lyase 4",
+	}}}
+	if blastItemsHaveReusableAliases(items) {
+		t.Fatalf("raw synonyms/symbols/auto_define should be sent to labelname, not treated as reusable phgo_alias")
+	}
+	items[0].QuerySource.PhgoAliases = "PAL4; ATPAL4"
+	if !blastItemsHaveReusableAliases(items) {
+		t.Fatalf("ranked phgo_alias should be reusable")
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultUsesDatabaseAliasesBeforeFastaHeaderFallback(t *testing.T) {
 	w := &BlastWizard{}
 	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
-		"AT1G01010.1": {{Aliases: "NAC001; ANAC001", LabelName: "NAC001", AutoDefine: "NAC domain protein"}},
-		"AT1G01010":   {{Aliases: "NAC001; ANAC001", LabelName: "NAC001", AutoDefine: "NAC domain protein"}},
+		"AT1G01010.1": {{Synonyms: "NAC001; ANAC001", AutoDefine: "NAC domain protein", SourceDatabase: "phytozome"}},
+		"AT1G01010":   {{Synonyms: "NAC001; ANAC001", AutoDefine: "NAC domain protein", SourceDatabase: "phytozome"}},
 	}}
 	item := blastQueryItem{
 		RawInput: ">A.thaliana TAIR10|AT1G01010.1 (OldName)\nMPEPTIDE",
@@ -885,23 +988,15 @@ func TestAutoIdentifyBlastLabelResultKeepsFastaHeaderLabelAndRetainsKeywordAlias
 			ProteinID:    "AT1G01010.1",
 			TranscriptID: "AT1G01010.1",
 			GeneID:       "AT1G01010",
-			LabelName:    "OldName",
 		},
 	}
 
 	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"}, item)
-	if result.Label != "OldName" {
-		t.Fatalf("label = %q, want FASTA header label OldName", result.Label)
+	if result.Label != "ANAC001" {
+		t.Fatalf("label = %q, want database synonym ANAC001", result.Label)
 	}
-	found := false
-	for _, alias := range result.Aliases {
-		if alias == "ANAC001" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("aliases = %#v, want ANAC001 retained", result.Aliases)
+	if containsString(result.Aliases, "OldName") {
+		t.Fatalf("aliases = %#v, want FASTA header ignored when database candidates exist", result.Aliases)
 	}
 }
 
@@ -939,10 +1034,10 @@ func TestAutoIdentifyBlastLabelResultUsesDraggedFastaFileHeaderSpecies(t *testin
 	}
 }
 
-func TestAutoIdentifyBlastLabelResultDoesNotLetDatabaseAliasOverrideFastaHeaderLabel(t *testing.T) {
+func TestAutoIdentifyBlastLabelResultLetsDatabaseAliasOverrideFastaHeaderFallback(t *testing.T) {
 	w := &BlastWizard{}
 	src := keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
-		"AT5G62380.1": {{Aliases: "VND6; ANAC101", LabelName: "VND6", AutoDefine: "vascular related NAC domain 6"}},
+		"AT5G62380.1": {{Synonyms: "VND6; ANAC101", AutoDefine: "vascular related NAC domain 6", SourceDatabase: "phytozome"}},
 	}}
 	item := blastQueryItem{
 		RawInput: ">Arabidopsis thaliana TAIR10|AT5G62380.1 (HeaderName)\nMESLAHIPP",
@@ -951,17 +1046,15 @@ func TestAutoIdentifyBlastLabelResultDoesNotLetDatabaseAliasOverrideFastaHeaderL
 			ProteinID:      "AT5G62380.1",
 			TranscriptID:   "AT5G62380.1",
 			GeneID:         "AT5G62380",
-			LabelName:      "HeaderName",
 		},
-		LabelName: "HeaderName",
 	}
 
 	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"}, item)
-	if result.Label != "HeaderName" {
-		t.Fatalf("label = %q, want FASTA header label HeaderName", result.Label)
+	if result.Label != "ANAC101" {
+		t.Fatalf("label = %q, want database synonym ANAC101", result.Label)
 	}
-	if !containsString(result.Aliases, "VND6") {
-		t.Fatalf("aliases = %#v, want database alias retained without overriding label", result.Aliases)
+	if containsString(result.Aliases, "HeaderName") {
+		t.Fatalf("aliases = %#v, want FASTA header ignored when database candidates exist", result.Aliases)
 	}
 }
 
@@ -978,9 +1071,8 @@ func TestSupplementBlastAliasesPreservesExistingFastaLabels(t *testing.T) {
 	if len(items) == 0 {
 		t.Fatal("sample FASTA parsed no items")
 	}
-	originalLabel := items[0].LabelName
-	if originalLabel == "" {
-		t.Fatal("sample FASTA should already contain a parenthetical label")
+	if items[0].LabelName != "" {
+		t.Fatalf("sample FASTA should not directly set parenthetical label, got %q", items[0].LabelName)
 	}
 	w := &BlastWizard{}
 	src := keywordMapSource{
@@ -998,13 +1090,13 @@ func TestSupplementBlastAliasesPreservesExistingFastaLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("supplement aliases: %v", err)
 	}
-	if got := out[0].LabelName; got != originalLabel {
-		t.Fatalf("label changed to %q, want preserved %q", got, originalLabel)
+	if got := out[0].LabelName; got != "" {
+		t.Fatalf("label changed to %q, want unchanged blank label", got)
 	}
 	if got := out[0].QuerySource.ProteinID; got != "AT2G29130.1" {
 		t.Fatalf("protein id = %q, want clean FASTA id AT2G29130.1", got)
 	}
-	aliases := splitAliasText(out[0].QuerySource.Aliases)
+	aliases := labelname.SplitAliases(out[0].QuerySource.PhgoAliases)
 	found := false
 	for _, alias := range aliases {
 		if alias == "TT10" {
@@ -1028,7 +1120,7 @@ func TestSupplementBlastAliasesPreservesExistingFastaLabels(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyBlastLabelFallsBackToResolvedIDs(t *testing.T) {
+func TestAutoIdentifyBlastLabelResultFallsBackToResolvedIDs(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{QuerySource: &model.QuerySequenceSource{
 		SourceDatabase: "phytozome",
@@ -1043,67 +1135,255 @@ func TestAutoIdentifyBlastLabelFallsBackToResolvedIDs(t *testing.T) {
 	}
 }
 
-func TestAutoIdentifyBlastLabelKeepsECStyleFastaHeaderLabel(t *testing.T) {
+func TestAutoIdentifyBlastLabelFallsBackToStructuredIDsWhenNoDatabaseCandidates(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{
-		RawInput: ">A.thaliana TAIR10|AT5G48930.1 (AtE2.3.1.133)\nMPEPTIDE",
+		RawInput: ">A.thaliana TAIR10|AT5G62380.1 (AtVND6)\nMPEPTIDE",
 		QuerySource: &model.QuerySequenceSource{
-			ProteinID:    "AT5G48930.1",
-			TranscriptID: "AT5G48930.1",
-			GeneID:       "AT5G48930",
-			LabelName:    "E2.3.1.133",
-			Aliases:      "E2.3.1.133",
+			ProteinID:    "AT5G62380.1",
+			TranscriptID: "AT5G62380.1",
+			GeneID:       "AT5G62380",
 		},
 	}
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "E2.3.1.133" {
-		t.Fatalf("unexpected FASTA header label: %q", got)
+	if got != "AT5G62380.1" {
+		t.Fatalf("unexpected ID fallback label: %q", got)
 	}
 }
 
-func TestAutoIdentifyBlastLabelKeepsLowercaseFastaHeaderLabel(t *testing.T) {
-	w := &BlastWizard{}
-	item := blastQueryItem{
-		RawInput: ">A.thaliana TAIR10|AT1G52760.1 (AtLysoPL2)\nMPEPTIDE",
-		QuerySource: &model.QuerySequenceSource{
-			ProteinID:    "AT1G52760.1",
-			TranscriptID: "AT1G52760.1",
-			GeneID:       "AT1G52760",
-			LabelName:    "LysoPL2",
-			Aliases:      "LysoPL2",
+func TestAutoIdentifyLemnaBlastSourceLabelPrefersPhytozomeThenLocalThenStructuredIDFallback(t *testing.T) {
+	src := keywordMapSource{
+		name: "phytozome",
+		candidates: []model.SpeciesCandidate{
+			{SearchAlias: "Spirodela polyrhiza", GenomeLabel: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2"},
+		},
+		rowsByKeyword: map[string][]model.KeywordResultRow{
+			"Sp9509d020g000340_T001": {{SourceDatabase: "phytozome", TranscriptID: "Sp9509d020g000340_T001", Synonyms: "CYP73A5; C4H"}},
 		},
 	}
-	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
-	if got != "LysoPL2" {
-		t.Fatalf("unexpected FASTA header label: %q", got)
+	w := &BlastWizard{source: lemna.NewClient(nil)}
+	item := blastQueryItem{
+		RawInput: ">Spirodela polyrhiza|Sp9509d020g000340_T001 (HeaderName)\nMPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			SourceDatabase: "lemna",
+			ProteinID:      "Sp9509d020g000340_T001",
+			TranscriptID:   "Sp9509d020g000340_T001",
+			LabelName:      "LOCAL_SHOULD_NOT_WIN",
+		},
+	}
+	result := w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"}, item)
+	if result.Label != "CYP73A5" {
+		t.Fatalf("Label = %q, want ranked Phytozome synonym", result.Label)
+	}
+	if containsString(result.Aliases, "HeaderName") || containsString(result.Aliases, "LOCAL_SHOULD_NOT_WIN") {
+		t.Fatalf("Aliases = %#v, want Phytozome aliases before Lemna local/header fallback", result.Aliases)
+	}
+
+	item.QuerySource.ProteinID = "missing"
+	item.QuerySource.TranscriptID = ""
+	item.QuerySource.LabelName = "C4H"
+	item.RawInput = ">Spirodela polyrhiza (HeaderName)\nMPEPTIDE"
+	result = w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"}, item)
+	if result.Label != "C4H" || !containsString(result.Aliases, "C4H") {
+		t.Fatalf("local fallback result = %#v, want Lemna local aliases", result)
+	}
+
+	item.QuerySource.LabelName = ""
+	item.QuerySource.PhgoAliases = ""
+	item.QuerySource.Aliases = ""
+	item.QuerySource.AutoDefine = ""
+	result = w.autoIdentifyBlastLabelResult(context.Background(), src, model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"}, item)
+	if result.Label != "missing" || !containsString(result.Aliases, "missing") {
+		t.Fatalf("ID fallback result = %#v, want structured ID fallback", result)
 	}
 }
 
-func TestBestTrustedAutoLabelPrefersCanonicalCompactSymbol(t *testing.T) {
-	if got := bestTrustedAutoLabel("CYP84A1", "F5H1", "LysoPL2"); got != "F5H1" {
-		t.Fatalf("bestTrustedAutoLabel()=%q want F5H1", got)
+func TestAutoIdentifyBlastHitLabelUsesPhytozomeFallbackAndSourceLabelLast(t *testing.T) {
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101", Symbols: "SHOULDNOTUSE", AutoDefine: "fallback auto"}},
+				"AT1G71930.1": {{SourceDatabase: "phytozome", TranscriptID: "AT1G71930.1", Symbols: "VND7", AutoDefine: "fallback auto"}},
+				"AT2G00000.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G00000.1", AutoDefine: "K12345 - made up protein (AUTO1)"}},
+			},
+		},
+	}
+	w := &BlastWizard{source: src}
+	rows := []model.BlastResultRow{
+		{TranscriptID: "AT5G62380.1"},
+		{TranscriptID: "AT1G71930.1"},
+		{TranscriptID: "AT2G00000.1"},
+		{TranscriptID: "AT3G00000.1"},
+		{TranscriptID: "AT5G62380.1"},
+	}
+	got := w.autoIdentifyBlastHitLabels(context.Background(), model.SpeciesCandidate{ProteomeID: 1}, blastQueryItem{LabelName: "SOURCE1"}, rows)
+	wants := []string{"ANAC101", "VND7", "AUTO1", "SOURCE1", "ANAC101"}
+	wantTypes := []string{"phytozome synonyms", "phytozome symbols", "phytozome auto_define", "blast source labelname fallback", "phytozome synonyms"}
+	for i := range wants {
+		if got[i].LabelName != wants[i] || got[i].LabelNameType != wantTypes[i] {
+			t.Fatalf("row %d label/type = %q/%q, want %q/%q", i, got[i].LabelName, got[i].LabelNameType, wants[i], wantTypes[i])
+		}
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.fetchCount["AT5G62380.1"] != 1 {
+		t.Fatalf("duplicate hit lookup count = %d, want 1", src.fetchCount["AT5G62380.1"])
 	}
 }
 
-func TestBestTrustedAutoLabelRejectsUntrustedCandidates(t *testing.T) {
-	if got := bestTrustedAutoLabel("E2.3.1.133", "LysoPL2"); got != "" {
-		t.Fatalf("bestTrustedAutoLabel()=%q want empty", got)
+func TestAutoIdentifyBlastHitLabelPopulatesHitPhgoAliases(t *testing.T) {
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+			},
+		},
+	}
+	w := &BlastWizard{source: src}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{ProteomeID: 1},
+		blastQueryItem{LabelName: "SOURCE1", QuerySource: &model.QuerySequenceSource{PhgoAliases: "SOURCE1; SOURCE_ALIAS"}},
+		[]model.BlastResultRow{{TranscriptID: "AT5G62380.1"}},
+	)
+	if got[0].LabelName == "" || got[0].PhgoAliases == "" {
+		t.Fatalf("expected hit label and hit phgo aliases: %#v", got[0])
+	}
+	if strings.Contains(got[0].PhgoAliases, "SOURCE_ALIAS") {
+		t.Fatalf("hit phgo_alias must not copy source aliases: %q", got[0].PhgoAliases)
 	}
 }
 
-func TestPrepareBlastExportItemAutoIdentifiesFallbackLabel(t *testing.T) {
+func TestAutoIdentifyBlastHitLabelSkipsKeywordLookupForExistingLabels(t *testing.T) {
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+			},
+		},
+	}
+	w := &BlastWizard{source: src}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{ProteomeID: 1},
+		blastQueryItem{LabelName: "SOURCE1"},
+		[]model.BlastResultRow{{TranscriptID: "AT5G62380.1", LabelName: "EXISTING"}},
+	)
+	if got[0].LabelName != "EXISTING" || got[0].LabelNameType != "existing row label_name" || got[0].PhgoAliases != "EXISTING" {
+		t.Fatalf("existing label row changed unexpectedly: %#v", got[0])
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if len(src.fetchCount) != 0 {
+		t.Fatalf("existing label row should not trigger keyword lookup, got %#v", src.fetchCount)
+	}
+}
+
+func TestAutoIdentifyBlastHitLabelReusesDuplicateHitIdentification(t *testing.T) {
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+			},
+		},
+	}
+	w := &BlastWizard{source: src}
+	rows := []model.BlastResultRow{
+		{TranscriptID: "AT5G62380.1", Protein: "AT5G62380.1", HSPNumber: 1},
+		{TranscriptID: "AT5G62380.1", Protein: "AT5G62380.1", HSPNumber: 2},
+	}
+	got := w.autoIdentifyBlastHitLabels(context.Background(), model.SpeciesCandidate{ProteomeID: 1}, blastQueryItem{LabelName: "SOURCE1"}, rows)
+	if got[0].LabelName == "" || got[0].LabelName != got[1].LabelName || got[0].PhgoAliases != got[1].PhgoAliases {
+		t.Fatalf("duplicate hits should reuse identical identification: %#v", got)
+	}
+	if blastHitLabelIdentificationCacheKey(got[0], "SOURCE1") != blastHitLabelIdentificationCacheKey(got[1], "SOURCE1") {
+		t.Fatalf("duplicate hit cache keys should match: %q vs %q", blastHitLabelIdentificationCacheKey(got[0], "SOURCE1"), blastHitLabelIdentificationCacheKey(got[1], "SOURCE1"))
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.fetchCount["AT5G62380.1"] != 1 {
+		t.Fatalf("duplicate hit lookup count = %d, want 1", src.fetchCount["AT5G62380.1"])
+	}
+}
+
+func TestAutoIdentifyBlastHitLabelReusesCachedIdentificationAcrossCalls(t *testing.T) {
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		source:                   src,
+		blastHitLabelLookupCache: make(map[string]blastHitLabelIdentification),
+	}
+	rows := []model.BlastResultRow{{TranscriptID: "AT5G62380.1", Protein: "AT5G62380.1"}}
+	first := w.autoIdentifyBlastHitLabels(context.Background(), model.SpeciesCandidate{ProteomeID: 1}, blastQueryItem{LabelName: "SOURCE1"}, rows)
+	second := w.autoIdentifyBlastHitLabels(context.Background(), model.SpeciesCandidate{ProteomeID: 1}, blastQueryItem{LabelName: "SOURCE1"}, rows)
+	if first[0].LabelName != "ANAC101" || second[0].LabelName != "ANAC101" {
+		t.Fatalf("cached hit label = %q/%q, want ANAC101", first[0].LabelName, second[0].LabelName)
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.fetchCount["AT5G62380.1"] != 1 {
+		t.Fatalf("cross-call hit lookup count = %d, want 1", src.fetchCount["AT5G62380.1"])
+	}
+}
+
+func TestAutoIdentifyLemnaBlastHitLabelFallsBackToLocalBeforeSourceLabel(t *testing.T) {
+	w := &BlastWizard{source: lemna.NewClient(nil)}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"},
+		blastQueryItem{LabelName: "SOURCE1"},
+		[]model.BlastResultRow{{
+			SourceDatabase: "lemna",
+			Protein:        "Sp9509d020g000340_T001",
+			Defline:        "cinnamate 4-hydroxylase (C4H)",
+		}},
+	)
+	if got[0].LabelName != "C4H" {
+		t.Fatalf("LabelName = %q, want Lemna local hit alias C4H", got[0].LabelName)
+	}
+	if got[0].LabelNameType != "lemna local aliases" {
+		t.Fatalf("LabelNameType = %q, want lemna local aliases", got[0].LabelNameType)
+	}
+	if got[0].PhgoAliases == "" || strings.Contains(got[0].PhgoAliases, "SOURCE1") {
+		t.Fatalf("PhgoAliases = %q, want local hit aliases without source label", got[0].PhgoAliases)
+	}
+}
+
+func TestAutoIdentifyLemnaBlastHitLabelUsesSourceLabelLast(t *testing.T) {
+	w := &BlastWizard{source: lemna.NewClient(nil)}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"},
+		blastQueryItem{LabelName: "SOURCE1"},
+		[]model.BlastResultRow{{SourceDatabase: "lemna", Protein: "Sp9509d020g000340_T001"}},
+	)
+	if got[0].LabelName != "SOURCE1" || got[0].LabelNameType != "blast source labelname fallback" {
+		t.Fatalf("got label/type = %q/%q, want source label fallback", got[0].LabelName, got[0].LabelNameType)
+	}
+	if got[0].PhgoAliases != "SOURCE1" {
+		t.Fatalf("PhgoAliases = %q, want source label as last-resort hit alias", got[0].PhgoAliases)
+	}
+}
+
+func TestPrepareBlastExportItemRequiresExistingSourceLabel(t *testing.T) {
 	w := &BlastWizard{}
 	item := blastQueryItem{QuerySource: &model.QuerySequenceSource{
 		GeneID:       "AT3G10340",
 		TranscriptID: "AT3G10340.1",
 		ProteinID:    "PAC:19660032",
 	}}
-	got, err := w.prepareBlastExportItem(item, false)
-	if err != nil {
-		t.Fatalf("prepareBlastExportItem returned error: %v", err)
-	}
-	if got.LabelName != "PAC:19660032" {
-		t.Fatalf("unexpected label: %q", got.LabelName)
+	if _, err := w.prepareBlastExportItem(item, false); err == nil {
+		t.Fatalf("prepareBlastExportItem should reject missing source label")
 	}
 }
 
@@ -1113,6 +1393,39 @@ func TestAutoIdentifyBlastLabelDoesNotFallbackForPlainProteinSequence(t *testing
 	got := w.autoIdentifyBlastLabel(context.Background(), keywordMapSource{}, model.SpeciesCandidate{}, item)
 	if got != "" {
 		t.Fatalf("plain protein sequence should not auto identify label, got %q", got)
+	}
+}
+
+func TestSupplementBlastAliasesUsesBatchRankedAliases(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G30490.1", Synonyms: "CYP73A5; REF3", Symbols: "C4H"}},
+				"AT5G13930.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G13930.1", Synonyms: "PAL1; ATPAL1", Symbols: "PAL1"}},
+			},
+		},
+	}
+	w := &BlastWizard{}
+	items := []blastQueryItem{
+		{QuerySource: &model.QuerySequenceSource{SourceDatabase: "phytozome", SourceProteomeID: 167, TranscriptID: "AT2G30490.1", ProteinID: "AT2G30490.1"}},
+		{QuerySource: &model.QuerySequenceSource{SourceDatabase: "phytozome", SourceProteomeID: 167, TranscriptID: "AT5G13930.1", ProteinID: "AT5G13930.1"}},
+	}
+	out, err := w.supplementBlastAliases(context.Background(), context.Background(), lookupSource, model.SpeciesCandidate{ProteomeID: 167}, items, nil)
+	if err != nil {
+		t.Fatalf("supplementBlastAliases returned error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("labeled items = %d, want 2", len(out))
+	}
+	if strings.TrimSpace(out[0].QuerySource.PhgoAliases) == "" {
+		t.Fatalf("first item missing label or aliases: %#v", out[0])
+	}
+	if strings.TrimSpace(out[1].QuerySource.PhgoAliases) == "" {
+		t.Fatalf("second item missing label or aliases: %#v", out[1])
+	}
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 || lookupSource.fetchCount["AT5G13930.1"] != 1 {
+		t.Fatalf("unexpected lookup counts: %#v", lookupSource.fetchCount)
 	}
 }
 
@@ -1184,6 +1497,69 @@ func TestApplyUniProtEntryPopulatesReferenceColumns(t *testing.T) {
 	}
 }
 
+func TestAnnotateFamilyBlastConsensusRowsUsesPrecomputedSemanticTokenList(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		BlastLabelName:                "C4H1",
+		Protein:                       "prot1",
+		UniProtProteinName:            "cinnamate 4 hydroxylase",
+		UniProtKeywords:               "phenylpropanoid",
+		InterProEntryName:             "Cytochrome P450",
+		InterProCoveragePercent:       "88.0",
+		InterProConservedRegionStatus: "present",
+	}}
+	out := annotateFamilyBlastConsensusRows(rows, "C4H", []string{"C4H1", "C4H2"}, []string{"cinnamate 4-hydroxylase"})
+	if len(out) != 1 {
+		t.Fatalf("annotated row count = %d, want 1", len(out))
+	}
+	if out[0].FamilySemanticAnnotationMatchCount == 0 {
+		t.Fatalf("expected semantic match evidence, got %#v", out[0])
+	}
+	if strings.TrimSpace(out[0].FamilySemanticAnnotationMatchTokens) == "" {
+		t.Fatalf("expected semantic match tokens, got %#v", out[0])
+	}
+}
+
+func TestPrioritizeFamilyBlastRowsMatchesPairwiseComparator(t *testing.T) {
+	settings := model.DefaultFamilyBlastSettings()
+	settings.UseUniProtReference = true
+	settings.UseInterProReference = true
+	rows := []model.BlastResultRow{
+		{
+			Protein:                             "protA",
+			UniProtAccession:                    "Q1",
+			UniProtReviewed:                     "reviewed",
+			InterProConservedRegionStatus:       "present",
+			InterProCoveragePercent:             "85",
+			TargetUniProtCanonicalLengthPercent: "101",
+			PercentIdentity:                     55,
+			AlignLength:                         300,
+			QueryLength:                         320,
+			Bitscore:                            250,
+			EValue:                              "1e-50",
+		},
+		{
+			Protein:                             "protB",
+			UniProtAccession:                    "Q2",
+			UniProtReviewed:                     "unreviewed",
+			InterProConservedRegionStatus:       "partial",
+			InterProCoveragePercent:             "42",
+			TargetUniProtCanonicalLengthPercent: "145",
+			PercentIdentity:                     48,
+			AlignLength:                         280,
+			QueryLength:                         320,
+			Bitscore:                            220,
+			EValue:                              "1e-30",
+		},
+	}
+	out := prioritizeFamilyBlastRows(rows, settings)
+	if len(out) != 2 {
+		t.Fatalf("prioritized row count = %d, want 2", len(out))
+	}
+	if !familyBlastRowLess(out[0], out[1], settings) {
+		t.Fatalf("sorted order must still satisfy comparator: %#v", out)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1191,6 +1567,384 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestLabelnameColumnMatrixCoversBothDatabasesAndModes(t *testing.T) {
+	for _, database := range []string{"phytozome", "lemna"} {
+		display := prompt.KeywordDisplayColumnIDs(database)
+		requireColumnsInOrder(t, database+" keyword display", display, []string{"label_name", "labelname_type", "phgo_alias"})
+		if database == "phytozome" {
+			rejectColumns(t, "phytozome keyword display", display, []string{"alias", "aliases", "symbols", "synonyms"})
+		}
+		detail := prompt.KeywordDetailColumnIDs(database)
+		exportIDs := prompt.KeywordExportColumnIDs(database, true, nil)
+		requireColumnsInOrder(t, database+" keyword detail", detail, []string{"label_name", "labelname_type", "phgo_alias"})
+		requireColumnsInOrder(t, database+" keyword export", exportIDs, []string{"label_name", "labelname_type", "phgo_alias"})
+	}
+
+	for _, database := range []string{"phytozome", "lemna"} {
+		for _, program := range []string{"BLASTN", "BLASTX", "TBLASTN", "BLASTP"} {
+			display := prompt.BlastDisplayColumnIDs(database, program, true, true)
+			requireColumnsInOrder(t, database+" "+program+" blast display", display, []string{"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid"})
+			requireColumns(t, database+" "+program+" blast display references", display, []string{"uniprot_accession", "interpro_entry_type"})
+			detail := prompt.BlastDetailColumnIDs(database, program, true, true)
+			exportIDs := prompt.BlastExportColumnIDs(database, true, true)
+			requireColumnsInOrder(t, database+" "+program+" blast detail", detail, []string{"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid"})
+			requireColumnsInOrder(t, database+" "+program+" blast export", exportIDs, []string{"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid"})
+		}
+	}
+}
+
+func TestBlastReportLineageDocumentsHitPhgoAliasAndQuerySourceColumns(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		SourceDatabase:                "lemna",
+		BlastProgram:                  "BLASTP",
+		LabelName:                     "C4H",
+		LabelNameType:                 "lemna local aliases",
+		PhgoAliases:                   "C4H; CYP73A5",
+		BlastLabelName:                "PAL1",
+		BlastGeneID:                   "Sp9509d011g001470",
+		Protein:                       "Sp9509d020g000340_T001",
+		UniProtReferenceEnabled:       true,
+		UniProtAccession:              "Q00001",
+		InterProReferenceEnabled:      true,
+		InterProConservedRegionStatus: "present",
+	}}
+	lineage := blastColumnLineage(rows, "lemna", "BLASTP", true, true)
+	phgo := findColumnLineage(lineage, "phgo_alias")
+	if phgo == nil {
+		t.Fatal("phgo_alias lineage missing")
+	}
+	if phgo.Source != "labelname system" {
+		t.Fatalf("phgo_alias source = %q, want labelname system", phgo.Source)
+	}
+	if !strings.Contains(phgo.Meaning, "BLAST hit row") || !strings.Contains(phgo.CollectionMethod, "BLAST-hit labelname") {
+		t.Fatalf("phgo_alias lineage does not describe hit-level aliases: %#v", *phgo)
+	}
+	if phgo.UsedInStats != "traceability" {
+		t.Fatalf("phgo_alias UsedInStats = %q, want traceability", phgo.UsedInStats)
+	}
+	for _, id := range []string{"blast_labelname", "blast_geneid"} {
+		col := findColumnLineage(lineage, id)
+		if col == nil {
+			t.Fatalf("%s lineage missing", id)
+		}
+		if col.Source != "BLAST query source" {
+			t.Fatalf("%s source = %q, want BLAST query source", id, col.Source)
+		}
+	}
+}
+
+func TestBlastFullReferenceAutoLabelSimulationKeepsHitAliasesSeparateFromSourceGrouping(t *testing.T) {
+	src := keywordMapSource{
+		name: "phytozome",
+		rowsByKeyword: map[string][]model.KeywordResultRow{
+			"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+			"AT1G71930.1": {{SourceDatabase: "phytozome", TranscriptID: "AT1G71930.1", Symbols: "VND7"}},
+		},
+	}
+	w := &BlastWizard{source: src}
+	item := blastQueryItem{
+		LabelName: "PAL1",
+		QuerySource: &model.QuerySequenceSource{
+			SourceDatabase:    "phytozome",
+			LabelName:         "PAL1",
+			PhgoAliases:       "PAL1; ATPAL1",
+			GeneID:            "AT2G37040",
+			ProteinID:         "AT2G37040.1",
+			SourceJBrowseName: "Athaliana_TAIR10",
+			SourceGenomeLabel: "Arabidopsis thaliana TAIR10",
+			Sequence:          "MPEPTIDE",
+		},
+	}
+	rows := []model.BlastResultRow{
+		{
+			SourceDatabase:                      "phytozome",
+			BlastProgram:                        "BLASTP",
+			Protein:                             "AT5G62380.1",
+			TranscriptID:                        "AT5G62380.1",
+			EValue:                              "1e-50",
+			PercentIdentity:                     80,
+			UniProtReferenceEnabled:             true,
+			UniProtAccession:                    "Q9SZZ8",
+			UniProtReviewed:                     "reviewed",
+			UniProtProteinName:                  "VND6 protein",
+			UniProtGeneNames:                    "VND6 ANAC101",
+			UniProtCanonicalLength:              "320",
+			TargetUniProtCanonicalLengthPercent: "100.00",
+			InterProReferenceEnabled:            true,
+			InterProConservedRegionStatus:       "present",
+			InterProEntryType:                   "family",
+			InterProCoveragePercent:             "95.00",
+		},
+		{
+			SourceDatabase:                "phytozome",
+			BlastProgram:                  "BLASTP",
+			Protein:                       "AT1G71930.1",
+			TranscriptID:                  "AT1G71930.1",
+			EValue:                        "1e-40",
+			PercentIdentity:               70,
+			UniProtReferenceEnabled:       true,
+			UniProtAccession:              "Q9M000",
+			InterProReferenceEnabled:      true,
+			InterProConservedRegionStatus: "partial",
+		},
+	}
+	rows = prepareBlastRowsForReferences(rows, item, model.BlastRequest{
+		Species:      model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"},
+		Sequence:     "MPEPTIDE",
+		Program:      "BLASTP",
+		SequenceKind: model.SequenceProtein,
+	}, "phytozome")
+	rows = w.autoIdentifyBlastHitLabels(context.Background(), model.SpeciesCandidate{ProteomeID: 167}, item, rows)
+	rows = annotateBlastRowsForQueryContext(rows, item)
+
+	if rows[0].LabelName != "ANAC101" || rows[0].LabelNameType != "phytozome synonyms" {
+		t.Fatalf("first hit label/type = %q/%q, want hit-level phytozome synonyms", rows[0].LabelName, rows[0].LabelNameType)
+	}
+	if rows[0].PhgoAliases == "" || strings.Contains(rows[0].PhgoAliases, "ATPAL1") {
+		t.Fatalf("first hit phgo_alias = %q, want hit aliases without query-source aliases", rows[0].PhgoAliases)
+	}
+	for i, row := range rows {
+		if row.BlastLabelName != "PAL1" || row.BlastGeneID != "AT2G37040" {
+			t.Fatalf("row %d query source columns = %q/%q, want PAL1/AT2G37040", i, row.BlastLabelName, row.BlastGeneID)
+		}
+		if !row.UniProtReferenceEnabled || !row.InterProReferenceEnabled {
+			t.Fatalf("row %d reference flags lost after auto-label: %#v", i, row)
+		}
+	}
+	plan := &familyBlastPlan{
+		Settings: model.DefaultFamilyBlastSettings(),
+		Groups:   []familyBlastGroup{{Name: "PAL", Indexes: []int{0}, Labels: []string{"PAL1"}}},
+	}
+	_, merged := applyFamilyBlastPlan([]blastQueryItem{item}, []blastQueryRun{{Index: 1, Item: item, Results: model.BlastResult{Rows: rows}}}, plan)
+	if len(merged) != 1 || len(merged[0].Results.Rows) != 2 {
+		t.Fatalf("unexpected family merge output: %#v", merged)
+	}
+	for _, row := range merged[0].Results.Rows {
+		if row.BlastLabelName != "PAL1" || row.LabelName == "PAL1" {
+			t.Fatalf("family grouping should use source label without overwriting hit label: %#v", row)
+		}
+	}
+}
+
+func TestOfflineWorkflowMatrixTwoDatabasesTwoModesWithAutoLabelsAndReferences(t *testing.T) {
+	phySpecies := model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10", GenomeLabel: "Arabidopsis thaliana TAIR10", SearchAlias: "Arabidopsis thaliana"}
+	lemSpecies := model.SpeciesCandidate{ProteomeID: 18, JBrowseName: "Sp_polyrhiza_9509", GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0", SearchAlias: "Spirodela polyrhiza"}
+
+	keywordCases := []struct {
+		name     string
+		database string
+		species  model.SpeciesCandidate
+		groups   []model.KeywordSearchGroup
+		lookup   source.DataSource
+	}{
+		{
+			name:     "phytozome-keyword",
+			database: "phytozome",
+			species:  phySpecies,
+			groups: []model.KeywordSearchGroup{{
+				SearchTerm: "PAL1",
+				Rows: []model.KeywordResultRow{{
+					SourceDatabase: "phytozome",
+					SearchTerm:     "PAL1",
+					Synonyms:       "PAL1; ATPAL1",
+					Symbols:        "SHOULD_NOT_WIN",
+					AutoDefine:     "phenylalanine ammonia-lyase",
+					ProteinID:      "AT2G37040.1",
+					TranscriptID:   "AT2G37040.1",
+					GeneIdentifier: "AT2G37040",
+					SequenceID:     "AT2G37040.1",
+				}},
+			}},
+		},
+		{
+			name:     "lemna-keyword",
+			database: "lemna",
+			species:  lemSpecies,
+			groups: []model.KeywordSearchGroup{{
+				SearchTerm: "Sp9509d020g000340_T001",
+				Rows: []model.KeywordResultRow{{
+					SourceDatabase: "lemna",
+					LabelName:      "LOCAL_SHOULD_NOT_WIN",
+					ProteinID:      "Sp9509d020g000340_T001",
+					TranscriptID:   "Sp9509d020g000340_T001",
+					GeneIdentifier: "Sp9509d020g000340",
+					SequenceID:     "Sp9509d020g000340_T001",
+					Aliases:        "LOCAL_ALIAS",
+				}},
+			}},
+			lookup: keywordMapSource{
+				name: "phytozome",
+				rowsByKeyword: map[string][]model.KeywordResultRow{
+					"Sp9509d020g000340_T001": {{SourceDatabase: "phytozome", TranscriptID: "Sp9509d020g000340_T001", Synonyms: "C4H; CYP73A5"}},
+				},
+			},
+		},
+	}
+	for _, tc := range keywordCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			groups := cloneKeywordSearchGroups(tc.groups)
+			var ids []keywordLabelIdentification
+			if tc.database == "lemna" {
+				w := &BlastWizard{source: lemna.NewClient(nil)}
+				ids = w.autoIdentifyLemnaKeywordLabels(context.Background(), tc.species, groups, tc.lookup)
+			} else {
+				ids = autoIdentifyKeywordLabelIdentifications(groups)
+			}
+			annotateKeywordLabelSources(groups, ids, "auto identify labelname")
+			applyKeywordLabelIdentifications(groups, ids)
+			if len(groups) == 0 || len(groups[0].Rows) == 0 {
+				t.Fatal("keyword matrix fixture has no rows")
+			}
+			row := groups[0].Rows[0]
+			if row.LabelName == "" || row.LabelNameType == "" || row.PhgoAliases == "" {
+				t.Fatalf("keyword auto label incomplete: %#v", row)
+			}
+			display := prompt.KeywordDisplayColumnIDs(tc.database)
+			requireColumnsInOrder(t, tc.name+" display", display, []string{"label_name", "labelname_type", "phgo_alias"})
+			if tc.database == "phytozome" {
+				rejectColumns(t, tc.name+" display", display, []string{"symbols", "synonyms", "alias"})
+			}
+		})
+	}
+
+	blastCases := []struct {
+		name        string
+		database    string
+		species     model.SpeciesCandidate
+		source      source.DataSource
+		item        blastQueryItem
+		rows        []model.BlastResultRow
+		wantHitType string
+	}{
+		{
+			name:     "phytozome-blast",
+			database: "phytozome",
+			species:  phySpecies,
+			source: keywordMapSource{
+				name: "phytozome",
+				rowsByKeyword: map[string][]model.KeywordResultRow{
+					"AT5G62380.1": {{SourceDatabase: "phytozome", TranscriptID: "AT5G62380.1", Synonyms: "VND6; ANAC101"}},
+				},
+			},
+			item: blastQueryItem{LabelName: "PAL1", QuerySource: &model.QuerySequenceSource{
+				SourceDatabase: "phytozome", SourceProteomeID: 167, SourceJBrowseName: "Athaliana_TAIR10", SourceGenomeLabel: "Arabidopsis thaliana TAIR10",
+				LabelName: "PAL1", PhgoAliases: "PAL1; ATPAL1", GeneID: "AT2G37040", ProteinID: "AT2G37040.1", Sequence: "MPEPTIDE",
+			}},
+			rows:        []model.BlastResultRow{{SourceDatabase: "phytozome", BlastProgram: "BLASTP", Protein: "AT5G62380.1", TranscriptID: "AT5G62380.1", SequenceID: "AT5G62380.1", TargetLength: 320}},
+			wantHitType: "phytozome synonyms",
+		},
+		{
+			name:     "lemna-blast",
+			database: "lemna",
+			species:  lemSpecies,
+			source:   lemna.NewClient(nil),
+			item: blastQueryItem{LabelName: "SOURCE_C4H", QuerySource: &model.QuerySequenceSource{
+				SourceDatabase: "lemna", SourceProteomeID: 18, SourceJBrowseName: "Sp_polyrhiza_9509", SourceGenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+				LabelName: "SOURCE_C4H", PhgoAliases: "SOURCE_C4H; CYP73A5", GeneID: "Sp9509d020g000340", ProteinID: "Sp9509d020g000340_T001", Sequence: "MPEPTIDE",
+			}},
+			rows:        []model.BlastResultRow{{SourceDatabase: "lemna", BlastProgram: "BLASTP", Protein: "Sp9509d020g000340_T001", TranscriptID: "Sp9509d020g000340_T001", Defline: "cinnamate 4-hydroxylase (C4H)", TargetLength: 505}},
+			wantHitType: "lemna local aliases",
+		},
+	}
+	for _, tc := range blastCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			w := &BlastWizard{source: tc.source, suppressTaskModals: true}
+			rows := prepareBlastRowsForReferences(tc.rows, tc.item, model.BlastRequest{
+				Species:      tc.species,
+				Sequence:     "MPEPTIDE",
+				Program:      "BLASTP",
+				SequenceKind: model.SequenceProtein,
+			}, tc.database)
+			for i := range rows {
+				rows[i].UniProtReferenceEnabled = true
+				rows[i].UniProtAccession = "Q00001"
+				rows[i].UniProtReviewed = "reviewed"
+				rows[i].UniProtProteinName = "reference protein"
+				rows[i].UniProtGeneNames = "REF1"
+				rows[i].InterProReferenceEnabled = true
+				rows[i].InterProConservedRegionStatus = "present"
+				rows[i].InterProEntryType = "family"
+				rows[i].InterProCoveragePercent = "95.00"
+			}
+			rows = w.autoIdentifyBlastHitLabels(context.Background(), tc.species, tc.item, rows)
+			rows = annotateBlastRowsForQueryContext(rows, tc.item)
+			if rows[0].LabelName == "" || rows[0].LabelNameType != tc.wantHitType || rows[0].PhgoAliases == "" {
+				t.Fatalf("blast hit auto label incomplete: %#v", rows[0])
+			}
+			if rows[0].BlastLabelName != blastQueryItemLabelName(tc.item) || rows[0].BlastGeneID != blastQueryItemGeneID(tc.item) {
+				t.Fatalf("blast source columns not preserved: %#v", rows[0])
+			}
+			if !rows[0].UniProtReferenceEnabled || !rows[0].InterProReferenceEnabled {
+				t.Fatalf("external reference flags lost: %#v", rows[0])
+			}
+			display := prompt.BlastDisplayColumnIDs(tc.database, "BLASTP", true, true)
+			requireColumnsInOrder(t, tc.name+" display", display, []string{"label_name", "labelname_type", "phgo_alias", "protein", "blast_labelname", "blast_geneid"})
+			requireColumns(t, tc.name+" references", display, []string{"uniprot_accession", "interpro_entry_type"})
+			lineage := blastColumnLineage(rows, tc.database, "BLASTP", true, true)
+			if phgo := findColumnLineage(lineage, "phgo_alias"); phgo == nil || phgo.Source != "labelname system" {
+				t.Fatalf("phgo_alias lineage missing or wrong: %#v", phgo)
+			}
+			metadata := buildExportMetadata(blastQueryItemLabelName(tc.item), tc.item.QuerySource)
+			if metadata == nil || len(metadata.Queries) != 1 || metadata.Queries[0].LabelName == "" {
+				t.Fatalf("query metadata missing source label: %#v", metadata)
+			}
+		})
+	}
+}
+
+func requireColumns(t *testing.T, context string, got []string, wants []string) {
+	t.Helper()
+	for _, want := range wants {
+		if columnIndex(got, want) < 0 {
+			t.Fatalf("%s missing column %q in %#v", context, want, got)
+		}
+	}
+}
+
+func requireColumnsInOrder(t *testing.T, context string, got []string, wants []string) {
+	t.Helper()
+	last := -1
+	for _, want := range wants {
+		idx := columnIndex(got, want)
+		if idx < 0 {
+			t.Fatalf("%s missing column %q in %#v", context, want, got)
+		}
+		if idx <= last {
+			t.Fatalf("%s column %q index=%d should be after previous index=%d in %#v", context, want, idx, last, got)
+		}
+		last = idx
+	}
+}
+
+func rejectColumns(t *testing.T, context string, got []string, rejects []string) {
+	t.Helper()
+	for _, reject := range rejects {
+		if columnIndex(got, reject) >= 0 {
+			t.Fatalf("%s should not display column %q in %#v", context, reject, got)
+		}
+	}
+}
+
+func columnIndex(values []string, want string) int {
+	for i, value := range values {
+		if value == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func findColumnLineage(lineage []report.ColumnLineage, id string) *report.ColumnLineage {
+	for i := range lineage {
+		if lineage[i].ID == id {
+			return &lineage[i]
+		}
+	}
+	return nil
 }
 
 func TestUniProtLookupGroupsDeduplicateEquivalentRows(t *testing.T) {
@@ -1205,6 +1959,24 @@ func TestUniProtLookupGroupsDeduplicateEquivalentRows(t *testing.T) {
 	}
 	if len(groups[0].Rows) != 2 {
 		t.Fatalf("first group should contain duplicate rows: %#v", groups)
+	}
+}
+
+func TestBlastNetworkWorkerLimitsStayConservativeForSmallBatches(t *testing.T) {
+	cfg := externalReferenceConfig{
+		AutoLabelBlastHits: true,
+		UseUniProt:         true,
+		UseInterPro:        true,
+		InterProSettings:   model.DefaultInterProConservedRegionSettings(),
+	}
+	if got := blastUniProtWorkerCountForConfig(3, cfg); got > 12 {
+		t.Fatalf("small-batch UniProt workers = %d, want <= 12", got)
+	}
+	if got := blastUniProtAccessionWorkerCountForConfig(3, cfg); got > 16 {
+		t.Fatalf("small-batch UniProt accession workers = %d, want <= 16", got)
+	}
+	if got := blastInterProWorkerCountForConfig(3, cfg); got > 12 {
+		t.Fatalf("small-batch InterPro workers = %d, want <= 12", got)
 	}
 }
 
@@ -1352,7 +2124,7 @@ func TestKeywordRowsToBlastItemsReusesKeywordMetadata(t *testing.T) {
 		GeneReportURL:       "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
 	}}
 	items := keywordRowsToBlastItems(selected, rows, map[string]sequenceFetchResult{
-		"AT2G30490.1": {sequence: "MPEPTIDE"},
+		"AT2G30490.1": {data: model.ProteinSequenceData{Sequence: "MPEPTIDE"}},
 	})
 	if len(items) != 1 {
 		t.Fatalf("blast item count = %d, want 1", len(items))
@@ -1370,7 +2142,7 @@ func TestKeywordRowsToBlastItemsReusesKeywordMetadata(t *testing.T) {
 	if item.QuerySource == nil {
 		t.Fatal("expected query source")
 	}
-	if item.QuerySource.TranscriptID != rows[0].TranscriptID || item.QuerySource.GeneID != rows[0].GeneIdentifier {
+	if item.QuerySource.TranscriptID != rows[0].TranscriptID || item.QuerySource.GeneID != "AT2G30490" {
 		t.Fatalf("query source identifiers not reused: %#v", item.QuerySource)
 	}
 	if item.QuerySource.LabelName != "C4H" || item.QuerySource.SourceProteomeID != 42 {
@@ -1387,7 +2159,7 @@ func TestKeywordRowsToBlastItemsFallsBackWhenLabelBlank(t *testing.T) {
 		SequenceID:     "Sp9509d006g002010_T001",
 	}}
 	items := keywordRowsToBlastItems(selected, rows, map[string]sequenceFetchResult{
-		"Sp9509d006g002010_T001": {sequence: "MAAA"},
+		"Sp9509d006g002010_T001": {data: model.ProteinSequenceData{Sequence: "MAAA"}},
 	})
 	if len(items) != 1 {
 		t.Fatalf("blast item count = %d, want 1", len(items))
@@ -1400,37 +2172,78 @@ func TestKeywordRowsToBlastItemsFallsBackWhenLabelBlank(t *testing.T) {
 	}
 }
 
+func TestResolveBlastQueryItemsCarriesQueryLabelIntoSourceMetadata(t *testing.T) {
+	w := &BlastWizard{source: fakeSource{}}
+	items := []blastQueryItem{{
+		RawInput:    ">query\nMPEPTIDE",
+		LabelName:   "PAL1",
+		Sequence:    "MPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{Sequence: "MPEPTIDE"},
+	}}
+	prepared, err := w.resolveBlastQueryItemsWithProgress(context.Background(), items, nil, nil)
+	if err != nil {
+		t.Fatalf("resolveBlastQueryItemsWithProgress returned error: %v", err)
+	}
+	if len(prepared) != 1 || prepared[0].QuerySource == nil {
+		t.Fatalf("prepared = %#v, want one item with source", prepared)
+	}
+	if got := prepared[0].QuerySource.LabelName; got != "PAL1" {
+		t.Fatalf("QuerySource.LabelName = %q, want PAL1", got)
+	}
+	rows := prepareBlastRowsForReferences([]model.BlastResultRow{{Protein: "hit-1"}}, prepared[0], model.BlastRequest{
+		Species:      model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"},
+		Sequence:     "MPEPTIDE",
+		Program:      "BLASTP",
+		SequenceKind: model.SequenceProtein,
+	}, "phytozome")
+	if got := rows[0].LabelName; got != "" {
+		t.Fatalf("hit LabelName = %q, want query label not copied to hit label_name", got)
+	}
+	if got := rows[0].BlastLabelName; got != "PAL1" {
+		t.Fatalf("BlastLabelName = %q, want PAL1", got)
+	}
+	metadata := buildExportMetadata("PAL1", prepared[0].QuerySource)
+	if metadata == nil || len(metadata.Queries) != 1 || metadata.Queries[0].LabelName != "PAL1" {
+		t.Fatalf("query metadata did not preserve source label: %#v", metadata)
+	}
+}
+
+func TestFamilyBlastQueryLabelPrefersSourceLabelOverAliasList(t *testing.T) {
+	item := blastQueryItem{
+		LabelName: "PAL1",
+		QuerySource: &model.QuerySequenceSource{
+			LabelName:   "PAL1",
+			PhgoAliases: "ATPAL1; PAL1",
+			ProteinID:   "AT2G37040.1",
+		},
+	}
+	if got := familyBlastQueryLabel(item); got != "PAL1" {
+		t.Fatalf("familyBlastQueryLabel = %q, want source query label PAL1", got)
+	}
+	rows := prepareBlastRowsForReferences([]model.BlastResultRow{{Protein: "hit-1"}}, item, model.BlastRequest{
+		Species:      model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"},
+		Sequence:     "MPEPTIDE",
+		Program:      "BLASTP",
+		SequenceKind: model.SequenceProtein,
+	}, "phytozome")
+	if got := rows[0].BlastLabelName; got != "PAL1" {
+		t.Fatalf("BlastLabelName = %q, want source query label PAL1", got)
+	}
+	if got := rows[0].TargetID; got != 167 {
+		t.Fatalf("TargetID = %d, want request species target id 167", got)
+	}
+	if got := rows[0].JBrowseName; got != "Athaliana_TAIR10" {
+		t.Fatalf("JBrowseName = %q, want request species jbrowse name", got)
+	}
+}
+
 func TestKeywordRowsSearchTypeFallsBackToClassifiedInputTypeWhenRowsEmpty(t *testing.T) {
 	if got := keywordRowsSearchType(nil, "F5H1", false); got == "" {
 		t.Fatal("empty keyword rows should still produce a classified search type")
 	}
 }
 
-func TestEnrichKeywordLabelsFromPhytozomeKeepsExistingLemnaLabels(t *testing.T) {
-	w := &BlastWizard{
-		source: lemna.NewClient(nil),
-		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
-			"phytozome": {
-				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2"},
-			},
-		},
-	}
-	groups := []model.KeywordSearchGroup{{
-		SearchTerm: "Sp9509d020g000340_T001",
-		Rows: []model.KeywordResultRow{{
-			LabelName:    "C4H",
-			ProteinID:    "Sp9509d020g000340_T001",
-			TranscriptID: "Sp9509d020g000340_T001",
-		}},
-	}}
-
-	got := w.enrichKeywordLabelsFromPhytozome(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups)
-	if got[0].LabelName != "C4H" || got[0].Rows[0].LabelName != "C4H" {
-		t.Fatalf("existing lemna label should be preserved: %#v", got)
-	}
-}
-
-func TestEnrichKeywordLabelsFromSourceDeduplicatesPhytozomeLookups(t *testing.T) {
+func TestAutoIdentifyLemnaKeywordLabelsPrefersPhytozomeCandidates(t *testing.T) {
 	lookupSource := &countingKeywordMapSource{
 		keywordMapSource: keywordMapSource{
 			name: "phytozome",
@@ -1438,7 +2251,67 @@ func TestEnrichKeywordLabelsFromSourceDeduplicatesPhytozomeLookups(t *testing.T)
 				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
 			},
 			rowsByKeyword: map[string][]model.KeywordResultRow{
-				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+				"Sp9509d020g000340_T001": {{SourceDatabase: "phytozome", TranscriptID: "Sp9509d020g000340_T001", Synonyms: "C4H; CYP73A5", Symbols: "LOCAL_SHOULD_NOT_WIN"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		source: lemna.NewClient(nil),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"phytozome": {
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+		},
+	}
+	groups := []model.KeywordSearchGroup{{
+		SearchTerm: "Sp9509d020g000340_T001",
+		Rows: []model.KeywordResultRow{{
+			SourceDatabase: "lemna",
+			LabelName:      "LOCAL_SHOULD_NOT_WIN",
+			ProteinID:      "Sp9509d020g000340_T001",
+			TranscriptID:   "Sp9509d020g000340_T001",
+		}},
+	}}
+
+	got := w.autoIdentifyLemnaKeywordLabels(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if len(got) != 1 || len(got[0].Aliases) == 0 {
+		t.Fatalf("expected lemna keyword aliases: %#v", got)
+	}
+	if got[0].Aliases[0] != "CYP73A5" || got[0].SourceType != "phytozome synonyms" {
+		t.Fatalf("label aliases/type = %#v/%q, want ranked phytozome synonyms", got[0].Aliases, got[0].SourceType)
+	}
+}
+
+func TestAutoIdentifyLemnaKeywordLabelsFallsBackToLocalAliases(t *testing.T) {
+	w := &BlastWizard{source: lemna.NewClient(nil)}
+	groups := []model.KeywordSearchGroup{{
+		SearchTerm: "Sp9509d020g000340_T001",
+		Rows: []model.KeywordResultRow{{
+			SourceDatabase: "lemna",
+			LabelName:      "C4H",
+			ProteinID:      "Sp9509d020g000340_T001",
+			TranscriptID:   "Sp9509d020g000340_T001",
+		}},
+	}}
+
+	got := w.autoIdentifyLemnaKeywordLabels(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, nil)
+	if len(got) != 1 || len(got[0].Aliases) == 0 || got[0].Aliases[0] != "C4H" {
+		t.Fatalf("expected lemna local label fallback: %#v", got)
+	}
+	if got[0].SourceType != "lemna local aliases" {
+		t.Fatalf("SourceType = %q, want lemna local aliases", got[0].SourceType)
+	}
+}
+
+func TestAutoIdentifyLemnaKeywordLabelsDeduplicatesPhytozomeLookups(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			candidates: []model.SpeciesCandidate{
+				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
+			},
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G30490.1", Synonyms: "C4H; CYP73A5"}},
 			},
 		},
 	}
@@ -1467,12 +2340,9 @@ func TestEnrichKeywordLabelsFromSourceDeduplicatesPhytozomeLookups(t *testing.T)
 		},
 	}
 
-	got := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
-	if got[0].LabelName == "" || got[0].LabelName != got[1].LabelName {
-		t.Fatalf("expected deduplicated lookup to populate both groups: %#v", got)
-	}
-	if got[0].Rows[0].LabelName == "" || got[0].Rows[0].LabelName != got[1].Rows[0].LabelName {
-		t.Fatalf("expected deduplicated lookup to populate both rows: %#v", got)
+	got := w.autoIdentifyLemnaKeywordLabels(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if len(got) != 2 || got[0].Aliases[0] != "CYP73A5" || got[1].Aliases[0] != "CYP73A5" {
+		t.Fatalf("expected deduplicated lookup to populate both identifications: %#v", got)
 	}
 	lookupSource.mu.Lock()
 	defer lookupSource.mu.Unlock()
@@ -1481,7 +2351,7 @@ func TestEnrichKeywordLabelsFromSourceDeduplicatesPhytozomeLookups(t *testing.T)
 	}
 }
 
-func TestEnrichKeywordLabelsFromSourceReusesWizardLookupCacheAcrossRuns(t *testing.T) {
+func TestAutoIdentifyLemnaKeywordLabelsStillQueriesPhytozomeWhenLocalAliasesExist(t *testing.T) {
 	lookupSource := &countingKeywordMapSource{
 		keywordMapSource: keywordMapSource{
 			name: "phytozome",
@@ -1489,53 +2359,7 @@ func TestEnrichKeywordLabelsFromSourceReusesWizardLookupCacheAcrossRuns(t *testi
 				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
 			},
 			rowsByKeyword: map[string][]model.KeywordResultRow{
-				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
-			},
-		},
-	}
-	w := &BlastWizard{
-		source: lemna.NewClient(nil),
-		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
-			"phytozome": {
-				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
-			},
-		},
-		keywordLabelLookupCache: make(map[string]string),
-	}
-	groups := []model.KeywordSearchGroup{
-		{
-			SearchTerm: "row-1",
-			Rows: []model.KeywordResultRow{{
-				ProteinID: "AT2G30490.1",
-				Aliases:   "candidate alias phrase",
-			}},
-		},
-	}
-
-	first := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
-	second := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
-	if strings.TrimSpace(first[0].LabelName) == "" || strings.TrimSpace(second[0].LabelName) == "" {
-		t.Fatalf("expected cached lookup to populate labels across runs: first=%#v second=%#v", first, second)
-	}
-	if first[0].LabelName != second[0].LabelName || first[0].Rows[0].LabelName != second[0].Rows[0].LabelName {
-		t.Fatalf("expected cached lookup to populate labels across runs: first=%#v second=%#v", first, second)
-	}
-	lookupSource.mu.Lock()
-	defer lookupSource.mu.Unlock()
-	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
-		t.Fatalf("phytozome lookup count across runs = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
-	}
-}
-
-func TestEnrichKeywordLabelsFromSourceSkipsFallbackWhenLocalAliasesAlreadySuffice(t *testing.T) {
-	lookupSource := &countingKeywordMapSource{
-		keywordMapSource: keywordMapSource{
-			name: "phytozome",
-			candidates: []model.SpeciesCandidate{
-				{SearchAlias: "Spirodela polyrhiza v2", JBrowseName: "Spolyrhiza_v2", GenomeLabel: "Spirodela polyrhiza v2"},
-			},
-			rowsByKeyword: map[string][]model.KeywordResultRow{
-				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+				"AT2G30490.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G30490.1", Synonyms: "C4H; CYP73A5"}},
 			},
 		},
 	}
@@ -1558,14 +2382,75 @@ func TestEnrichKeywordLabelsFromSourceSkipsFallbackWhenLocalAliasesAlreadySuffic
 		},
 	}
 
-	got := w.enrichKeywordLabelsFromSource(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
-	if strings.TrimSpace(got[0].LabelName) == "" {
-		t.Fatalf("expected local alias-derived label without fallback lookup: %#v", got)
+	got := w.autoIdentifyLemnaKeywordLabels(context.Background(), model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0"}, groups, lookupSource)
+	if len(got) != 1 || got[0].Aliases[0] != "CYP73A5" {
+		t.Fatalf("expected phytozome alias-derived label before local fallback: %#v", got)
 	}
 	lookupSource.mu.Lock()
 	defer lookupSource.mu.Unlock()
-	if lookupSource.fetchCount["AT2G30490.1"] != 0 {
-		t.Fatalf("phytozome fallback lookup count = %d, want 0", lookupSource.fetchCount["AT2G30490.1"])
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome lookup count = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
+	}
+}
+
+func TestFetchKeywordRowsByTermsCachesAcrossCalls(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G30490.1", Synonyms: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		keywordTermRowsCache: make(map[string][]model.KeywordResultRow),
+	}
+	species := model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10", GenomeLabel: "Arabidopsis thaliana TAIR10"}
+
+	first := w.fetchKeywordRowsByTerms(context.Background(), lookupSource, species, []string{"AT2G30490.1", "AT2G30490.1"})
+	second := w.fetchKeywordRowsByTerms(context.Background(), lookupSource, species, []string{"AT2G30490.1"})
+	if len(first["at2g30490.1"]) == 0 || len(second["at2g30490.1"]) == 0 {
+		t.Fatalf("expected cached keyword rows for AT2G30490.1, got first=%#v second=%#v", first, second)
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome lookup count across repeated fetchKeywordRowsByTerms calls = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
+	}
+}
+
+func TestFetchKeywordRowsByTermsDeduplicatesConcurrentLookups(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{SourceDatabase: "phytozome", TranscriptID: "AT2G30490.1", Synonyms: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		keywordTermRowsCache: make(map[string][]model.KeywordResultRow),
+	}
+	species := model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10", GenomeLabel: "Arabidopsis thaliana TAIR10"}
+	var wg sync.WaitGroup
+	results := make([]map[string][]model.KeywordResultRow, 2)
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = w.fetchKeywordRowsByTerms(context.Background(), lookupSource, species, []string{"AT2G30490.1"})
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range results {
+		if len(got["at2g30490.1"]) == 0 {
+			t.Fatalf("concurrent result %d missing cached keyword rows: %#v", i, got)
+		}
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome lookup count across concurrent fetchKeywordRowsByTerms calls = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
 	}
 }
 
@@ -1760,20 +2645,8 @@ func TestParseFastaQuerySequenceInput(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected FASTA header to parse")
 	}
-	if source.GeneID != "AT5G44030" {
-		t.Fatalf("unexpected gene id: %q", source.GeneID)
-	}
-	if source.TranscriptID != "AT5G44030.1" {
-		t.Fatalf("unexpected transcript id: %q", source.TranscriptID)
-	}
-	if source.ProteinID != "AT5G44030.1" {
-		t.Fatalf("unexpected protein id: %q", source.ProteinID)
-	}
-	if source.OrganismShort != "A.thaliana" {
-		t.Fatalf("unexpected organism short: %q", source.OrganismShort)
-	}
-	if source.Annotation != "TAIR10" {
-		t.Fatalf("unexpected annotation: %q", source.Annotation)
+	if source.GeneID != "" || source.TranscriptID != "" || source.ProteinID != "" || source.LabelName != "" {
+		t.Fatalf("generic FASTA header should not directly produce structured metadata: %#v", source)
 	}
 	if source.Sequence != "MEPNTMASFDDEH" {
 		t.Fatalf("unexpected sequence: %q", source.Sequence)
@@ -1795,11 +2668,11 @@ func TestParseBlastQueryItemsMultiFasta(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected two FASTA query items, got %d: %#v", len(items), items)
 	}
-	if got := items[0].LabelName; got != "VND6" {
-		t.Fatalf("unexpected first label: %q", got)
+	if got := items[0].LabelName; got != "" {
+		t.Fatalf("FASTA parser should not directly assign first label: %q", got)
 	}
-	if got := items[1].LabelName; got != "VND7" {
-		t.Fatalf("unexpected second label: %q", got)
+	if got := items[1].LabelName; got != "" {
+		t.Fatalf("FASTA parser should not directly assign second label: %q", got)
 	}
 	if got := items[0].Sequence; got != "MESLAHIPPGYRFHPT" {
 		t.Fatalf("unexpected first sequence: %q", got)
@@ -1810,11 +2683,11 @@ func TestParseBlastQueryItemsMultiFasta(t *testing.T) {
 	if items[0].QuerySource == nil || items[1].QuerySource == nil {
 		t.Fatalf("expected FASTA query sources to be preserved")
 	}
-	if got := items[0].QuerySource.GeneID; got != "AT5G62380" {
-		t.Fatalf("unexpected first gene id: %q", got)
+	if got := items[0].QuerySource.GeneID; got != "" {
+		t.Fatalf("generic FASTA should not directly assign first gene id: %q", got)
 	}
-	if got := items[1].QuerySource.GeneID; got != "AT1G71930" {
-		t.Fatalf("unexpected second gene id: %q", got)
+	if got := items[1].QuerySource.GeneID; got != "" {
+		t.Fatalf("generic FASTA should not directly assign second gene id: %q", got)
 	}
 }
 
@@ -1831,11 +2704,11 @@ func TestParseBlastQueryItemsSingleLineMultiFasta(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected two FASTA query items, got %d: %#v", len(items), items)
 	}
-	if got := items[0].LabelName; got != "VND6" {
-		t.Fatalf("unexpected first label: %q", got)
+	if got := items[0].LabelName; got != "" {
+		t.Fatalf("FASTA parser should not directly assign first label: %q", got)
 	}
-	if got := items[1].LabelName; got != "VND7" {
-		t.Fatalf("unexpected second label: %q", got)
+	if got := items[1].LabelName; got != "" {
+		t.Fatalf("FASTA parser should not directly assign second label: %q", got)
 	}
 	if got := items[0].Sequence; got != "MESL" {
 		t.Fatalf("unexpected first sequence: %q", got)
@@ -1865,8 +2738,8 @@ func TestParseBlastQueryItemsMixedFastaURLAndPlainSequence(t *testing.T) {
 	if len(items) != 4 {
 		t.Fatalf("expected four query items, got %d: %#v", len(items), items)
 	}
-	if got := items[0].LabelName; got != "VND6" {
-		t.Fatalf("unexpected first label: %q", got)
+	if got := items[0].LabelName; got != "" {
+		t.Fatalf("FASTA parser should not directly assign first label: %q", got)
 	}
 	if got := items[0].Sequence; got != "MESL" {
 		t.Fatalf("unexpected first sequence: %q", got)
@@ -1883,8 +2756,11 @@ func TestParseBlastQueryItemsMixedFastaURLAndPlainSequence(t *testing.T) {
 	if got := items[2].Sequence; got != "MDNI" {
 		t.Fatalf("unexpected plain FASTA sequence: %q", got)
 	}
-	if items[2].QuerySource == nil || items[2].QuerySource.ProteinID != "plain_header_no_label" {
-		t.Fatalf("expected primary FASTA header ID, got %#v", items[2].QuerySource)
+	if items[2].QuerySource == nil {
+		t.Fatalf("expected plain FASTA query source to be preserved")
+	}
+	if items[2].QuerySource.ProteinID != "" || items[2].QuerySource.GeneID != "" || items[2].QuerySource.LabelName != "" {
+		t.Fatalf("plain FASTA header should not directly produce metadata, got %#v", items[2].QuerySource)
 	}
 	if got := items[3].RawInput; got != "MPEPTIDE*" {
 		t.Fatalf("unexpected plain sequence item: %q", got)
@@ -1944,17 +2820,56 @@ func TestParseFastaQuerySequenceInputSingleLineWithTrailingLabel(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected single-line FASTA header to parse")
 	}
-	if source.GeneID != "AT5G44030" {
-		t.Fatalf("unexpected gene id: %q", source.GeneID)
-	}
-	if source.TranscriptID != "AT5G44030.1" {
-		t.Fatalf("unexpected transcript id: %q", source.TranscriptID)
-	}
 	if source.Sequence != "MEPNTMASFDDEHRHSSFSAKIC" {
 		t.Fatalf("unexpected sequence: %q", source.Sequence)
 	}
-	if source.LabelName != "CESA4" {
-		t.Fatalf("unexpected label name: %q", source.LabelName)
+	if source.GeneID != "" || source.TranscriptID != "" || source.ProteinID != "" || source.LabelName != "" {
+		t.Fatalf("generic single-line FASTA should not directly assign metadata, got %#v", source)
+	}
+}
+
+func TestParseFastaQuerySequenceInputPhgoHeaderWithRowNumber(t *testing.T) {
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040/7\nMEPNTMASFDDEH\n")
+	if !ok {
+		t.Fatalf("expected phgo FASTA header to parse")
+	}
+	if source.LabelName != "PAL1" {
+		t.Fatalf("unexpected label: %q", source.LabelName)
+	}
+	if source.GeneID != "AT2G37040" {
+		t.Fatalf("unexpected gene id: %q", source.GeneID)
+	}
+	if source.OrganismShort != "Sp7498" {
+		t.Fatalf("unexpected species: %q", source.OrganismShort)
+	}
+	if source.Sequence != "MEPNTMASFDDEH" {
+		t.Fatalf("unexpected sequence: %q", source.Sequence)
+	}
+	if strings.TrimSpace(source.PhgoAliases) != "" {
+		t.Fatalf("phgo FASTA parse should not prefill ranked aliases: %#v", source)
+	}
+}
+
+func TestParseFastaQuerySequenceInputPhgoHeaderWithoutRowNumber(t *testing.T) {
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040\nMEPNTMASFDDEH\n")
+	if !ok {
+		t.Fatalf("expected phgo FASTA header without row number to parse")
+	}
+	if source.LabelName != "PAL1" || source.GeneID != "AT2G37040" || source.OrganismShort != "Sp7498" {
+		t.Fatalf("unexpected phgo FASTA metadata: %#v", source)
+	}
+}
+
+func TestParseFastaQuerySequenceInputSingleLinePhgoHeader(t *testing.T) {
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040/7 MEPNTMASFDDEH")
+	if !ok {
+		t.Fatalf("expected single-line phgo FASTA header to parse")
+	}
+	if source.LabelName != "PAL1" || source.GeneID != "AT2G37040" {
+		t.Fatalf("unexpected phgo single-line metadata: %#v", source)
+	}
+	if source.Sequence != "MEPNTMASFDDEH" {
+		t.Fatalf("unexpected single-line phgo sequence: %q", source.Sequence)
 	}
 }
 
@@ -2026,6 +2941,8 @@ type fakeSource struct {
 	query          *model.QuerySequenceSource
 	keywordRows    []model.KeywordResultRow
 	sequences      map[string]string
+	nucleotideSeqs map[string]string
+	headers        map[string]string
 	sequenceErrors map[string]error
 	fetchCount     map[string]int
 	err            error
@@ -2046,19 +2963,22 @@ func (f fakeSource) WaitForBlastResults(ctx context.Context, jobID string, pollI
 func (f fakeSource) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
 	return append([]model.KeywordResultRow(nil), f.keywordRows...), nil
 }
-func (f fakeSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
+func (f fakeSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (model.ProteinSequenceData, error) {
 	if f.fetchCount != nil {
 		fakeSourceFetchMu.Lock()
 		f.fetchCount[sequenceID]++
 		fakeSourceFetchMu.Unlock()
 	}
 	if err, ok := f.sequenceErrors[sequenceID]; ok {
-		return "", err
+		return model.ProteinSequenceData{}, err
 	}
 	if sequence, ok := f.sequences[sequenceID]; ok {
-		return sequence, nil
+		return model.ProteinSequenceData{
+			Sequence:       sequence,
+			OriginalHeader: strings.TrimSpace(f.headers[sequenceID]),
+		}, nil
 	}
-	return "", fmt.Errorf("no protein sequence for transcript id %s", sequenceID)
+	return model.ProteinSequenceData{}, fmt.Errorf("no protein sequence for transcript id %s", sequenceID)
 }
 func (f fakeSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	if f.err != nil {
@@ -2073,6 +2993,30 @@ func (f fakeSource) FetchProteinQuerySequence(ctx context.Context, species model
 	source := *f.query
 	source.ProteinID = proteinID
 	return &source, nil
+}
+func (f fakeSource) FetchNucleotideSequence(ctx context.Context, targetID int, sequenceID string, program string) (model.ProteinSequenceData, error) {
+	key := strings.ToLower(strings.TrimSpace(program)) + "|" + sequenceID
+	if f.fetchCount != nil {
+		fakeSourceFetchMu.Lock()
+		f.fetchCount[key]++
+		fakeSourceFetchMu.Unlock()
+	}
+	if err, ok := f.sequenceErrors[key]; ok {
+		return model.ProteinSequenceData{}, err
+	}
+	if sequence, ok := f.nucleotideSeqs[key]; ok {
+		return model.ProteinSequenceData{
+			Sequence:       sequence,
+			OriginalHeader: strings.TrimSpace(f.headers[key]),
+		}, nil
+	}
+	if sequence, ok := f.nucleotideSeqs[sequenceID]; ok {
+		return model.ProteinSequenceData{
+			Sequence:       sequence,
+			OriginalHeader: strings.TrimSpace(f.headers[sequenceID]),
+		}, nil
+	}
+	return model.ProteinSequenceData{}, fmt.Errorf("no nucleotide sequence for %s (%s)", sequenceID, program)
 }
 
 type fakeWideKeywordSource struct {
@@ -2123,8 +3067,8 @@ func (f keywordMapSource) SearchKeywordRows(ctx context.Context, species model.S
 	}
 	return rows, nil
 }
-func (f keywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
-	return "", nil
+func (f keywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (model.ProteinSequenceData, error) {
+	return model.ProteinSequenceData{}, nil
 }
 func (f keywordMapSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	return nil, nil
@@ -2155,18 +3099,35 @@ func (f *countingKeywordMapSource) SearchKeywordRows(ctx context.Context, specie
 	f.mu.Unlock()
 	return f.keywordMapSource.SearchKeywordRows(ctx, species, keyword)
 }
-func (f *countingKeywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error) {
+func (f *countingKeywordMapSource) FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (model.ProteinSequenceData, error) {
 	return f.keywordMapSource.FetchProteinSequence(ctx, targetID, sequenceID)
 }
 func (f *countingKeywordMapSource) FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error) {
 	return f.keywordMapSource.FetchGeneQuerySequence(ctx, species, reportType, identifier)
 }
 
+type countingUniProtResolverSource struct {
+	fakeSource
+	mu               sync.Mutex
+	accessionFetches map[string]int
+	accessionsByID   map[string][]string
+}
+
+func (f *countingUniProtResolverSource) FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error) {
+	f.mu.Lock()
+	if f.accessionFetches == nil {
+		f.accessionFetches = make(map[string]int)
+	}
+	f.accessionFetches[proteinID]++
+	f.mu.Unlock()
+	return append([]string(nil), f.accessionsByID[proteinID]...), nil
+}
+
 func TestFetchProteinSequenceRecordsSkipsMissingSequencesAndCachesMisses(t *testing.T) {
 	fetchCount := map[string]int{}
 	w := &BlastWizard{
 		source:               fakeSource{sequences: map[string]string{"ok": "MPEPTIDE"}, fetchCount: fetchCount},
-		proteinSequenceCache: make(map[string]string),
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
 		proteinSequenceMiss:  make(map[string]error),
 	}
 	rows := []model.BlastResultRow{
@@ -2186,13 +3147,133 @@ func TestFetchProteinSequenceRecordsSkipsMissingSequencesAndCachesMisses(t *test
 	}
 }
 
+func TestResolveKeywordRowsToBlastItemsSkipsModalWrapperWhenSuppressed(t *testing.T) {
+	w := &BlastWizard{
+		source:                fakeSource{sequences: map[string]string{"seq1": "MPEPTIDE"}},
+		suppressTaskModals:    true,
+		proteinSequenceCache:  make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:   make(map[string]error),
+		keywordBlastItemCache: make(map[string]blastQueryItem),
+	}
+	rows := []model.KeywordResultRow{{
+		SourceDatabase: "phytozome",
+		SequenceID:     "seq1",
+		TranscriptID:   "AT1G01010.1",
+		GeneIdentifier: "AT1G01010",
+		LabelName:      "PAL1",
+		Genome:         "Arabidopsis thaliana",
+	}}
+	items, err := w.resolveKeywordRowsToBlastItems(context.Background(), model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"}, rows)
+	if err != nil {
+		t.Fatalf("resolveKeywordRowsToBlastItems returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("resolved items = %d, want 1", len(items))
+	}
+	if strings.TrimSpace(items[0].Sequence) != "MPEPTIDE" {
+		t.Fatalf("resolved item sequence = %q, want MPEPTIDE", items[0].Sequence)
+	}
+}
+
+func TestUniProtAccessionsForBlastRowUsesSingleflightForConcurrentSameRow(t *testing.T) {
+	src := &countingUniProtResolverSource{
+		fakeSource: fakeSource{},
+		accessionsByID: map[string][]string{
+			"AT5G13930.1": {"Q12345"},
+		},
+	}
+	w := &BlastWizard{
+		source:                    src,
+		rowUniProtAccessionsCache: make(map[string][]string),
+		rowUniProtAccessionsKnown: make(map[string]bool),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"fake": {{
+				ProteomeID:  167,
+				JBrowseName: "Athaliana_TAIR10",
+			}},
+		},
+	}
+	row := model.BlastResultRow{
+		Protein:     "AT5G13930.1",
+		SubjectID:   "AT5G13930.1",
+		JBrowseName: "Athaliana_TAIR10",
+	}
+	const workers = 8
+	results := make(chan []string, workers)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- w.uniprotAccessionsForBlastRow(context.Background(), row)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	for accessions := range results {
+		if len(accessions) != 1 || accessions[0] != "Q12345" {
+			t.Fatalf("accessions = %#v, want Q12345", accessions)
+		}
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.accessionFetches["AT5G13930.1"] != 1 {
+		t.Fatalf("FetchUniProtAccessions count = %d, want 1", src.accessionFetches["AT5G13930.1"])
+	}
+}
+
+func TestLoadBlastDetailFASTAReturnsWrappedFASTA(t *testing.T) {
+	w := &BlastWizard{
+		source:               fakeSource{sequences: map[string]string{"seq1": "MPEPTIDE"}},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	text, err := w.loadBlastDetailFASTA(model.BlastResultRow{
+		Protein:    "prot1",
+		SequenceID: "seq1",
+		TargetID:   123,
+	})
+	if err != nil {
+		t.Fatalf("loadBlastDetailFASTA returned error: %v", err)
+	}
+	if !strings.Contains(text, ">prot1") || !strings.Contains(text, "MPEPTIDE") {
+		t.Fatalf("unexpected FASTA text: %q", text)
+	}
+}
+
+func TestLoadBlastDetailFASTAFallsBackToResolvedTargetID(t *testing.T) {
+	w := &BlastWizard{
+		source:               fakeSource{sequences: map[string]string{"seq1": "MPEPTIDE"}},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+		speciesCandidatesCache: map[string][]model.SpeciesCandidate{
+			"fake": {{
+				ProteomeID:  167,
+				JBrowseName: "Athaliana_TAIR10",
+			}},
+		},
+	}
+	text, err := w.loadBlastDetailFASTA(model.BlastResultRow{
+		Protein:     "prot1",
+		SequenceID:  "seq1",
+		TargetID:    0,
+		JBrowseName: "Athaliana_TAIR10",
+	})
+	if err != nil {
+		t.Fatalf("loadBlastDetailFASTA returned error: %v", err)
+	}
+	if !strings.Contains(text, "MPEPTIDE") {
+		t.Fatalf("unexpected FASTA text: %q", text)
+	}
+}
+
 func TestFetchProteinSequenceRecordsReturnsNonMissingErrors(t *testing.T) {
 	w := &BlastWizard{
 		source: fakeSource{
 			sequences:      map[string]string{"ok": "MPEPTIDE"},
 			sequenceErrors: map[string]error{"net": fmt.Errorf("fetch protein sequence: unexpected status 500")},
 		},
-		proteinSequenceCache: make(map[string]string),
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
 		proteinSequenceMiss:  make(map[string]error),
 	}
 	rows := []model.BlastResultRow{
@@ -2208,16 +3289,219 @@ func TestFetchProteinSequenceRecordsReturnsNonMissingErrors(t *testing.T) {
 	}
 }
 
+func TestFetchProteinSequenceRecordsUsesTranscriptFallbackForLemnaBlastRows(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			sequences: map[string]string{
+				"Sp9509d011g001470_P001": "MPEPTIDE",
+			},
+			headers: map[string]string{
+				"Sp9509d011g001470_P001": ">Sp9509d011g001470_P001 protein",
+			},
+		},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	rows := []model.BlastResultRow{
+		{
+			SourceDatabase: "lemna",
+			BlastProgram:   "TBLASTN",
+			Protein:        "Sp9509d011g001470_P001",
+			SequenceID:     "Sp9509d011g001470_P001",
+			TranscriptID:   "Sp9509d011g001470_T001",
+			Species:        "Spirodela polyrhiza 9509",
+			TargetID:       18,
+		},
+	}
+
+	records, err := w.fetchProteinSequenceRecordsWithProgress(context.Background(), rows, nil)
+	if err != nil {
+		t.Fatalf("fetchProteinSequenceRecordsWithProgress returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if records[0].Sequence != "MPEPTIDE" {
+		t.Fatalf("Sequence = %q, want MPEPTIDE", records[0].Sequence)
+	}
+	if records[0].OriginalHeader != ">Sp9509d011g001470_P001 protein" {
+		t.Fatalf("OriginalHeader = %q, want mapped protein header", records[0].OriginalHeader)
+	}
+}
+
+func TestFetchProteinSequenceRecordsSupportsAllLemnaBlastPrograms(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			sequences: map[string]string{
+				"Sp9509d011g001470_P001":       "MPEPTIDE",
+				"Sp9509d020g000340_T001":       "ATGGCC",
+				"LOC_Os01g01010.1":             "MSPQQQ",
+				"AT2G37040.1":                  "MSTPAL",
+				"Sp9509d011g001470_T001":       "ATGAAA",
+				"Sp9509d011g001470_subject_id": "ATGCCC",
+			},
+			headers: map[string]string{
+				"Sp9509d011g001470_P001": ">Sp9509d011g001470_P001 protein",
+				"LOC_Os01g01010.1":       ">LOC_Os01g01010.1 source header",
+			},
+		},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+
+	tests := []struct {
+		name               string
+		row                model.BlastResultRow
+		wantHeader         string
+		wantOriginalHeader string
+		wantSequence       string
+	}{
+		{
+			name: "blastp protein header fallback",
+			row: model.BlastResultRow{
+				SourceDatabase: "lemna",
+				BlastProgram:   "BLASTP",
+				Protein:        "AT2G37040.1",
+				SequenceID:     "AT2G37040.1",
+				Species:        "Arabidopsis thaliana",
+				TargetID:       18,
+			},
+			wantHeader:         ">AT2G37040.1",
+			wantOriginalHeader: ">AT2G37040.1",
+			wantSequence:       "MSTPAL",
+		},
+		{
+			name: "blastx original source header preserved",
+			row: model.BlastResultRow{
+				SourceDatabase: "lemna",
+				BlastProgram:   "BLASTX",
+				Protein:        "LOC_Os01g01010.1",
+				SequenceID:     "LOC_Os01g01010.1",
+				Species:        "Oryza sativa",
+				TargetID:       18,
+			},
+			wantHeader:         ">LOC_Os01g01010.1",
+			wantOriginalHeader: ">LOC_Os01g01010.1 source header",
+			wantSequence:       "MSPQQQ",
+		},
+		{
+			name: "blastn transcript fallback header",
+			row: model.BlastResultRow{
+				SourceDatabase: "lemna",
+				BlastProgram:   "BLASTN",
+				SequenceID:     "Sp9509d020g000340_T001",
+				TranscriptID:   "Sp9509d020g000340_T001",
+				SubjectID:      "Sp9509d020g000340_T001",
+				Species:        "Spirodela polyrhiza 9509",
+				TargetID:       18,
+			},
+			wantHeader:         ">Sp9509d020g000340_T001",
+			wantOriginalHeader: ">Sp9509d020g000340_T001",
+			wantSequence:       "ATGGCC",
+		},
+		{
+			name: "tblastn mapped protein original header preserved",
+			row: model.BlastResultRow{
+				SourceDatabase: "lemna",
+				BlastProgram:   "TBLASTN",
+				Protein:        "Sp9509d011g001470_P001",
+				SequenceID:     "Sp9509d011g001470_P001",
+				TranscriptID:   "Sp9509d011g001470_T001",
+				Species:        "Spirodela polyrhiza 9509",
+				TargetID:       18,
+			},
+			wantHeader:         ">Sp9509d011g001470_P001",
+			wantOriginalHeader: ">Sp9509d011g001470_P001 protein",
+			wantSequence:       "MPEPTIDE",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records, err := w.fetchProteinSequenceRecordsWithProgress(context.Background(), []model.BlastResultRow{tt.row}, nil)
+			if err != nil {
+				t.Fatalf("fetchProteinSequenceRecordsWithProgress returned error: %v", err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("records = %d, want 1", len(records))
+			}
+			if records[0].Header != tt.wantHeader {
+				t.Fatalf("Header = %q, want %q", records[0].Header, tt.wantHeader)
+			}
+			if records[0].OriginalHeader != tt.wantOriginalHeader {
+				t.Fatalf("OriginalHeader = %q, want %q", records[0].OriginalHeader, tt.wantOriginalHeader)
+			}
+			if records[0].Sequence != tt.wantSequence {
+				t.Fatalf("Sequence = %q, want %q", records[0].Sequence, tt.wantSequence)
+			}
+		})
+	}
+}
+
+func TestKeywordRowsToBlastItemsCachedReusesBuiltItemWithinCall(t *testing.T) {
+	w := &BlastWizard{
+		keywordBlastItemCache: make(map[string]blastQueryItem),
+	}
+	selected := model.SpeciesCandidate{
+		ProteomeID:  323,
+		JBrowseName: "Osativa_v7_0",
+		GenomeLabel: "Oryza sativa v7.0",
+	}
+	rows := []model.KeywordResultRow{
+		{
+			SourceDatabase: "phytozome",
+			SequenceID:     "Os06g44620.1",
+			TranscriptID:   "Os06g44620.1",
+			ProteinID:      "Os06g44620.1",
+			GeneIdentifier: "Os06g44620",
+			GeneReportURL:  "https://example.test/Os06g44620",
+			LabelName:      "PAL1",
+			PhgoAliases:    "PAL1; ATPAL1",
+		},
+		{
+			SourceDatabase: "phytozome",
+			SequenceID:     "Os06g44620.1",
+			TranscriptID:   "Os06g44620.1",
+			ProteinID:      "Os06g44620.1",
+			GeneIdentifier: "Os06g44620",
+			GeneReportURL:  "https://example.test/Os06g44620",
+			LabelName:      "PAL1",
+			PhgoAliases:    "PAL1; ATPAL1",
+		},
+	}
+	sequences := map[string]sequenceFetchResult{
+		"Os06g44620.1": {data: model.ProteinSequenceData{Sequence: "MPEPTIDE"}},
+	}
+
+	items, converted := w.keywordRowsToBlastItemsCached(context.Background(), selected, rows, sequences)
+	if converted != 2 {
+		t.Fatalf("converted = %d, want 2", converted)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	if items[0].QuerySource == nil || items[1].QuerySource == nil {
+		t.Fatalf("expected query sources on both items: %#v", items)
+	}
+	if items[0].QuerySource.ProteinSequence != "MPEPTIDE" || items[1].QuerySource.ProteinSequence != "MPEPTIDE" {
+		t.Fatalf("unexpected sequences on cached items: %#v", items)
+	}
+}
+
 func TestLocalBlastBatchWorkerBudgetDoesNotOversubscribeCPU(t *testing.T) {
 	previous := runtime.GOMAXPROCS(8)
 	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_BATCH_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_THREADS", "")
+	t.Setenv("PHYTOZOME_GO_REMOTE_BLAST_BATCH_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_MAX_WORKERS", "")
 
 	request := model.BlastRequest{Program: "local:BLASTP"}
 	workers := batchBlastWorkerCount(65, request)
 	if workers <= 0 {
 		t.Fatalf("workers = %d, want positive", workers)
 	}
-	threads := localBlastThreadsPerWorker(workers)
+	threads := localBlastThreadsPerWorker(workers, request)
 	if threads <= 0 {
 		t.Fatalf("threads = %d, want positive", threads)
 	}
@@ -2226,8 +3510,320 @@ func TestLocalBlastBatchWorkerBudgetDoesNotOversubscribeCPU(t *testing.T) {
 	}
 
 	networkWorkers := batchBlastWorkerCount(65, model.BlastRequest{Program: "BLASTP"})
-	if networkWorkers <= workers {
-		t.Fatalf("remote BLAST workers = %d, want more than local budget %d", networkWorkers, workers)
+	if networkWorkers != 2 {
+		t.Fatalf("remote BLAST workers = %d, want conservative default 2", networkWorkers)
+	}
+}
+
+func TestLocalBlastDefaultsFavorThreadsOverWorkerFanout(t *testing.T) {
+	previous := runtime.GOMAXPROCS(16)
+	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_BATCH_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_THREADS", "")
+
+	workers := batchBlastWorkerCount(99, model.BlastRequest{Program: "local:BLASTP"})
+	if workers != 2 {
+		t.Fatalf("workers = %d, want 2 on 16 CPU budget", workers)
+	}
+
+	blastpThreads := localBlastThreadsPerWorker(workers, model.BlastRequest{Program: "local:BLASTP"})
+	if blastpThreads != 8 {
+		t.Fatalf("blastp threads = %d, want 8", blastpThreads)
+	}
+
+	tblastnThreads := localBlastThreadsPerWorker(workers, model.BlastRequest{Program: "local:TBLASTN"})
+	if tblastnThreads != 2 {
+		t.Fatalf("tblastn threads = %d, want 2", tblastnThreads)
+	}
+}
+
+func TestLocalBlastDefaultsUseProgramSpecificBatchStrategy(t *testing.T) {
+	previous := runtime.GOMAXPROCS(16)
+	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_BATCH_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_LOCAL_BLAST_THREADS", "")
+
+	if got := batchBlastWorkerCount(3, model.BlastRequest{Program: "local:BLASTX"}); got != 1 {
+		t.Fatalf("blastx workers = %d, want 1", got)
+	}
+	if got := batchBlastWorkerCount(3, model.BlastRequest{Program: "local:BLASTN"}); got != 2 {
+		t.Fatalf("blastn workers = %d, want 2", got)
+	}
+	if got := batchBlastWorkerCount(3, model.BlastRequest{Program: "local:TBLASTN"}); got != 2 {
+		t.Fatalf("tblastn workers = %d, want 2", got)
+	}
+	if got := localBlastThreadsPerWorker(2, model.BlastRequest{Program: "local:BLASTN"}); got != 2 {
+		t.Fatalf("blastn threads with 2 workers = %d, want 2", got)
+	}
+	if got := localBlastThreadsPerWorker(2, model.BlastRequest{Program: "local:TBLASTN"}); got != 2 {
+		t.Fatalf("tblastn threads with 2 workers = %d, want 2", got)
+	}
+}
+
+func TestBlastAuxWorkerBudgetsStayBoundedByPhase(t *testing.T) {
+	previous := runtime.GOMAXPROCS(8)
+	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("PHYTOZOME_GO_MAX_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_ACCESSION_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_INTERPRO_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_LABEL_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_KEYWORD_TERM_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_SEQUENCE_FETCH_WORKERS", "")
+
+	if got := blastUniProtWorkerCount(500); got != 12 {
+		t.Fatalf("blastUniProtWorkerCount = %d, want 12", got)
+	}
+	if got := blastUniProtAccessionWorkerCount(500); got != 16 {
+		t.Fatalf("blastUniProtAccessionWorkerCount = %d, want 16", got)
+	}
+	if got := blastInterProWorkerCount(500); got != 12 {
+		t.Fatalf("blastInterProWorkerCount = %d, want 12", got)
+	}
+	if got := blastLabelWorkerCount(500); got != 16 {
+		t.Fatalf("blastLabelWorkerCount = %d, want 16 on 8 CPU budget", got)
+	}
+	if got := blastKeywordTermWorkerCount(500); got != 16 {
+		t.Fatalf("blastKeywordTermWorkerCount = %d, want 16 on 8 CPU budget", got)
+	}
+	if got := blastSequenceFetchWorkerCount(500); got != 16 {
+		t.Fatalf("blastSequenceFetchWorkerCount = %d, want 16 on 8 CPU budget", got)
+	}
+}
+
+func TestBlastAuxWorkerBudgetsScaleWithReferenceLoad(t *testing.T) {
+	previous := runtime.GOMAXPROCS(8)
+	defer runtime.GOMAXPROCS(previous)
+	t.Setenv("PHYTOZOME_GO_MAX_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_ACCESSION_WORKERS", "")
+	t.Setenv("PHYTOZOME_GO_BLAST_INTERPRO_WORKERS", "")
+
+	none := externalReferenceConfig{}
+	full := externalReferenceConfig{
+		AutoLabelBlastHits: true,
+		UseUniProt:         true,
+		UseInterPro:        true,
+	}
+
+	if got := blastUniProtWorkerCountForConfig(500, none); got != 12 {
+		t.Fatalf("blastUniProtWorkerCountForConfig(none) = %d, want 12", got)
+	}
+	if got := blastUniProtWorkerCountForConfig(500, full); got != 18 {
+		t.Fatalf("blastUniProtWorkerCountForConfig(full) = %d, want 18", got)
+	}
+	if got := blastUniProtAccessionWorkerCountForConfig(500, none); got != 16 {
+		t.Fatalf("blastUniProtAccessionWorkerCountForConfig(none) = %d, want 16", got)
+	}
+	if got := blastUniProtAccessionWorkerCountForConfig(500, full); got != 22 {
+		t.Fatalf("blastUniProtAccessionWorkerCountForConfig(full) = %d, want 22", got)
+	}
+	if got := blastInterProWorkerCountForConfig(500, none); got != 12 {
+		t.Fatalf("blastInterProWorkerCountForConfig(none) = %d, want 12", got)
+	}
+	if got := blastInterProWorkerCountForConfig(500, full); got != 18 {
+		t.Fatalf("blastInterProWorkerCountForConfig(full) = %d, want 18", got)
+	}
+}
+
+func TestBlastAuxWorkerBudgetsHonorEnvOverrides(t *testing.T) {
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_WORKERS", "7")
+	t.Setenv("PHYTOZOME_GO_BLAST_UNIPROT_ACCESSION_WORKERS", "9")
+	t.Setenv("PHYTOZOME_GO_BLAST_INTERPRO_WORKERS", "5")
+	t.Setenv("PHYTOZOME_GO_BLAST_LABEL_WORKERS", "11")
+	t.Setenv("PHYTOZOME_GO_BLAST_KEYWORD_TERM_WORKERS", "13")
+	t.Setenv("PHYTOZOME_GO_BLAST_SEQUENCE_FETCH_WORKERS", "15")
+
+	if got := blastUniProtWorkerCount(100); got != 7 {
+		t.Fatalf("blastUniProtWorkerCount override = %d, want 7", got)
+	}
+	if got := blastUniProtAccessionWorkerCount(100); got != 9 {
+		t.Fatalf("blastUniProtAccessionWorkerCount override = %d, want 9", got)
+	}
+	if got := blastInterProWorkerCount(100); got != 5 {
+		t.Fatalf("blastInterProWorkerCount override = %d, want 5", got)
+	}
+	if got := blastLabelWorkerCount(100); got != 11 {
+		t.Fatalf("blastLabelWorkerCount override = %d, want 11", got)
+	}
+	if got := blastKeywordTermWorkerCount(100); got != 13 {
+		t.Fatalf("blastKeywordTermWorkerCount override = %d, want 13", got)
+	}
+	if got := blastSequenceFetchWorkerCount(100); got != 15 {
+		t.Fatalf("blastSequenceFetchWorkerCount override = %d, want 15", got)
+	}
+}
+
+func TestAlignPreparedBlastItemsToRequestResolvesProgramSpecificSequenceKinds(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			sequences: map[string]string{
+				"protA": "MPEPTIDE",
+			},
+			nucleotideSeqs: map[string]string{
+				"blastn|txA":  "ATGGCCATGGCC",
+				"blastx|txA":  "ATGGCCATGGCC",
+				"tblastn|txA": "ATGGCCATGGCC",
+			},
+		},
+	}
+	baseItem := blastQueryItem{
+		LabelName: "C4H",
+		Sequence:  "MPEPTIDE",
+		QuerySource: &model.QuerySequenceSource{
+			Sequence:         "MPEPTIDE",
+			SourceDatabase:   "lemna.org",
+			SourceProteomeID: 18,
+			TranscriptID:     "txA",
+			ProteinID:        "protA",
+			GeneID:           "geneA",
+		},
+	}
+
+	tests := []struct {
+		name         string
+		request      model.BlastRequest
+		wantSequence string
+		wantKind     model.SequenceKind
+	}{
+		{
+			name:         "blastn-uses-dna",
+			request:      model.BlastRequest{Program: "local:BLASTN", SequenceKind: model.SequenceDNA},
+			wantSequence: "ATGGCCATGGCC",
+			wantKind:     model.SequenceDNA,
+		},
+		{
+			name:         "blastx-uses-dna",
+			request:      model.BlastRequest{Program: "local:BLASTX", SequenceKind: model.SequenceDNA},
+			wantSequence: "ATGGCCATGGCC",
+			wantKind:     model.SequenceDNA,
+		},
+		{
+			name:         "tblastn-keeps-protein",
+			request:      model.BlastRequest{Program: "local:TBLASTN", SequenceKind: model.SequenceProtein},
+			wantSequence: "MPEPTIDE",
+			wantKind:     model.SequenceProtein,
+		},
+		{
+			name:         "blastp-keeps-protein",
+			request:      model.BlastRequest{Program: "local:BLASTP", SequenceKind: model.SequenceProtein},
+			wantSequence: "MPEPTIDE",
+			wantKind:     model.SequenceProtein,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := w.alignPreparedBlastItemsToRequest(context.Background(), []blastQueryItem{baseItem}, tt.request)
+			if err != nil {
+				t.Fatalf("alignPreparedBlastItemsToRequest returned error: %v", err)
+			}
+			if len(out) != 1 {
+				t.Fatalf("aligned items = %d, want 1", len(out))
+			}
+			if out[0].Sequence != tt.wantSequence {
+				t.Fatalf("Sequence = %q, want %q", out[0].Sequence, tt.wantSequence)
+			}
+			if out[0].QuerySource == nil || out[0].QuerySource.Sequence != tt.wantSequence {
+				t.Fatalf("QuerySource.Sequence = %q, want %q", out[0].QuerySource.Sequence, tt.wantSequence)
+			}
+			if got := detectSequenceKind(out[0].Sequence); got != tt.wantKind {
+				t.Fatalf("detectSequenceKind(%q) = %s, want %s", out[0].Sequence, got, tt.wantKind)
+			}
+		})
+	}
+}
+
+func TestAlignPreparedBlastItemsToRequestDeduplicatesSequenceFetches(t *testing.T) {
+	fetchCount := map[string]int{}
+	w := &BlastWizard{
+		source: fakeSource{
+			nucleotideSeqs: map[string]string{
+				"blastn|txA": "ATGGCCATGGCC",
+			},
+			fetchCount: fetchCount,
+		},
+	}
+	items := []blastQueryItem{
+		{
+			LabelName: "C4H-1",
+			QuerySource: &model.QuerySequenceSource{
+				Sequence:         "MPEPTIDE",
+				SourceDatabase:   "lemna.org",
+				SourceProteomeID: 18,
+				TranscriptID:     "txA",
+				ProteinID:        "protA",
+			},
+		},
+		{
+			LabelName: "C4H-2",
+			QuerySource: &model.QuerySequenceSource{
+				Sequence:         "MPEPTIDE",
+				SourceDatabase:   "lemna.org",
+				SourceProteomeID: 18,
+				TranscriptID:     "txA",
+				ProteinID:        "protA",
+			},
+		},
+	}
+
+	out, err := w.alignPreparedBlastItemsToRequest(context.Background(), items, model.BlastRequest{
+		Program:      "local:BLASTN",
+		SequenceKind: model.SequenceDNA,
+	})
+	if err != nil {
+		t.Fatalf("alignPreparedBlastItemsToRequest returned error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("aligned items = %d, want 2", len(out))
+	}
+	for i := range out {
+		if out[i].Sequence != "ATGGCCATGGCC" {
+			t.Fatalf("item %d sequence = %q, want DNA sequence", i, out[i].Sequence)
+		}
+	}
+	if fetchCount["blastn|txA"] != 1 {
+		t.Fatalf("FetchNucleotideSequence count = %d, want 1 deduped fetch", fetchCount["blastn|txA"])
+	}
+}
+
+func TestAlignPreparedBlastItemsToRequestReusesStoredSequenceVariants(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			fetchCount: map[string]int{},
+		},
+	}
+	items := []blastQueryItem{
+		{
+			LabelName:          "C4H-1",
+			ProteinSequence:    "MPEPTIDE",
+			NucleotideSequence: "ATGGCCATGGCC",
+			QuerySource: &model.QuerySequenceSource{
+				ProteinSequence:     "MPEPTIDE",
+				NucleotideSequence:  "ATGGCCATGGCC",
+				PreferredSequenceID: "txA",
+				SourceProteomeID:    18,
+				TranscriptID:        "txA",
+				ProteinID:           "protA",
+			},
+		},
+	}
+
+	out, err := w.alignPreparedBlastItemsToRequest(context.Background(), items, model.BlastRequest{
+		Program:      "local:BLASTN",
+		SequenceKind: model.SequenceDNA,
+	})
+	if err != nil {
+		t.Fatalf("alignPreparedBlastItemsToRequest returned error: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("aligned items = %d, want 1", len(out))
+	}
+	if out[0].Sequence != "ATGGCCATGGCC" {
+		t.Fatalf("Sequence = %q, want cached DNA", out[0].Sequence)
+	}
+	if out[0].QuerySource == nil || out[0].QuerySource.Sequence != "ATGGCCATGGCC" {
+		t.Fatalf("QuerySource.Sequence = %q, want cached DNA", out[0].QuerySource.Sequence)
 	}
 }
 
@@ -2332,10 +3928,39 @@ func TestInterProQueryLookupRowCarriesQuerySourceMetadata(t *testing.T) {
 	}
 }
 
+func TestEnrichBlastRowsWithUniProtProgressReportsPrefetchPhase(t *testing.T) {
+	w := &BlastWizard{}
+	rows := []model.BlastResultRow{{UniProtAccession: "Q43158", Protein: "Q43158"}}
+	messages := make([]string, 0, 4)
+	got, err := w.enrichBlastRowsWithUniProtProgress(context.Background(), uniprot.NewClient(defaultHTTPClient()), rows, func(current int, message string) {
+		messages = append(messages, message)
+	})
+	if err != nil {
+		t.Fatalf("enrichBlastRowsWithUniProtProgress returned error: %v", err)
+	}
+	if len(got) != 1 || !got[0].UniProtReferenceEnabled {
+		t.Fatalf("unexpected UniProt enrichment result: %#v", got)
+	}
+	foundPrefetch := false
+	foundResolve := false
+	for _, message := range messages {
+		if strings.Contains(message, "Prefetching UniProt accessions") {
+			foundPrefetch = true
+		}
+		if strings.Contains(message, "Resolving UniProt references") {
+			foundResolve = true
+		}
+	}
+	if !foundPrefetch || !foundResolve {
+		t.Fatalf("progress messages = %#v, want prefetch and resolve phases", messages)
+	}
+}
+
 func TestKeywordRowsToBlastItemsPreservesKeywordMetadata(t *testing.T) {
 	rows := []model.KeywordResultRow{{
 		SourceDatabase:      "lemna",
 		LabelName:           "Os4CL1",
+		PhgoAliases:         "Os4CL1; 4CL1",
 		Aliases:             "4CL1; Os4CL1",
 		AutoDefine:          "4CL1",
 		UniProt:             "P41636",
@@ -2355,7 +3980,7 @@ func TestKeywordRowsToBlastItemsPreservesKeywordMetadata(t *testing.T) {
 		GenomeLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
 		SearchAlias: "Spirodela polyrhiza",
 	}, rows, map[string]sequenceFetchResult{
-		"Sp9509d011g001470_T001": {sequence: "MPEPTIDE"},
+		"Sp9509d011g001470_T001": {data: model.ProteinSequenceData{Sequence: "MPEPTIDE"}},
 	})
 	if len(items) != 1 {
 		t.Fatalf("items = %d, want 1", len(items))
@@ -2363,7 +3988,22 @@ func TestKeywordRowsToBlastItemsPreservesKeywordMetadata(t *testing.T) {
 	if items[0].QuerySource == nil {
 		t.Fatal("expected query source metadata")
 	}
+	if !items[0].FromKeyword {
+		t.Fatal("expected keyword-origin marker")
+	}
 	source := items[0].QuerySource
+	if source.LabelName != "Os4CL1" {
+		t.Fatalf("LabelName = %q, want keyword label", source.LabelName)
+	}
+	if source.PhgoAliases != "Os4CL1; 4CL1" {
+		t.Fatalf("PhgoAliases = %q, want keyword phgo aliases", source.PhgoAliases)
+	}
+	if source.Aliases != "" {
+		t.Fatalf("Aliases = %q, want no source alias transfer into BLAST", source.Aliases)
+	}
+	if source.AutoDefine != "" {
+		t.Fatalf("AutoDefine = %q, want no auto_define transfer into BLAST", source.AutoDefine)
+	}
 	if source.UniProtAccession != "P41636" {
 		t.Fatalf("UniProtAccession = %q, want P41636", source.UniProtAccession)
 	}
@@ -2375,6 +4015,152 @@ func TestKeywordRowsToBlastItemsPreservesKeywordMetadata(t *testing.T) {
 	}
 	if source.Annotation != "4-coumarate--CoA ligase" {
 		t.Fatalf("Annotation = %q, want description", source.Annotation)
+	}
+}
+
+func TestKeywordRowsToBlastItemsDoesNotMergePhytozomeSymbolsOrSynonyms(t *testing.T) {
+	rows := []model.KeywordResultRow{{
+		SourceDatabase: "phytozome",
+		LabelName:      "PAL1",
+		PhgoAliases:    "PAL1; ATPAL1",
+		Symbols:        "ATPAL1",
+		Synonyms:       "PAL1; PAL2",
+		AutoDefine:     "phenylalanine ammonia-lyase",
+		TranscriptID:   "AT2G37040.1",
+		GeneIdentifier: "AT2G37040",
+		SequenceID:     "AT2G37040.1",
+		GeneReportURL:  "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G37040",
+	}}
+	items := keywordRowsToBlastItems(model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+	}, rows, map[string]sequenceFetchResult{
+		"AT2G37040.1": {data: model.ProteinSequenceData{Sequence: "MPEPTIDE"}},
+	})
+	if len(items) != 1 || items[0].QuerySource == nil {
+		t.Fatalf("items = %#v, want one query source", items)
+	}
+	source := items[0].QuerySource
+	if source.PhgoAliases != "PAL1; ATPAL1" {
+		t.Fatalf("PhgoAliases = %q, want stored labelname aliases", source.PhgoAliases)
+	}
+	if source.Aliases != "" || source.AutoDefine != "" {
+		t.Fatalf("unexpected source alias transfer: aliases=%q auto_define=%q", source.Aliases, source.AutoDefine)
+	}
+	rowsWithSource := prepareBlastRowsForReferences([]model.BlastResultRow{{Protein: "hit-1"}}, items[0], model.BlastRequest{
+		Species:      model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"},
+		Sequence:     "MPEPTIDE",
+		Program:      "BLASTP",
+		SequenceKind: model.SequenceProtein,
+	}, "phytozome")
+	if got := rowsWithSource[0].LabelName; got != "" {
+		t.Fatalf("hit LabelName = %q, want keyword label not copied to BLAST hit label_name", got)
+	}
+	if got := rowsWithSource[0].BlastLabelName; got != "PAL1" {
+		t.Fatalf("BlastLabelName = %q, want keyword query label", got)
+	}
+	if got := rowsWithSource[0].BlastGeneID; got != "AT2G37040.1" {
+		t.Fatalf("BlastGeneID = %q, want keyword query transcript id", got)
+	}
+	if !keywordBlastItemsHaveReusableAliases(items) {
+		t.Fatal("expected keyword phgo_alias to be reusable")
+	}
+}
+
+func TestSupplementBlastAliasesPreservesKeywordQueryLabels(t *testing.T) {
+	w := &BlastWizard{
+		blastLabelLookupCache: make(map[string]blastAutoLabelResult),
+	}
+	items := []blastQueryItem{
+		{
+			LabelName:   "PAL1",
+			FromKeyword: true,
+			QuerySource: &model.QuerySequenceSource{
+				LabelName:   "PAL1",
+				PhgoAliases: "PAL1; ATPAL1",
+				ProteinID:   "AT2G37040.1",
+			},
+		},
+		{
+			QuerySource: &model.QuerySequenceSource{
+				ProteinID: "AT2G30490.1",
+			},
+		},
+	}
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{SourceDatabase: "phytozome", Synonyms: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	out := cloneBlastQueryItems(items)
+	result := w.autoIdentifyBlastLabelResultForTask(context.Background(), src, model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+	}, out[1], time.Now().UTC().Format(time.RFC3339Nano), 1)
+	setBlastQueryItemLabel(&out[1], result.Label)
+	mergeBlastQueryItemAliases(&out[1], result.Aliases)
+	if out[0].LabelName != "PAL1" || out[0].QuerySource.LabelName != "PAL1" {
+		t.Fatalf("locked keyword label changed: %#v", out[0])
+	}
+	if out[0].QuerySource.PhgoAliases != "PAL1; ATPAL1" {
+		t.Fatalf("locked keyword phgo aliases changed: %q", out[0].QuerySource.PhgoAliases)
+	}
+	if out[1].LabelName == "" {
+		t.Fatalf("missing-label item was not auto identified: %#v", out[1])
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if src.fetchCount["AT2G37040.1"] != 0 {
+		t.Fatalf("keyword item with reusable aliases triggered label lookup %d times", src.fetchCount["AT2G37040.1"])
+	}
+	if src.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("missing-label item lookup count = %d, want 1", src.fetchCount["AT2G30490.1"])
+	}
+}
+
+func TestAutoIdentifyBlastLabelResultForPhgoFastaKeepsPinnedLabelAndRanksAliases(t *testing.T) {
+	w := &BlastWizard{
+		blastLabelLookupCache: make(map[string]blastAutoLabelResult),
+	}
+	src := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490": {{SourceDatabase: "phytozome", Synonyms: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	item, err := parseBlastQueryRecord(">phgo://Sp7498/PAL1/AT2G30490\nMPEPTIDE\n")
+	if err != nil {
+		t.Fatalf("parseBlastQueryRecord returned error: %v", err)
+	}
+	if item.QuerySource == nil {
+		t.Fatal("expected FASTA query source")
+	}
+	if strings.TrimSpace(item.QuerySource.PhgoAliases) != "" {
+		t.Fatalf("phgo parse should not prefill aliases: %#v", item.QuerySource)
+	}
+	result := w.autoIdentifyBlastLabelResultForTask(context.Background(), src, model.SpeciesCandidate{
+		ProteomeID:  167,
+		JBrowseName: "Athaliana_TAIR10",
+		GenomeLabel: "Arabidopsis thaliana TAIR10",
+	}, item, time.Now().UTC().Format(time.RFC3339Nano), 0)
+	if result.Label != "PAL1" {
+		t.Fatalf("pinned phgo label changed: %#v", result)
+	}
+	if len(result.Aliases) == 0 {
+		t.Fatalf("expected ranked aliases for phgo FASTA item: %#v", result)
+	}
+	if result.Aliases[0] != "PAL1" {
+		t.Fatalf("expected pinned label to stay first in ranked aliases: %#v", result)
+	}
+	if !containsString(result.Aliases, "C4H") {
+		t.Fatalf("expected alias ranking to still include phytozome aliases: %#v", result)
 	}
 }
 
@@ -2412,6 +4198,47 @@ func TestAutoIdentifyBlastLabelResultFromPhytozomeReusesWizardCache(t *testing.T
 	}
 }
 
+func TestAutoIdentifyBlastLabelResultFromPhytozomeDeduplicatesConcurrentLookups(t *testing.T) {
+	lookupSource := &countingKeywordMapSource{
+		keywordMapSource: keywordMapSource{
+			name: "phytozome",
+			rowsByKeyword: map[string][]model.KeywordResultRow{
+				"AT2G30490.1": {{LabelName: "C4H", Aliases: "C4H; CYP73A5"}},
+			},
+		},
+	}
+	w := &BlastWizard{
+		blastLabelLookupCache: make(map[string]blastAutoLabelResult),
+		keywordTermRowsCache:  make(map[string][]model.KeywordResultRow),
+	}
+	item := blastQueryItem{
+		QuerySource: &model.QuerySequenceSource{
+			ProteinID: "AT2G30490.1",
+		},
+	}
+	species := model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10", GenomeLabel: "Arabidopsis thaliana TAIR10"}
+	var wg sync.WaitGroup
+	results := make([]blastAutoLabelResult, 2)
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = w.autoIdentifyBlastLabelResultFromPhytozome(context.Background(), lookupSource, species, item)
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range results {
+		if strings.TrimSpace(got.Label) == "" {
+			t.Fatalf("concurrent blast label result %d missing label: %#v", i, got)
+		}
+	}
+	lookupSource.mu.Lock()
+	defer lookupSource.mu.Unlock()
+	if lookupSource.fetchCount["AT2G30490.1"] != 1 {
+		t.Fatalf("phytozome concurrent label lookup count = %d, want 1", lookupSource.fetchCount["AT2G30490.1"])
+	}
+}
+
 func TestParseBlastLoadCommand(t *testing.T) {
 	filename, ok := parseBlastLoadCommand(`load "queries.txt"`)
 	if !ok {
@@ -2422,12 +4249,27 @@ func TestParseBlastLoadCommand(t *testing.T) {
 	}
 }
 
+func TestParseBlastLoadCommandAcceptsFastaExtensions(t *testing.T) {
+	filename, ok := parseBlastLoadCommand(`load "queries.fasta"`)
+	if !ok || filename != "queries.fasta" {
+		t.Fatalf("unexpected fasta filename parse: %q ok=%v", filename, ok)
+	}
+	filename, ok = parseBlastLoadCommand(`load "queries.fa"`)
+	if !ok || filename != "queries.fa" {
+		t.Fatalf("unexpected fa filename parse: %q ok=%v", filename, ok)
+	}
+}
+
 func TestAvailableBlastProgramsIncludeServerAndLocalCapabilities(t *testing.T) {
 	serverOnly := lemna.BlastCapability{
-		HasServerNucleotideDB: true,
-		BlastNDBID:            12,
-		HasServerProteinDB:    true,
-		ProteinDBID:           34,
+		HasServerNucleotideDB:  true,
+		BlastNDBID:             12,
+		HasServerProteinDB:     true,
+		ProteinDBID:            34,
+		ServerBlastNAvailable:  true,
+		ServerBlastXAvailable:  true,
+		ServerTBlastNAvailable: true,
+		ServerBlastPAvailable:  true,
 	}
 	got := availableBlastProgramsFromCapability(serverOnly)
 	want := []string{"blastn", "blastx", "tblastn", "blastp"}
@@ -2452,5 +4294,83 @@ func TestAvailableBlastProgramsIncludeServerAndLocalCapabilities(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("unexpected program at %d: got %q want %q", i, got[i], want[i])
 		}
+	}
+
+	mixed := lemna.BlastCapability{
+		HasServerNucleotideDB:  true,
+		BlastNDBID:             12,
+		ServerBlastNAvailable:  true,
+		ServerTBlastNAvailable: true,
+		HasProteinFasta:        true,
+	}
+	got = availableBlastProgramsFromCapability(mixed)
+	want = []string{"blastn", "blastx", "tblastn", "blastp"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected mixed program count: got %#v want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected mixed program at %d: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestChooseLemnaBlastExecutionUsesProgramSpecificServerFlags(t *testing.T) {
+	w := &BlastWizard{}
+	selected := model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509"}
+	cap := lemna.BlastCapability{
+		HasServerNucleotideDB:  true,
+		BlastNDBID:             18,
+		ServerBlastNAvailable:  true,
+		ServerTBlastNAvailable: true,
+		HasProteinFasta:        true,
+	}
+
+	if got, err := w.chooseLemnaBlastExecution(cap, selected, "blastx"); err != nil || got != "local" {
+		t.Fatalf("chooseLemnaBlastExecution(blastx) = %q/%v, want local/nil", got, err)
+	}
+	if got, err := w.chooseLemnaBlastExecution(cap, selected, "blastn"); err != nil || got != "server" {
+		t.Fatalf("chooseLemnaBlastExecution(blastn) = %q/%v, want server/nil", got, err)
+	}
+}
+
+func TestAutoIdentifyBlastLabelsWithProgressSkipsTaskModalWhenSuppressed(t *testing.T) {
+	w := &BlastWizard{
+		httpClient:         defaultHTTPClient(),
+		suppressTaskModals: true,
+	}
+	items := []blastQueryItem{
+		{
+			LabelName: "PAL1",
+			QuerySource: &model.QuerySequenceSource{
+				PhgoAliases: "PAL1; PHENYLALANINE AMMONIA-LYASE 1",
+			},
+		},
+	}
+
+	out, err := w.autoIdentifyBlastLabelsWithProgress(context.Background(), model.SpeciesCandidate{}, items)
+	if err != nil {
+		t.Fatalf("autoIdentifyBlastLabelsWithProgress returned error: %v", err)
+	}
+	if len(out) != 1 || out[0].LabelName != "PAL1" {
+		t.Fatalf("unexpected output: %#v", out)
+	}
+}
+
+func TestReplayExportFilterSettingsRelaxesGenomeTargetPrograms(t *testing.T) {
+	tblastn := replayExportFilterSettings(model.BlastRequest{Program: "local:TBLASTN", TargetType: "genome"})
+	if tblastn.UseTargetCanonicalLengthRatio || tblastn.RequireTargetCanonicalLengthRatio {
+		t.Fatalf("tblastn canonical ratio should be disabled: %#v", tblastn)
+	}
+	if tblastn.InterProDomainMode != "off" || tblastn.RequireInterProConservedRegion {
+		t.Fatalf("tblastn interpro hard rules should be disabled: %#v", tblastn)
+	}
+
+	blastp := replayExportFilterSettings(model.BlastRequest{Program: "local:BLASTP", TargetType: "proteome"})
+	if !blastp.UseTargetCanonicalLengthRatio || !blastp.RequireTargetCanonicalLengthRatio {
+		t.Fatalf("blastp canonical ratio should stay enabled: %#v", blastp)
+	}
+	if blastp.InterProDomainMode != "conserved_region" || !blastp.RequireInterProConservedRegion {
+		t.Fatalf("blastp interpro defaults should stay enabled: %#v", blastp)
 	}
 }

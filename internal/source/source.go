@@ -20,7 +20,7 @@ type DataSource interface {
 	SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error)
 	WaitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error)
 	SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
-	FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (string, error)
+	FetchProteinSequence(ctx context.Context, targetID int, sequenceID string) (model.ProteinSequenceData, error)
 	FetchGeneQuerySequence(ctx context.Context, species model.SpeciesCandidate, reportType string, identifier string) (*model.QuerySequenceSource, error)
 }
 

@@ -8,15 +8,26 @@
 package lemna
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
 
 func TestFindBlastDBIDMatchesOfficialCloneOption(t *testing.T) {
 	body := `<select name="SELECT_DB">
@@ -38,26 +49,93 @@ func TestFindBlastDBIDMatchesOfficialCloneOption(t *testing.T) {
 	}
 }
 
+func TestEnrichServerBlastCapabilityTracksProgramSpecificAvailability(t *testing.T) {
+	client := NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := `<select name="SELECT_DB"><option value="">Select a Dataset</option>`
+			switch req.URL.Path {
+			case "/blast/nucleotide/nucleotide":
+				body += `<option value="18">Spirodela polyrhiza 9509 REF-OXFORD-3.0 Genome</option>`
+			case "/blast/protein/nucleotide":
+				body += `<option value="18">Spirodela polyrhiza 9509 REF-OXFORD-3.0 Genome</option>`
+			default:
+				body += ``
+			}
+			body += `</select>`
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	})
+	rel := releaseInfo{
+		RootDir:      "Sp_polyrhiza_9509",
+		ReleaseDir:   "Sp_polyrhiza_9509-REF-OXFORD-3.0",
+		DisplayLabel: "Spirodela polyrhiza 9509 REF-OXFORD-3.0",
+		BlastNDBID:   18,
+	}
+	cap := BlastCapability{}
+	client.enrichServerBlastCapability(context.Background(), rel, &cap)
+
+	if !cap.ServerBlastNAvailable || !cap.ServerTBlastNAvailable {
+		t.Fatalf("expected nucleotide server programs to be available: %#v", cap)
+	}
+	if cap.ServerBlastXAvailable || cap.ServerBlastPAvailable {
+		t.Fatalf("expected protein server programs to remain unavailable: %#v", cap)
+	}
+}
+
 func TestLocalBlastDatabaseSelectsDBType(t *testing.T) {
 	rel := releaseInfo{
 		ProteinURL:    "https://example.test/proteins.fasta.gz",
 		NucleotideURL: "https://example.test/genome.fasta.gz",
+		AvailableFiles: []downloadFile{
+			{Name: "species.genes.transcripts.primary.fasta.gz", URL: "https://example.test/transcripts.fasta.gz"},
+			{Name: "species.genes.cds.primary.fasta.gz", URL: "https://example.test/cds.fasta.gz"},
+			{Name: "species.fasta.gz", URL: "https://example.test/genome.fasta.gz"},
+		},
 	}
 
-	fastaURL, dbType, err := localBlastDatabase(rel, "blastp")
+	fastaURL, dbType, dbKey, err := localBlastDatabase(rel, "blastp")
 	if err != nil {
 		t.Fatalf("blastp database failed: %v", err)
 	}
 	if fastaURL != rel.ProteinURL || dbType != "prot" {
 		t.Fatalf("blastp got %q/%q, want protein/prot", fastaURL, dbType)
 	}
+	if !strings.Contains(dbKey, "blastp") {
+		t.Fatalf("blastp dbKey=%q should include program name", dbKey)
+	}
 
-	fastaURL, dbType, err = localBlastDatabase(rel, "tblastn")
+	fastaURL, dbType, dbKey, err = localBlastDatabase(rel, "tblastn")
 	if err != nil {
 		t.Fatalf("tblastn database failed: %v", err)
 	}
-	if fastaURL != rel.NucleotideURL || dbType != "nucl" {
-		t.Fatalf("tblastn got %q/%q, want nucleotide/nucl", fastaURL, dbType)
+	if fastaURL != "https://example.test/cds.fasta.gz" || dbType != "nucl" {
+		t.Fatalf("tblastn got %q/%q, want cds/nucl", fastaURL, dbType)
+	}
+	if !strings.Contains(dbKey, "tblastn") {
+		t.Fatalf("tblastn dbKey=%q should include program name", dbKey)
+	}
+
+	fastaURL, dbType, _, err = localBlastDatabase(rel, "blastn")
+	if err != nil {
+		t.Fatalf("blastn database failed: %v", err)
+	}
+	if fastaURL != "https://example.test/transcripts.fasta.gz" || dbType != "nucl" {
+		t.Fatalf("blastn got %q/%q, want transcripts/nucl", fastaURL, dbType)
+	}
+}
+
+func TestNormalizeProgramKeepsTBlastnDistinctFromBlastn(t *testing.T) {
+	got, err := normalizeProgram("local:TBLASTN")
+	if err != nil {
+		t.Fatalf("normalizeProgram returned error: %v", err)
+	}
+	if got != "tblastn" {
+		t.Fatalf("normalizeProgram(local:TBLASTN) = %q, want tblastn", got)
 	}
 }
 
@@ -92,6 +170,39 @@ func TestWaitForLocalBlastResultsDoesNotPollMissingCache(t *testing.T) {
 	}
 }
 
+func TestLocalBlastRequestCacheKeyAndHitRequireCachedResult(t *testing.T) {
+	client := NewClient(nil)
+	req := model.BlastRequest{
+		Species:          model.SpeciesCandidate{JBrowseName: "Sp9509", GenomeLabel: "Spirodela", ProteomeID: 18},
+		Program:          "local:BLASTP",
+		Sequence:         "MPEPTIDE",
+		EValue:           "1e-5",
+		AlignmentsToShow: 25,
+	}
+	key := localBlastRequestCacheKey(req, "blastp")
+	if key == "" {
+		t.Fatal("empty local BLAST request cache key")
+	}
+	client.mu.Lock()
+	client.localBlastJobCache[key] = model.BlastJob{JobID: "local-cached"}
+	client.mu.Unlock()
+	if _, ok := client.cachedLocalBlastJob(key); ok {
+		t.Fatal("job cache must not hit without the matching result cache")
+	}
+	client.mu.Lock()
+	client.localResultsCache["local-cached"] = model.BlastResult{JobID: "local-cached"}
+	client.mu.Unlock()
+	if job, ok := client.cachedLocalBlastJob(key); !ok || job.JobID != "local-cached" {
+		t.Fatalf("cachedLocalBlastJob()=%#v/%v, want local-cached/true", job, ok)
+	}
+
+	changed := req
+	changed.AlignmentsToShow = 50
+	if localBlastRequestCacheKey(changed, "blastp") == key {
+		t.Fatal("local BLAST cache key should include max hit setting")
+	}
+}
+
 func TestNucleotideFileScorePrefersGeneLevelTargets(t *testing.T) {
 	genome := nucleotideFileScore("Le_gibba_7742a-REF-CSHL-1.0.fasta.gz")
 	transcripts := nucleotideFileScore("Le_gibba_7742a_CSHL2022v1.genes.transcripts.primary.fasta.gz")
@@ -99,6 +210,22 @@ func TestNucleotideFileScorePrefersGeneLevelTargets(t *testing.T) {
 
 	if !(cds > transcripts && transcripts > genome) {
 		t.Fatalf("unexpected nucleotide FASTA priority: cds=%d transcripts=%d genome=%d", cds, transcripts, genome)
+	}
+}
+
+func TestLocalNucleotideFileScorePrefersProgramSpecificTargets(t *testing.T) {
+	transcripts := "species.genes.transcripts.primary.fasta.gz"
+	cds := "species.genes.cds.primary.fasta.gz"
+	genome := "species.fasta.gz"
+
+	if localNucleotideFileScore(cds, "tblastn") <= localNucleotideFileScore(transcripts, "tblastn") {
+		t.Fatalf("tblastn should prefer cds over transcripts")
+	}
+	if localNucleotideFileScore(transcripts, "blastn") <= localNucleotideFileScore(cds, "blastn") {
+		t.Fatalf("blastn should prefer transcripts over cds")
+	}
+	if localNucleotideFileScore(genome, "blastn") >= localNucleotideFileScore(transcripts, "blastn") {
+		t.Fatalf("blastn should prefer transcripts over genome")
 	}
 }
 
@@ -126,6 +253,577 @@ func TestEnrichBlastRowsWithAHRDDoesNotWriteDescriptionIntoGeneReportURL(t *test
 	}
 	if rows[0].UniProtAccession != "Q43158" {
 		t.Fatalf("unexpected UniProt accession: %q", rows[0].UniProtAccession)
+	}
+}
+
+func TestEnrichBlastRowsWithMappingsUsesTranscriptDirectlyForNucleotideHits(t *testing.T) {
+	rows := []model.BlastResultRow{
+		{
+			Protein:    "Sp9509d020g000340_T001",
+			SubjectID:  "Sp9509d020g000340_T001",
+			SequenceID: "Sp9509d020g000340_T001",
+		},
+	}
+	rel := releaseInfo{
+		RootDir:      "Sp_polyrhiza_9509",
+		ReleaseURL:   "https://example.test/release",
+		DisplayLabel: "Spirodela polyrhiza 9509",
+		BlastNDBID:   18,
+	}
+	transToGene := map[string]string{
+		"Sp9509d020g000340_T001": "Sp9509d020g000340",
+	}
+
+	enrichBlastRowsWithMappings(rel, &rows, nil, nil, transToGene, nil)
+
+	if rows[0].TranscriptID != "Sp9509d020g000340_T001" {
+		t.Fatalf("TranscriptID = %q, want direct subject transcript", rows[0].TranscriptID)
+	}
+	wantURL := "https://www.lemna.org/report/Sp_polyrhiza_9509/Sp9509d020g000340"
+	if rows[0].GeneReportURL != wantURL {
+		t.Fatalf("GeneReportURL = %q, want %q", rows[0].GeneReportURL, wantURL)
+	}
+	if rows[0].JBrowseName != "Sp_polyrhiza_9509" {
+		t.Fatalf("JBrowseName = %q, want Sp_polyrhiza_9509", rows[0].JBrowseName)
+	}
+	if rows[0].TargetID != 18 {
+		t.Fatalf("TargetID = %d, want 18", rows[0].TargetID)
+	}
+}
+
+func TestRunBlastAndParseProgramsWithRealBlastPlus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real BLAST+ execution test in short mode")
+	}
+	if err := ensureBlastTools("blastp"); err != nil {
+		t.Skipf("BLAST+ blastp/makeblastdb not available: %v", err)
+	}
+	if err := ensureBlastTools("blastx"); err != nil {
+		t.Skipf("BLAST+ blastx/makeblastdb not available: %v", err)
+	}
+	if err := ensureBlastTools("blastn"); err != nil {
+		t.Skipf("BLAST+ blastn/makeblastdb not available: %v", err)
+	}
+	if err := ensureBlastTools("tblastn"); err != nil {
+		t.Skipf("BLAST+ tblastn/makeblastdb not available: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	protein1 := "MAMAPRTEINSTRINGMAMAPRTEINSTRING"
+	nucleotide1 := "ATGGCTATGGCTCCTCGTACTGAAATTAATTCTACTCGTATTAATGGTATGGCTATGGCTCCTCGTACTGAAATTAATTCTACTCGTATTAATGGT"
+
+	proteinFASTA := filepath.Join(tmpDir, "protein.fasta")
+	if err := os.WriteFile(proteinFASTA, []byte(
+		">prot1 protein one\n"+protein1+"\n>prot2 protein two\nGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\n",
+	), 0o644); err != nil {
+		t.Fatalf("write protein FASTA: %v", err)
+	}
+	nucleotideFASTA := filepath.Join(tmpDir, "nucleotide.fasta")
+	if err := os.WriteFile(nucleotideFASTA, []byte(
+		">transcript1 transcript one\n"+nucleotide1+"\n>transcript2 transcript two\nGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\n",
+	), 0o644); err != nil {
+		t.Fatalf("write nucleotide FASTA: %v", err)
+	}
+
+	if err := ensureBlastDB(context.Background(), proteinFASTA, filepath.Join(tmpDir, "prot_db"), "prot"); err != nil {
+		t.Fatalf("make protein blast db: %v", err)
+	}
+	if err := ensureBlastDB(context.Background(), nucleotideFASTA, filepath.Join(tmpDir, "nucl_db"), "nucl"); err != nil {
+		t.Fatalf("make nucleotide blast db: %v", err)
+	}
+
+	protIdx, err := buildFastaIndex(proteinFASTA)
+	if err != nil {
+		t.Fatalf("build protein index: %v", err)
+	}
+	nuclIdx, err := buildFastaIndex(nucleotideFASTA)
+	if err != nil {
+		t.Fatalf("build nucleotide index: %v", err)
+	}
+
+	tests := []struct {
+		name                  string
+		program               string
+		dbPrefix              string
+		index                 map[string]fastaEntry
+		query                 string
+		wantSubject           string
+		wantTargetLen         int
+		wantQueryFrom         int
+		wantTargetFrom        int
+		wantQueryLength       int
+		wantCoveragePositive  bool
+		wantPositivesPositive bool
+		wantStrandsSet        bool
+	}{
+		{
+			name:                  "blastp",
+			program:               "blastp",
+			dbPrefix:              filepath.Join(tmpDir, "prot_db"),
+			index:                 protIdx,
+			query:                 protein1,
+			wantSubject:           "prot1",
+			wantTargetLen:         len(protein1),
+			wantQueryFrom:         1,
+			wantTargetFrom:        1,
+			wantQueryLength:       len(protein1),
+			wantCoveragePositive:  true,
+			wantPositivesPositive: true,
+		},
+		{
+			name:                  "blastx",
+			program:               "blastx",
+			dbPrefix:              filepath.Join(tmpDir, "prot_db"),
+			index:                 protIdx,
+			query:                 nucleotide1,
+			wantSubject:           "prot1",
+			wantTargetLen:         len(protein1),
+			wantQueryFrom:         1,
+			wantTargetFrom:        1,
+			wantQueryLength:       len(nucleotide1),
+			wantCoveragePositive:  true,
+			wantPositivesPositive: true,
+			wantStrandsSet:        true,
+		},
+		{
+			name:                 "blastn",
+			program:              "blastn",
+			dbPrefix:             filepath.Join(tmpDir, "nucl_db"),
+			index:                nuclIdx,
+			query:                nucleotide1,
+			wantSubject:          "transcript1",
+			wantTargetLen:        len(nucleotide1),
+			wantQueryFrom:        1,
+			wantTargetFrom:       1,
+			wantQueryLength:      len(nucleotide1),
+			wantCoveragePositive: true,
+		},
+		{
+			name:                  "tblastn",
+			program:               "tblastn",
+			dbPrefix:              filepath.Join(tmpDir, "nucl_db"),
+			index:                 nuclIdx,
+			query:                 protein1,
+			wantSubject:           "transcript1",
+			wantTargetLen:         len(nucleotide1),
+			wantQueryFrom:         1,
+			wantTargetFrom:        1,
+			wantQueryLength:       len(protein1),
+			wantCoveragePositive:  true,
+			wantPositivesPositive: true,
+			wantStrandsSet:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := runBlastAndParse(context.Background(), tt.program, tt.dbPrefix, tt.index, model.BlastRequest{
+				Program:          strings.ToUpper(tt.program),
+				Sequence:         tt.query,
+				AlignmentsToShow: 5,
+				EValue:           "10",
+			})
+			if err != nil {
+				t.Fatalf("runBlastAndParse(%s): %v", tt.program, err)
+			}
+			if len(res.Rows) == 0 {
+				t.Fatalf("runBlastAndParse(%s) returned no rows", tt.program)
+			}
+			row := res.Rows[0]
+			if row.BlastProgram != strings.ToUpper(tt.program) {
+				t.Fatalf("BlastProgram = %q, want %q", row.BlastProgram, strings.ToUpper(tt.program))
+			}
+			if row.SubjectID != tt.wantSubject {
+				t.Fatalf("SubjectID = %q, want %q", row.SubjectID, tt.wantSubject)
+			}
+			if row.SequenceID != tt.wantSubject {
+				t.Fatalf("SequenceID = %q, want %q", row.SequenceID, tt.wantSubject)
+			}
+			if row.TargetLength != tt.wantTargetLen {
+				t.Fatalf("TargetLength = %d, want %d", row.TargetLength, tt.wantTargetLen)
+			}
+			if row.QueryFrom != tt.wantQueryFrom {
+				t.Fatalf("QueryFrom = %d, want %d", row.QueryFrom, tt.wantQueryFrom)
+			}
+			if row.TargetFrom != tt.wantTargetFrom {
+				t.Fatalf("TargetFrom = %d, want %d", row.TargetFrom, tt.wantTargetFrom)
+			}
+			if row.QueryLength != tt.wantQueryLength {
+				t.Fatalf("QueryLength = %d, want %d", row.QueryLength, tt.wantQueryLength)
+			}
+			if tt.wantCoveragePositive && row.AlignQueryLengthPercent <= 0 {
+				t.Fatalf("AlignQueryLengthPercent = %.2f, want positive", row.AlignQueryLengthPercent)
+			}
+			if tt.wantPositivesPositive && row.Positives <= 0 {
+				t.Fatalf("Positives = %d, want positive", row.Positives)
+			}
+			if tt.wantStrandsSet && strings.TrimSpace(row.Strands) == "" {
+				t.Fatalf("Strands = %q, want non-empty", row.Strands)
+			}
+		})
+	}
+}
+
+func TestCompactLocalBlastDBPrefixStaysShortAndStable(t *testing.T) {
+	key := "blastp_Sp_polyrhiza_9509-REF-OXFORD-3.0_CSHL2022v1.genes.filt.proteins.with.extra.very.long.name.for.windows.path.behavior"
+	prefixA := compactLocalBlastDBPrefix("prot", key)
+	prefixB := compactLocalBlastDBPrefix("prot", key)
+	if prefixA != prefixB {
+		t.Fatalf("compactLocalBlastDBPrefix not stable: %q vs %q", prefixA, prefixB)
+	}
+	if len(prefixA) > 80 {
+		t.Fatalf("compactLocalBlastDBPrefix too long: %d %q", len(prefixA), prefixA)
+	}
+	if !strings.HasPrefix(prefixA, "lemna_prot_") || !strings.HasSuffix(prefixA, "_db") {
+		t.Fatalf("unexpected compact prefix shape: %q", prefixA)
+	}
+}
+
+func TestBlastDBCompleteRequiresCoreFilesByType(t *testing.T) {
+	tmpDir := t.TempDir()
+	protPrefix := filepath.Join(tmpDir, "prot_db")
+	if err := os.WriteFile(protPrefix+".pin", []byte("x"), 0o644); err != nil {
+		t.Fatalf("write .pin: %v", err)
+	}
+	if blastDBComplete(protPrefix, "prot") {
+		t.Fatal("protein db should not be complete with only .pin")
+	}
+	for _, ext := range []string{".phr", ".psq"} {
+		if err := os.WriteFile(protPrefix+ext, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", ext, err)
+		}
+	}
+	if !blastDBComplete(protPrefix, "prot") {
+		t.Fatal("protein db should be complete with .pin/.phr/.psq")
+	}
+
+	nuclPrefix := filepath.Join(tmpDir, "nucl_db")
+	if err := os.WriteFile(nuclPrefix+".nin", []byte("x"), 0o644); err != nil {
+		t.Fatalf("write .nin: %v", err)
+	}
+	if blastDBComplete(nuclPrefix, "nucl") {
+		t.Fatal("nucleotide db should not be complete with only .nin")
+	}
+	for _, ext := range []string{".nhr", ".nsq"} {
+		if err := os.WriteFile(nuclPrefix+ext, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", ext, err)
+		}
+	}
+	if !blastDBComplete(nuclPrefix, "nucl") {
+		t.Fatal("nucleotide db should be complete with .nin/.nhr/.nsq")
+	}
+}
+
+func TestRemoveBlastDBFilesClearsPartialDatabaseArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	prefix := filepath.Join(tmpDir, "lemna_prot_test_db")
+	for _, ext := range []string{".pin", ".phr", ".psq", ".pdb", ".ptf", ".pto"} {
+		if err := os.WriteFile(prefix+ext, []byte("x"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", ext, err)
+		}
+	}
+	if err := removeBlastDBFiles(prefix); err != nil {
+		t.Fatalf("removeBlastDBFiles: %v", err)
+	}
+	matches, err := filepath.Glob(prefix + ".*")
+	if err != nil {
+		t.Fatalf("glob leftovers: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("expected no db artifacts left, got %v", matches)
+	}
+}
+
+func TestResetLocalBlastCacheRemovesTargetReleaseOnly(t *testing.T) {
+	cacheRoot, err := appfs.CacheDir("lemna", "localblast")
+	if err != nil {
+		t.Fatalf("cache root: %v", err)
+	}
+	targetA := filepath.Join(cacheRoot, "Sp_a", "release-a")
+	targetB := filepath.Join(cacheRoot, "Sp_b", "release-b")
+	if err := os.MkdirAll(targetA, 0o755); err != nil {
+		t.Fatalf("mkdir targetA: %v", err)
+	}
+	if err := os.MkdirAll(targetB, 0o755); err != nil {
+		t.Fatalf("mkdir targetB: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetA, "db.pin"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write targetA file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetB, "db.pin"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write targetB file: %v", err)
+	}
+	if err := resetLocalBlastCache("Sp_a", "release-a"); err != nil {
+		t.Fatalf("resetLocalBlastCache: %v", err)
+	}
+	if _, err := os.Stat(targetA); !os.IsNotExist(err) {
+		t.Fatalf("targetA should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(targetB); err != nil {
+		t.Fatalf("targetB should remain, stat err=%v", err)
+	}
+}
+
+func TestInstallManagedBlastPlusWhenMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping managed BLAST+ install test in short mode")
+	}
+	toolsDir, err := exec.LookPath("makeblastdb")
+	if err == nil && strings.TrimSpace(toolsDir) != "" {
+		t.Skip("BLAST+ already on PATH; managed install path is not needed for this environment")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	dir, err := installManagedBlastPlusForTest(ctx)
+	if err != nil {
+		t.Skipf("managed BLAST+ install unavailable in this environment: %v", err)
+	}
+	if strings.TrimSpace(dir) == "" {
+		t.Fatal("managed BLAST+ install returned empty directory")
+	}
+	if _, err := exec.LookPath("makeblastdb"); err != nil {
+		t.Fatalf("makeblastdb still unavailable after managed install: %v", err)
+	}
+}
+
+func installManagedBlastPlusForTest(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "go", "test", "./internal/blastplus", "-run", "^$", "-count=1")
+	cmd.Env = append(os.Environ(), "GOFLAGS=")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.Contains(line, "ok") {
+			continue
+		}
+	}
+	// The package test itself does not install tools; call the binary through go test helper.
+	helperDir := filepath.Join(".", ".cache", "test-blastplus")
+	if err := os.MkdirAll(helperDir, 0o755); err != nil {
+		return "", err
+	}
+	helper := filepath.Join(helperDir, "install_managed_helper_testmain.go")
+	content := strings.Join([]string{
+		"package main",
+		"",
+		"import (",
+		"\t\"context\"",
+		"\t\"fmt\"",
+		"\t\"net/http\"",
+		"\t\"os\"",
+		"\t\"time\"",
+		"\t\"github.com/KiriKirby/phytozome-go/internal/blastplus\"",
+		")",
+		"",
+		"func main() {",
+		"\tctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)",
+		"\tdefer cancel()",
+		"\tdir, err := blastplus.InstallManaged(ctx, http.DefaultClient)",
+		"\tif err != nil {",
+		"\t\tfmt.Println(err)",
+		"\t\tos.Exit(1)",
+		"\t}",
+		"\tfmt.Println(dir)",
+		"}",
+		"",
+	}, "\n")
+	if err := os.WriteFile(helper, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	defer os.Remove(helper)
+	run := exec.CommandContext(ctx, "go", "run", helper)
+	run.Env = append(os.Environ(), "GOFLAGS=")
+	out, err := run.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func TestFetchProteinSequenceResolvesTranscriptThroughProteinMappings(t *testing.T) {
+	client := NewClient(nil)
+	tmpDir := t.TempDir()
+	proteinFASTA := filepath.Join(tmpDir, "test.proteins.fasta")
+	if err := os.WriteFile(proteinFASTA, []byte(">Sp9509d011g001470_P001 protein\nMPEPTIDE\n"), 0o644); err != nil {
+		t.Fatalf("write protein FASTA: %v", err)
+	}
+	release := releaseInfo{
+		RootDir:      "Sp_polyrhiza_9509",
+		ReleaseDir:   "test-release",
+		ReleaseURL:   "https://example.test/release/",
+		GFFURL:       "https://example.test/release/test.gff3",
+		ProteinURL:   "https://example.test/release/test.proteins.fasta",
+		BlastNDBID:   18,
+		DisplayLabel: "Spirodela polyrhiza 9509",
+	}
+	client.releasesByJBrowseName = map[string]releaseInfo{
+		"Sp_polyrhiza_9509": release,
+	}
+	client.speciesCandidates = []model.SpeciesCandidate{{
+		JBrowseName: "Sp_polyrhiza_9509",
+		GenomeLabel: "Spirodela polyrhiza 9509",
+		ProteomeID:  18,
+	}}
+	client.proteinTranscriptCache[release.GFFURL] = proteinTranscriptMaps{
+		protToTrans: map[string]string{
+			"Sp9509d011g001470_P001": "Sp9509d011g001470_T001",
+		},
+		transToGene: map[string]string{
+			"Sp9509d011g001470_T001": "Sp9509d011g001470",
+			"Sp9509d011g001470":      "Sp9509d011g001470",
+		},
+	}
+	client.proteinReleaseCache[release.ProteinURL] = map[string]string{
+		"Sp9509d011g001470_P001": "MPEPTIDE",
+	}
+	client.fastaIndexCache[proteinFASTA] = map[string]fastaEntry{
+		"Sp9509d011g001470_P001": {Defline: "Sp9509d011g001470_P001 protein", Length: 8},
+	}
+	cacheDir, err := ensureCacheDir(release.RootDir, release.ReleaseDir)
+	if err != nil {
+		t.Fatalf("ensureCacheDir: %v", err)
+	}
+	destPath := filepath.Join(cacheDir, filepath.Base(release.ProteinURL))
+	src, err := os.Open(proteinFASTA)
+	if err != nil {
+		t.Fatalf("open temp protein FASTA: %v", err)
+	}
+	defer src.Close()
+	dst, err := os.Create(destPath)
+	if err != nil {
+		t.Fatalf("create cached protein FASTA: %v", err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		t.Fatalf("copy cached protein FASTA: %v", err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatalf("close cached protein FASTA: %v", err)
+	}
+
+	record, err := client.FetchProteinSequence(context.Background(), 18, "Sp9509d011g001470_T001")
+	if err != nil {
+		t.Fatalf("FetchProteinSequence returned error: %v", err)
+	}
+	if record.Sequence != "MPEPTIDE" {
+		t.Fatalf("Sequence = %q, want MPEPTIDE", record.Sequence)
+	}
+	if record.OriginalHeader != ">Sp9509d011g001470_P001 protein" {
+		t.Fatalf("OriginalHeader = %q, want mapped protein header", record.OriginalHeader)
+	}
+}
+
+func TestLemnaLocalBlastProgramPerformanceMatrix(t *testing.T) {
+	if os.Getenv("PHYTO_LEMNA_LOCAL_BLAST_PERF") == "" {
+		t.Skip("set PHYTO_LEMNA_LOCAL_BLAST_PERF=1 to run lemna local BLAST four-program performance matrix")
+	}
+	if err := ensureBlastTools("blastp"); err != nil {
+		t.Skipf("BLAST+ not available: %v", err)
+	}
+	if err := ensureBlastTools("blastx"); err != nil {
+		t.Skipf("BLAST+ not available: %v", err)
+	}
+	if err := ensureBlastTools("blastn"); err != nil {
+		t.Skipf("BLAST+ not available: %v", err)
+	}
+	if err := ensureBlastTools("tblastn"); err != nil {
+		t.Skipf("BLAST+ not available: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	protein1 := "MAMAPRTEINSTRINGMAMAPRTEINSTRING"
+	nucleotide1 := "ATGGCTATGGCTCCTCGTACTGAAATTAATTCTACTCGTATTAATGGTATGGCTATGGCTCCTCGTACTGAAATTAATTCTACTCGTATTAATGGT"
+
+	proteinFASTA := filepath.Join(tmpDir, "protein.fasta")
+	if err := os.WriteFile(proteinFASTA, []byte(
+		">prot1 protein one\n"+protein1+"\n>prot2 protein two\nGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\n",
+	), 0o644); err != nil {
+		t.Fatalf("write protein FASTA: %v", err)
+	}
+	nucleotideFASTA := filepath.Join(tmpDir, "nucleotide.fasta")
+	if err := os.WriteFile(nucleotideFASTA, []byte(
+		">transcript1 transcript one\n"+nucleotide1+"\n>transcript2 transcript two\nGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\n",
+	), 0o644); err != nil {
+		t.Fatalf("write nucleotide FASTA: %v", err)
+	}
+
+	protDB := filepath.Join(tmpDir, "prot_db")
+	nuclDB := filepath.Join(tmpDir, "nucl_db")
+	if err := ensureBlastDB(context.Background(), proteinFASTA, protDB, "prot"); err != nil {
+		t.Fatalf("make protein blast db: %v", err)
+	}
+	if err := ensureBlastDB(context.Background(), nucleotideFASTA, nuclDB, "nucl"); err != nil {
+		t.Fatalf("make nucleotide blast db: %v", err)
+	}
+	protIdx, err := buildFastaIndex(proteinFASTA)
+	if err != nil {
+		t.Fatalf("build protein index: %v", err)
+	}
+	nuclIdx, err := buildFastaIndex(nucleotideFASTA)
+	if err != nil {
+		t.Fatalf("build nucleotide index: %v", err)
+	}
+
+	type perfCase struct {
+		program  string
+		dbPrefix string
+		index    map[string]fastaEntry
+		query    string
+	}
+	cases := []perfCase{
+		{program: "blastp", dbPrefix: protDB, index: protIdx, query: protein1},
+		{program: "blastx", dbPrefix: protDB, index: protIdx, query: nucleotide1},
+		{program: "blastn", dbPrefix: nuclDB, index: nuclIdx, query: nucleotide1},
+		{program: "tblastn", dbPrefix: nuclDB, index: nuclIdx, query: protein1},
+	}
+
+	workersToTry := []int{1, 2, 4, 8}
+	threadsToTry := []int{1, 2, 4, 8, 16}
+	if only := strings.TrimSpace(os.Getenv("PHYTO_LEMNA_LOCAL_BLAST_PERF_PROGRAM")); only != "" {
+		filtered := cases[:0]
+		for _, c := range cases {
+			if strings.EqualFold(c.program, only) {
+				filtered = append(filtered, c)
+			}
+		}
+		cases = filtered
+	}
+	if len(cases) == 0 {
+		t.Fatal("no lemna local blast perf program selected")
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.program, func(t *testing.T) {
+			for _, workers := range workersToTry {
+				for _, threads := range threadsToTry {
+					if workers*threads > currentCPUCount()*2 {
+						continue
+					}
+					ctx := WithLocalBlastThreads(context.Background(), threads)
+					started := time.Now()
+					totalRows := 0
+					for i := 0; i < workers; i++ {
+						res, err := runBlastAndParse(ctx, tc.program, tc.dbPrefix, tc.index, model.BlastRequest{
+							Program:          strings.ToUpper(tc.program),
+							Sequence:         tc.query,
+							AlignmentsToShow: 5,
+							EValue:           "10",
+						})
+						if err != nil {
+							t.Fatalf("program=%s workers=%d threads=%d runBlastAndParse failed: %v", tc.program, workers, threads, err)
+						}
+						totalRows += len(res.Rows)
+					}
+					elapsed := time.Since(started)
+					t.Logf("program=%s batch_workers=%d blast_threads=%d runs=%d rows=%d total_ms=%d", tc.program, workers, threads, workers, totalRows, elapsed.Milliseconds())
+				}
+			}
+		})
 	}
 }
 
