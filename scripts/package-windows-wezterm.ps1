@@ -21,8 +21,9 @@ $preparedDir = Get-PreparedWindowsWezTermDir $repoRoot $release.Tag
 $bundleDir = Join-Path $repoRoot "bin\phytozome-go_windows_amd64_wezterm"
 $appPath = Join-Path $bundleDir "phytozome-go.bin"
 $zipPath = Join-Path $repoRoot "bin\phytozome-go_windows_amd64_wezterm.zip"
+$preparedWindowIcon = Join-Path $preparedDir (Get-PhytozomeWindowIconFileName)
 
-if ($Prepare -or -not (Test-Path -LiteralPath (Join-Path $preparedDir "wezterm.bin") -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $preparedDir "phytozome-go.exe") -PathType Leaf)) {
+if ($Prepare -or -not (Test-Path -LiteralPath (Join-Path $preparedDir "wezterm.bin") -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $preparedDir "phytozome-go.exe") -PathType Leaf) -or -not (Test-Path -LiteralPath $preparedWindowIcon -PathType Leaf)) {
     & (Join-Path $PSScriptRoot "prepare-windows-wezterm.ps1") -Version $release.Tag
 }
 
@@ -30,6 +31,9 @@ Remove-Item -LiteralPath $bundleDir -Recurse -Force -ErrorAction SilentlyContinu
 New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 
 Copy-Item -Path (Join-Path $preparedDir "*") -Destination $bundleDir -Recurse -Force
+Copy-PhytozomeWindowIcon -RepoRoot $repoRoot -Destination $bundleDir
+& (Join-Path $PSScriptRoot "update-windows-icon.ps1") -Source "docs\logo2.png"
+& (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $bundleDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
 
 Push-Location $repoRoot
 try {

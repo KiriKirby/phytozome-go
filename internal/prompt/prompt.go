@@ -2915,6 +2915,9 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 			return KeywordRowSelection{}, fmt.Errorf("no rows selected")
 		}
 		if result.Action == "blast" {
+			if result.ActionRow >= 0 && result.ActionRow < len(flatRows) {
+				return KeywordRowSelection{Rows: []model.KeywordResultRow{flatRows[result.ActionRow]}, RunBlast: true}, nil
+			}
 			return KeywordRowSelection{Rows: chosen, RunBlast: true}, nil
 		}
 		if result.GenerateFile {
@@ -3099,6 +3102,9 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 			continue
 		}
 		if result.Action == "blast" {
+			if result.RunIndex >= 0 && result.RunIndex < len(runs) && result.ActionRow >= 0 && result.ActionRow < len(runs[result.RunIndex].Rows) {
+				return BlastRowSelection{Rows: []model.BlastResultRow{runs[result.RunIndex].Rows[result.ActionRow]}}, nil
+			}
 			rows := make([]model.BlastResultRow, 0)
 			for runIndex := range items {
 				if runIndex >= len(runs) || runIndex >= len(result.SelectedByRun) {

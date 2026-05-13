@@ -7,7 +7,7 @@
 
 The program is designed for real biological work where you often need to move from one known gene or protein to a shortlist of homologs, review rows interactively, and export both a table and peptide sequences without hand-copying between websites.
 
-![phytozome GO wizard screenshot](docs/images/readme-wizard.png)
+![phytozome GO logo](docs/logo.png)
 
 ## What This Tool Is For
 

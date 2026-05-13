@@ -530,6 +530,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - clear `bin/` before rebuilding release artifacts
   - rebuild all supported platform binaries into `bin/`
   - keep release assets aligned with the actual executable names documented in the README
+  - Windows WezTerm bundles must apply `docs/logo2.png` to both the launcher executable icon and the embedded WezTerm window executable icon; keep the bundled `phytozome-go-window-icon.png` beside `wezterm.lua` as the stable source image
+  - the README lead image must use `docs/logo.png`
   - prefer publishing GitHub releases with explicit release notes that summarize user-visible changes and supported platforms
 
 ## Current workflows

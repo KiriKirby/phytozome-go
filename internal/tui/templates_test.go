@@ -327,6 +327,15 @@ func TestRowSelectionPageCanExposeExtraActionButton(t *testing.T) {
 	}
 }
 
+func TestShortcutMatchesCtrlB(t *testing.T) {
+	if !shortcutMatchesEvent(ShortcutBlast, tcell.NewEventKey(tcell.KeyCtrlB, 0, tcell.ModNone)) {
+		t.Fatal("Ctrl+B should match the BLAST shortcut")
+	}
+	if shortcutMatchesEvent(ShortcutBlast, tcell.NewEventKey(tcell.KeyCtrlD, 0, tcell.ModNone)) {
+		t.Fatal("Ctrl+D must not match the BLAST shortcut")
+	}
+}
+
 func TestFamilyBlastCustomizeButtonSitsLeftOfApply(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},

@@ -299,6 +299,7 @@ type BlastRunSelectionState struct {
 
 type BlastRunSelectionResult struct {
 	RunIndex         int
+	ActionRow        int
 	Selected         []bool
 	SelectedByRun    [][]bool
 	FilterFlagsByRun [][]bool
@@ -813,6 +814,7 @@ type RowSelectionResult struct {
 	FilterRequested bool
 	GenerateFile    bool
 	Action          string
+	ActionRow       int
 	DoneAll         bool
 	Nav             NavAction
 	State           RowSelectionState
@@ -1995,7 +1997,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			sortState = TableSort{Column: -1, Direction: SortAscending}
 		}
 	}
-	var result RowSelectionResult
+	result := RowSelectionResult{ActionRow: -1}
 
 	baseTable := tview.NewTable().
 		SetBorders(false).
@@ -2265,7 +2267,10 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		showHelpModal(columnHelpPages(column), 92, 24)
 	}
-	var runExtraAction func()
+	var runExtraActionForRow func(int)
+	runExtraAction := func() {
+		runExtraActionForRow(-1)
+	}
 	showDetailModal := func(title string, originalRow int, pages []DetailPage) {
 		closeModal = func() {
 			modalOpen = false
@@ -2300,7 +2305,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
 				return
 			}
-			runExtraAction()
+			runExtraActionForRow(originalRow)
 		}
 		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
 		modalOpen = true
@@ -2681,7 +2686,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.State = captureState()
 		app.Stop()
 	}
-	runExtraAction = func() {
+	runExtraActionForRow = func(actionRow int) {
 		action := strings.TrimSpace(page.ExtraAction)
 		if action == "" {
 			return
@@ -2690,6 +2695,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.FilterFlags = append([]bool{}, filterFlags...)
 		result.GenerateFile = false
 		result.Action = action
+		result.ActionRow = actionRow
 		result.DoneAll = false
 		result.State = captureState()
 		app.Stop()
@@ -2949,7 +2955,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 
 func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResult, error) {
 	app := newApp()
-	var result BlastRunSelectionResult
+	result := BlastRunSelectionResult{ActionRow: -1}
 	if len(page.Items) == 0 {
 		return result, nil
 	}
@@ -3117,13 +3123,17 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	currentFilterFlags := func() []bool {
 		return filterFlagsByRun[currentRun]
 	}
-	runExtraAction := func() {
+	runExtraActionForRow := func(runIndex int, actionRow int) {
 		action := strings.TrimSpace(page.ExtraAction)
 		if action == "" {
 			return
 		}
-		result.RunIndex = currentRun
-		result.Selected = append([]bool(nil), currentSelected()...)
+		if runIndex < 0 || runIndex >= len(page.Items) {
+			runIndex = currentRun
+		}
+		result.RunIndex = runIndex
+		result.ActionRow = actionRow
+		result.Selected = append([]bool(nil), selectedByRun[runIndex]...)
 		result.SelectedByRun = cloneBoolMatrix(selectedByRun)
 		result.FilterFlagsByRun = cloneBoolMatrix(filterFlagsByRun)
 		result.FilterRequested = false
@@ -3132,6 +3142,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		result.Action = action
 		result.State = captureState()
 		app.Stop()
+	}
+	runExtraAction := func() {
+		runExtraActionForRow(currentRun, -1)
 	}
 	displayColumn := func(dataColumn int) int { return dataColumn + 2 }
 	dataColumnFromSelection := func() int {
@@ -3288,7 +3301,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			if strings.TrimSpace(page.ExtraAction) == "" {
 				return
 			}
-			runExtraAction()
+			runExtraActionForRow(runIndex, originalRow)
 		}
 		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
 		modalOpen = true
@@ -10075,6 +10088,8 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 		switch keyName {
 		case "a":
 			return event.Key() == tcell.KeyCtrlA
+		case "b":
+			return event.Key() == tcell.KeyCtrlB
 		case "c":
 			return event.Key() == tcell.KeyCtrlC
 		case "d":
