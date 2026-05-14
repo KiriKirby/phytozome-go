@@ -1359,6 +1359,78 @@ func TestAutoIdentifyLemnaBlastHitLabelFallsBackToLocalBeforeSourceLabel(t *test
 	}
 }
 
+func TestAutoIdentifyLemnaBlastHitLabelSplitsWhitespaceAliasList(t *testing.T) {
+	w := &BlastWizard{source: lemna.NewClient(nil)}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"},
+		blastQueryItem{LabelName: "SOURCE1"},
+		[]model.BlastResultRow{{
+			SourceDatabase:   "lemna",
+			Protein:          "Sp9509d008g014760_T001",
+			UniProtGeneNames: "4CLL4 Os03g0132000 LOC_Os03g04000 OsJ_09299",
+			Defline:          "4-coumarate--CoA ligase-like 4",
+		}},
+	)
+	if got[0].LabelName != "4CLL4" {
+		t.Fatalf("LabelName = %q, want first split alias 4CLL4", got[0].LabelName)
+	}
+	if got[0].LabelNameType != "lemna local aliases" {
+		t.Fatalf("LabelNameType = %q, want lemna local aliases", got[0].LabelNameType)
+	}
+	if strings.Contains(got[0].PhgoAliases, "4CLL4 Os03g0132000") {
+		t.Fatalf("PhgoAliases kept whitespace list as one alias: %q", got[0].PhgoAliases)
+	}
+	aliases := labelname.SplitAliases(got[0].PhgoAliases)
+	for _, alias := range []string{"4CLL4", "Os03g0132000", "LOC_Os03g04000", "OsJ_09299"} {
+		found := false
+		for _, gotAlias := range aliases {
+			if strings.EqualFold(gotAlias, alias) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("PhgoAliases = %q, missing split alias %q", got[0].PhgoAliases, alias)
+		}
+	}
+}
+
+func TestAutoIdentifyLemnaBlastHitLabelUsesHitKeywordRowsBeforeSourceFallback(t *testing.T) {
+	w := &BlastWizard{source: fakeSource{
+		name: "lemna",
+		keywordRows: []model.KeywordResultRow{{
+			SourceDatabase: "lemna",
+			LabelName:      "C4H",
+			Aliases:        "C4H; CYP73A5",
+			TranscriptID:   "Sp9509d020g000340_T001",
+			SequenceID:     "Sp9509d020g000340_T001",
+		}},
+	}}
+	got := w.autoIdentifyBlastHitLabels(
+		context.Background(),
+		model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza"},
+		blastQueryItem{LabelName: "SOURCE1"},
+		[]model.BlastResultRow{{
+			SourceDatabase: "lemna",
+			Protein:        "Sp9509d020g000340_T001",
+			SubjectID:      "Sp9509d020g000340_T001",
+		}},
+	)
+	if got[0].LabelName == "" || got[0].LabelName == "SOURCE1" {
+		t.Fatalf("LabelName = %q, want Lemna hit keyword label instead of source fallback", got[0].LabelName)
+	}
+	if got[0].LabelNameType != "lemna local aliases" {
+		t.Fatalf("LabelNameType = %q, want lemna local aliases", got[0].LabelNameType)
+	}
+	if got[0].PhgoAliases == "" || strings.Contains(got[0].PhgoAliases, "SOURCE1") {
+		t.Fatalf("PhgoAliases = %q, want hit aliases without source fallback", got[0].PhgoAliases)
+	}
+	if !strings.Contains(got[0].PhgoAliases, "CYP73A5") {
+		t.Fatalf("PhgoAliases = %q, want keyword-row aliases", got[0].PhgoAliases)
+	}
+}
+
 func TestAutoIdentifyLemnaBlastHitLabelUsesSourceLabelLast(t *testing.T) {
 	w := &BlastWizard{source: lemna.NewClient(nil)}
 	got := w.autoIdentifyBlastHitLabels(
@@ -1875,7 +1947,7 @@ func TestOfflineWorkflowMatrixTwoDatabasesTwoModesWithAutoLabelsAndReferences(t 
 			if rows[0].LabelName == "" || rows[0].LabelNameType != tc.wantHitType || rows[0].PhgoAliases == "" {
 				t.Fatalf("blast hit auto label incomplete: %#v", rows[0])
 			}
-			if rows[0].BlastLabelName != blastQueryItemLabelName(tc.item) || rows[0].BlastGeneID != blastQueryItemGeneID(tc.item) {
+			if rows[0].BlastLabelName != blastQueryItemLabelName(tc.item) || rows[0].BlastGeneID != blastQueryItemID2(tc.item) {
 				t.Fatalf("blast source columns not preserved: %#v", rows[0])
 			}
 			if !rows[0].UniProtReferenceEnabled || !rows[0].InterProReferenceEnabled {
@@ -2937,7 +3009,52 @@ func TestBuildExportMetadataPrefersOriginalInputURL(t *testing.T) {
 	}
 }
 
+func TestBlastRowToBlastQueryItemUsesHitFASTAAndLabelMetadata(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			sequences: map[string]string{"seq1": "MPEPTIDE"},
+			headers:   map[string]string{"seq1": ">seq1 source header"},
+		},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	row := model.BlastResultRow{
+		SourceDatabase:   "phytozome",
+		LabelName:        "PAL1",
+		PhgoAliases:      "PAL1; PAL2",
+		BlastGeneID:      "GeneA.1",
+		Protein:          "prot1",
+		SequenceID:       "seq1",
+		TranscriptID:     "tx1",
+		Species:          "Arabidopsis",
+		TargetID:         42,
+		UniProtAccession: "P12345",
+		Defline:          "phenylalanine ammonia-lyase",
+	}
+
+	item, err := w.blastRowToBlastQueryItem(context.Background(), model.SpeciesCandidate{ProteomeID: 42, GenomeLabel: "TAIR10"}, row)
+	if err != nil {
+		t.Fatalf("blast row conversion failed: %v", err)
+	}
+	if !strings.HasPrefix(item.RawInput, ">seq1 source header\n") {
+		t.Fatalf("raw FASTA was not preserved: %q", item.RawInput)
+	}
+	if item.Sequence != "MPEPTIDE" || item.ProteinSequence != "MPEPTIDE" {
+		t.Fatalf("unexpected query sequence: %#v", item)
+	}
+	if item.LabelName != "PAL1" || item.QuerySource == nil || item.QuerySource.LabelName != "PAL1" {
+		t.Fatalf("label metadata not preserved: %#v", item)
+	}
+	if item.QuerySource.PhgoAliases != "PAL1; PAL2" || item.QuerySource.UniProtAccession != "P12345" {
+		t.Fatalf("source aliases/uniprot not preserved: %#v", item.QuerySource)
+	}
+	if item.QuerySource.SourceProteomeID != 42 || item.QuerySource.ProteinID != "prot1" || item.QuerySource.TranscriptID != "tx1" {
+		t.Fatalf("source identifiers not preserved: %#v", item.QuerySource)
+	}
+}
+
 type fakeSource struct {
+	name           string
 	query          *model.QuerySequenceSource
 	keywordRows    []model.KeywordResultRow
 	sequences      map[string]string
@@ -2950,7 +3067,12 @@ type fakeSource struct {
 
 var fakeSourceFetchMu sync.Mutex
 
-func (f fakeSource) Name() string { return "fake" }
+func (f fakeSource) Name() string {
+	if strings.TrimSpace(f.name) != "" {
+		return strings.TrimSpace(f.name)
+	}
+	return "fake"
+}
 func (f fakeSource) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
 	return nil, nil
 }
@@ -4318,19 +4440,88 @@ func TestAvailableBlastProgramsIncludeServerAndLocalCapabilities(t *testing.T) {
 func TestChooseLemnaBlastExecutionUsesProgramSpecificServerFlags(t *testing.T) {
 	w := &BlastWizard{}
 	selected := model.SpeciesCandidate{GenomeLabel: "Spirodela polyrhiza 9509"}
-	cap := lemna.BlastCapability{
-		HasServerNucleotideDB:  true,
-		BlastNDBID:             18,
-		ServerBlastNAvailable:  true,
-		ServerTBlastNAvailable: true,
-		HasProteinFasta:        true,
+	tests := []struct {
+		name       string
+		program    string
+		serverCap  lemna.BlastCapability
+		localCap   lemna.BlastCapability
+		wantBoth   string
+		wantServer string
+		wantLocal  string
+	}{
+		{
+			name:       "blastn",
+			program:    "blastn",
+			serverCap:  lemna.BlastCapability{ServerBlastNAvailable: true},
+			localCap:   lemna.BlastCapability{HasNucleotideFasta: true},
+			wantBoth:   "server",
+			wantServer: "server",
+			wantLocal:  "local",
+		},
+		{
+			name:       "blastx",
+			program:    "blastx",
+			serverCap:  lemna.BlastCapability{ServerBlastXAvailable: true},
+			localCap:   lemna.BlastCapability{HasProteinFasta: true},
+			wantBoth:   "server",
+			wantServer: "server",
+			wantLocal:  "local",
+		},
+		{
+			name:       "tblastn",
+			program:    "tblastn",
+			serverCap:  lemna.BlastCapability{ServerTBlastNAvailable: true},
+			localCap:   lemna.BlastCapability{HasNucleotideFasta: true},
+			wantBoth:   "server",
+			wantServer: "server",
+			wantLocal:  "local",
+		},
+		{
+			name:       "blastp",
+			program:    "blastp",
+			serverCap:  lemna.BlastCapability{ServerBlastPAvailable: true},
+			localCap:   lemna.BlastCapability{HasProteinFasta: true},
+			wantBoth:   "server",
+			wantServer: "server",
+			wantLocal:  "local",
+		},
 	}
+	merge := func(left, right lemna.BlastCapability) lemna.BlastCapability {
+		return lemna.BlastCapability{
+			ServerBlastNAvailable:  left.ServerBlastNAvailable || right.ServerBlastNAvailable,
+			ServerBlastXAvailable:  left.ServerBlastXAvailable || right.ServerBlastXAvailable,
+			ServerTBlastNAvailable: left.ServerTBlastNAvailable || right.ServerTBlastNAvailable,
+			ServerBlastPAvailable:  left.ServerBlastPAvailable || right.ServerBlastPAvailable,
+			HasNucleotideFasta:     left.HasNucleotideFasta || right.HasNucleotideFasta,
+			HasProteinFasta:        left.HasProteinFasta || right.HasProteinFasta,
+		}
+	}
+	for _, tt := range tests {
+		if got, err := w.chooseLemnaBlastExecution(merge(tt.serverCap, tt.localCap), selected, tt.program); err != nil || got != tt.wantBoth {
+			t.Fatalf("%s both = %q/%v, want %q/nil", tt.name, got, err, tt.wantBoth)
+		}
+		if got, err := w.chooseLemnaBlastExecution(tt.serverCap, selected, tt.program); err != nil || got != tt.wantServer {
+			t.Fatalf("%s server-only = %q/%v, want %q/nil", tt.name, got, err, tt.wantServer)
+		}
+		if got, err := w.chooseLemnaBlastExecution(tt.localCap, selected, tt.program); err != nil || got != tt.wantLocal {
+			t.Fatalf("%s local-only = %q/%v, want %q/nil", tt.name, got, err, tt.wantLocal)
+		}
+		if got, err := w.chooseLemnaBlastExecution(lemna.BlastCapability{}, selected, tt.program); err == nil || got != "" {
+			t.Fatalf("%s unavailable = %q/%v, want empty/error", tt.name, got, err)
+		}
+	}
+}
 
-	if got, err := w.chooseLemnaBlastExecution(cap, selected, "blastx"); err != nil || got != "local" {
-		t.Fatalf("chooseLemnaBlastExecution(blastx) = %q/%v, want local/nil", got, err)
+func TestUseSingleBlastRunReviewDependsOnOriginalQueryCount(t *testing.T) {
+	oneRun := []blastQueryRun{{Index: 1, Results: model.BlastResult{Rows: []model.BlastResultRow{{Protein: "hit1"}}}}}
+	if !useSingleBlastRunReview(1, oneRun) {
+		t.Fatal("single original query with one run should use single-run review")
 	}
-	if got, err := w.chooseLemnaBlastExecution(cap, selected, "blastn"); err != nil || got != "server" {
-		t.Fatalf("chooseLemnaBlastExecution(blastn) = %q/%v, want server/nil", got, err)
+	if useSingleBlastRunReview(2, oneRun) {
+		t.Fatal("multi-query input with one surviving run must remain in multi-run review")
+	}
+	if useSingleBlastRunReview(19, oneRun) {
+		t.Fatal("large multi-query input with one surviving run must remain in multi-run review")
 	}
 }
 

@@ -172,10 +172,11 @@ const (
 )
 
 const (
-	rowSelectionHeaderRow       = 0
-	rowSelectionDividerRow      = 1
-	rowSelectionFirstDataRow    = 2
-	rowSelectionFirstDataColumn = 2
+	rowSelectionHeaderRow         = 0
+	rowSelectionDividerRow        = 1
+	rowSelectionFirstDataRow      = 2
+	rowSelectionFirstDataColumn   = 2
+	rowSelectionDetailModalHeight = 34
 )
 
 type rowSelectionLayout struct {
@@ -231,10 +232,19 @@ type RowSelectionPage struct {
 	ExtraText     string
 	ExtraShortcut string
 	ExtraAction   string
+	DetailAction  string
 	DoneAllText   string
 	Hints         []string
 	State         RowSelectionState
 	LoadDetail    func(rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
+	AliasColumnID string
+	LoadAliases   func(rowIndex int) RowAliasChoices
+	ApplyAlias    func(rowIndex int, alias string) (TableRow, error)
+}
+
+type RowAliasChoices struct {
+	LabelName string
+	Aliases   []string
 }
 
 type RowSelectionState struct {
@@ -273,10 +283,14 @@ type BlastRunSelectionPage struct {
 	ExtraText     string
 	ExtraShortcut string
 	ExtraAction   string
+	DetailAction  string
 	DoneAllText   string
 	Hints         []string
 	State         BlastRunSelectionState
 	LoadDetail    func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
+	AliasColumnID string
+	LoadAliases   func(runIndex int, rowIndex int) RowAliasChoices
+	ApplyAlias    func(runIndex int, rowIndex int, alias string) (TableRow, error)
 }
 
 type BlastRunTableState struct {
@@ -2047,6 +2061,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	displayColumn := func(dataColumn int) int {
 		return dataColumn + 2
 	}
+	var selectOriginalRow func(originalRow int, column int)
 	sortableDataColumn := func(dataColumn int) bool {
 		if dataColumn == -1 {
 			return true
@@ -2069,6 +2084,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	modalOpen := false
 	var modalText *tview.TextView
 	var detailModal *detailOverlay
+	var aliasModalCapture inputCaptureFunc
 	var copyButtonRow *buttonRowPrimitive
 	closeModal := func() {}
 	var helpModal *localizedHelpModal
@@ -2087,6 +2103,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = func() {
 			modalOpen = false
 			modalText = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -2095,6 +2112,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		addButtonRow(modalBody, closeOnlyModalButtons(nil, true, ButtonOK, "Enter", closeModal, closeModal))
 		modalOpen = true
 		detailModal = nil
+		aliasModalCapture = nil
 		if pageRoot == nil {
 			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 		}
@@ -2106,6 +2124,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = false
 			helpModal = nil
 			detailModal = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -2267,6 +2286,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		showHelpModal(columnHelpPages(column), 92, 24)
 	}
+	var runActionForRow func(string, int)
 	var runExtraActionForRow func(int)
 	runExtraAction := func() {
 		runExtraActionForRow(-1)
@@ -2276,6 +2296,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = false
 			helpModal = nil
 			detailModal = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -2300,12 +2321,15 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			}
 			return page.LoadDetail(originalRow, pageIndex, itemIndex)
 		}
+		detailAction := firstNonEmptyText(page.DetailAction, page.ExtraAction)
 		var runDetailBlast func(pageIndex int, itemIndex int)
-		runDetailBlast = func(pageIndex int, itemIndex int) {
-			if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
-				return
+		if strings.TrimSpace(detailAction) != "" {
+			runDetailBlast = func(pageIndex int, itemIndex int) {
+				if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
+					return
+				}
+				runActionForRow(detailAction, originalRow)
 			}
-			runExtraActionForRow(originalRow)
 		}
 		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
 		modalOpen = true
@@ -2313,7 +2337,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		if pageRoot == nil {
 			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 		}
-		app.SetRoot(overlayRootOn(pageRoot, detailModal.Body(), 118, 34), true)
+		app.SetRoot(overlayRootOn(pageRoot, detailModal.Body(), 118, rowSelectionDetailModalHeight), true)
 		app.SetFocus(detailModal.list)
 	}
 	viewCurrent := func() {
@@ -2373,6 +2397,249 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			return
 		}
 	}
+	aliasColumnID := strings.TrimSpace(page.AliasColumnID)
+	if aliasColumnID == "" {
+		aliasColumnID = "label_name"
+	}
+	currentDataColumn := func() int {
+		if controlHeaders {
+			return -1
+		}
+		_, column := table.GetSelection()
+		if column < rowSelectionFirstDataColumn {
+			return -1
+		}
+		dataColumn := column - rowSelectionFirstDataColumn
+		if dataColumn < 0 || dataColumn >= len(page.Columns) {
+			return -1
+		}
+		return dataColumn
+	}
+	canAliasCurrent := func() bool {
+		if page.LoadAliases == nil || page.ApplyAlias == nil {
+			return false
+		}
+		dataColumn := currentDataColumn()
+		if dataColumn < 0 || dataColumn >= len(page.Columns) || !strings.EqualFold(page.Columns[dataColumn].ID, aliasColumnID) {
+			return false
+		}
+		originalRow := currentOriginalRow()
+		return originalRow >= 0 && originalRow < len(page.Rows)
+	}
+	showAliasModal := func() {
+		if !canAliasCurrent() {
+			showInfoModal(page.Title, "Aliases are available only when a label_name data cell is selected.", 64, 10)
+			return
+		}
+		originalRow := currentOriginalRow()
+		choices := page.LoadAliases(originalRow)
+		aliases := rowSelectionAliasLabels(choices)
+		if len(aliases) == 0 {
+			showInfoModal("Aliases", "No alias labelnames are available for this row.", 58, 10)
+			return
+		}
+		list := tview.NewList()
+		list.ShowSecondaryText(false)
+		list.SetSelectedTextColor(tcell.ColorBlack)
+		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetSelectedFocusOnly(false)
+		list.SetBorder(true).SetTitle(" Alias labelnames ").SetTitleAlign(tview.AlignCenter)
+		for _, alias := range aliases {
+			list.AddItem(alias, "", 0, nil)
+		}
+		if current := strings.TrimSpace(choices.LabelName); current != "" {
+			for i, alias := range aliases {
+				if strings.EqualFold(alias, current) {
+					list.SetCurrentItem(i)
+					break
+				}
+			}
+		}
+		selectedAlias := func() string {
+			index := list.GetCurrentItem()
+			if index < 0 {
+				index = 0
+			}
+			if index >= len(aliases) {
+				index = len(aliases) - 1
+			}
+			if index < 0 || index >= len(aliases) {
+				return ""
+			}
+			return aliases[index]
+		}
+		closeAliasModal := func() {
+			modalOpen = false
+			modalText = nil
+			helpModal = nil
+			detailModal = nil
+			aliasModalCapture = nil
+			if pageRoot != nil {
+				app.SetRoot(pageRoot, true)
+			}
+			app.SetFocus(table)
+		}
+		copyAlias := func() {
+			alias := selectedAlias()
+			if alias == "" {
+				return
+			}
+			if err := writeClipboardText(alias); err != nil {
+				showInfoModal("Copy failed", err.Error(), 72, 12)
+			}
+		}
+		applyAliasLabel := func(alias string) bool {
+			alias = strings.TrimSpace(alias)
+			if alias == "" || page.ApplyAlias == nil {
+				return false
+			}
+			nextRow, err := page.ApplyAlias(originalRow, alias)
+			if err != nil {
+				showInfoModal("Aliases", err.Error(), 72, 12)
+				return false
+			}
+			if len(nextRow.Cells) > 0 || len(nextRow.DetailPages) > 0 || strings.TrimSpace(nextRow.Detail) != "" {
+				page.Rows[originalRow] = nextRow
+			}
+			table.columnWidths = rowSelectionColumnWidths(page.Columns, page.Rows, layout, page.GroupSort)
+			sortRows()
+			rebuildDisplayRows()
+			refresh()
+			selectOriginalRow(originalRow, displayColumn(currentDataColumn()))
+			return true
+		}
+		setAliasAsLabel := func() {
+			if !applyAliasLabel(selectedAlias()) {
+				return
+			}
+			closeAliasModal()
+		}
+		showCustomAliasInputModal := func() {
+			input := tview.NewInputField().SetLabel("name ").SetText(strings.TrimSpace(choices.LabelName)).SetFieldWidth(24)
+			input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
+			input.SetLabelColor(tview.Styles.SecondaryTextColor)
+			input.SetFieldBackgroundColor(colorPanel)
+			message := hintView("")
+			closeInputModal := func() {
+				modalOpen = false
+				modalText = nil
+				helpModal = nil
+				detailModal = nil
+				aliasModalCapture = nil
+				if pageRoot != nil {
+					app.SetRoot(pageRoot, true)
+				}
+				app.SetFocus(table)
+			}
+			confirmInput := func() {
+				name := strings.TrimSpace(input.GetText())
+				if name == "" {
+					message.SetText("Enter a labelname.")
+					return
+				}
+				if !applyAliasLabel(name) {
+					return
+				}
+				closeInputModal()
+			}
+			box := newButtonFlex()
+			box.SetBorder(true)
+			box.SetTitle(" Rename item labelname ")
+			box.SetTitleAlign(tview.AlignCenter)
+			box.AddItem(input, 1, 0, true)
+			box.AddItem(message, 1, 0, false)
+			addButtonRow(box, modalButtons([]buttonSpec{
+				{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeInputModal, Visible: true},
+			}, true, "Rename", ShortcutApply, func(NavAction) {}, confirmInput))
+			closeModal = closeInputModal
+			modalOpen = true
+			modalText = nil
+			helpModal = nil
+			detailModal = nil
+			aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+				if event == nil {
+					return nil
+				}
+				switch event.Key() {
+				case tcell.KeyEscape:
+					closeInputModal()
+					return nil
+				case tcell.KeyEnter:
+					if event.Modifiers()&tcell.ModCtrl != 0 {
+						return nil
+					}
+					confirmInput()
+					return nil
+				case tcell.KeyTab, tcell.KeyBacktab:
+					return nil
+				}
+				if inputFieldEditKey(event) {
+					deliverInputFieldKey(input, event, app)
+					return nil
+				}
+				return nil
+			}
+			if pageRoot == nil {
+				pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
+			}
+			app.SetRoot(overlayRootOn(pageRoot, box, 40, 7), true)
+			app.SetFocus(input)
+		}
+		box := newButtonFlex()
+		box.SetBorder(true)
+		box.SetTitle(" Aliases ")
+		box.SetTitleAlign(tview.AlignCenter)
+		box.AddItem(textBlock("Choose an alias labelname. Copy copies the selected alias; Set as labelname fixes it as this row's labelname."), 3, 0, false)
+		box.AddItem(list, 0, 1, true)
+		addButtonRow(box, buttonRow(
+			buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeAliasModal, Visible: true},
+			buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyAlias, Visible: true},
+			buttonSpec{Label: "Rename", Shortcut: "F2", Action: showCustomAliasInputModal, Visible: true},
+			buttonSpec{Label: "Set as labelname", Shortcut: ShortcutApply, Action: setAliasAsLabel, Visible: true, Primary: true},
+		))
+		closeModal = closeAliasModal
+		modalOpen = true
+		helpModal = nil
+		detailModal = nil
+		aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			if isCopyShortcut(event) {
+				copyAlias()
+				return nil
+			}
+			if event.Key() == tcell.KeyF2 {
+				showCustomAliasInputModal()
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape:
+				closeAliasModal()
+				return nil
+			case tcell.KeyEnter:
+				if event.Modifiers()&tcell.ModCtrl != 0 {
+					return nil
+				}
+				setAliasAsLabel()
+				return nil
+			}
+			if handler := list.InputHandler(); handler != nil {
+				handler(event, func(p tview.Primitive) {
+					if p != nil {
+						app.SetFocus(p)
+					}
+				})
+			}
+			return nil
+		}
+		if pageRoot == nil {
+			pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
+		}
+		overlayHeight := rowSelectionAliasOverlayHeight(len(aliases))
+		app.SetRoot(overlayRootOn(pageRoot, box, 68, overlayHeight), true)
+		app.SetFocus(list)
+	}
 	headerDisplayColumn := func() int {
 		if headerColumn == -1 {
 			return 1
@@ -2410,7 +2677,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		table.Select(row, column)
 	}
-	selectOriginalRow := func(originalRow int, column int) {
+	selectOriginalRow = func(originalRow int, column int) {
 		if displayRow, ok := displayRowIndexCache[originalRow]; ok {
 			keepSelectionVisible(displayRow+layout.firstDataRow, column)
 			return
@@ -2686,8 +2953,8 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.State = captureState()
 		app.Stop()
 	}
-	runExtraActionForRow = func(actionRow int) {
-		action := strings.TrimSpace(page.ExtraAction)
+	runActionForRow = func(action string, actionRow int) {
+		action = strings.TrimSpace(action)
 		if action == "" {
 			return
 		}
@@ -2699,6 +2966,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		result.DoneAll = false
 		result.State = captureState()
 		app.Stop()
+	}
+	runExtraActionForRow = func(actionRow int) {
+		runActionForRow(page.ExtraAction, actionRow)
 	}
 	requestFilter := func() {
 		result.Selected = append([]bool{}, selected...)
@@ -2739,6 +3009,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; result.State = captureState(); app.Stop() }, Visible: page.AllowBack},
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; result.State = captureState(); app.Stop() }, Visible: page.AllowHome},
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
+		{Label: "Aliases", Shortcut: "Ctrl+L", Action: showAliasModal, Visible: canAliasCurrent()},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
 		{Label: conciseActionLabel(page.DoneAllText, ButtonExportAll), Shortcut: ShortcutExportAll, Action: func() { generate(true) }, Visible: page.AllowDoneAll, Primary: true},
 		{Label: conciseActionLabel(page.ExtraText, ButtonRunBLAST), Shortcut: firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), Action: runExtraAction, Visible: strings.TrimSpace(page.ExtraAction) != "", Primary: true},
@@ -2753,14 +3024,36 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	body.AddItem(table, 0, 1, true)
 	copyButtonRow = buttonRow(actions...)
 	addButtonRow(body, copyButtonRow)
+	updateAliasButtonVisibility := func() {
+		if copyButtonRow == nil {
+			return
+		}
+		visible := canAliasCurrent()
+		for i := range copyButtonRow.buttons {
+			if strings.EqualFold(copyButtonRow.buttons[i].Label, "Aliases") && strings.EqualFold(copyButtonRow.buttons[i].Shortcut, "Ctrl+L") {
+				copyButtonRow.buttons[i].Visible = visible
+			}
+		}
+	}
+	updateAliasButtonVisibility()
+	table.SetSelectionChangedFunc(func(row int, column int) {
+		updateAliasButtonVisibility()
+	})
 	body.AddItem(modeText, 1, 0, false)
-	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"))
+	shortcutHint := "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+	if page.LoadAliases != nil && page.ApplyAlias != nil {
+		shortcutHint = "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+	}
+	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", shortcutHint))
 
 	pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	setPageRoot(app, pageRoot)
 	app.SetFocus(table)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		if modalOpen {
+			if aliasModalCapture != nil {
+				return aliasModalCapture(event)
+			}
 			if helpModal != nil {
 				_ = helpModal.HandleKey(app, event, closeModal)
 				return nil
@@ -2820,6 +3113,10 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		if isCopyShortcut(event) {
 			copyCurrent()
+			return nil
+		}
+		if shortcutMatchesEvent("Ctrl+L", event) && canAliasCurrent() {
+			showAliasModal()
 			return nil
 		}
 		if strings.TrimSpace(page.ExtraAction) != "" && shortcutMatchesEvent(firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), event) {
@@ -3025,6 +3322,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	var modalText *tview.TextView
 	var helpModal *localizedHelpModal
 	var detailModal *detailOverlay
+	var aliasModalCapture inputCaptureFunc
+	var actionButtonRow *buttonRowPrimitive
+	var updateAliasButtonVisibility func()
 	closeModal := func() {}
 
 	sortState := TableSort{Column: -1, Direction: SortAscending}
@@ -3123,8 +3423,8 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	currentFilterFlags := func() []bool {
 		return filterFlagsByRun[currentRun]
 	}
-	runExtraActionForRow := func(runIndex int, actionRow int) {
-		action := strings.TrimSpace(page.ExtraAction)
+	runActionForRow := func(action string, runIndex int, actionRow int) {
+		action = strings.TrimSpace(action)
 		if action == "" {
 			return
 		}
@@ -3142,6 +3442,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		result.Action = action
 		result.State = captureState()
 		app.Stop()
+	}
+	runExtraActionForRow := func(runIndex int, actionRow int) {
+		runActionForRow(page.ExtraAction, runIndex, actionRow)
 	}
 	runExtraAction := func() {
 		runExtraActionForRow(currentRun, -1)
@@ -3202,14 +3505,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalText = nil
 			helpModal = nil
 			detailModal = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
-			if controlMode == 2 {
-				app.SetFocus(list)
-			} else {
-				app.SetFocus(table)
-			}
+			app.SetFocus(table)
 		}
 		addButtonRow(modalBody, closeOnlyModalButtons(nil, true, ButtonOK, "Enter", closeModal, closeModal))
 		modalOpen = true
@@ -3222,14 +3522,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			helpModal = nil
 			detailModal = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
-			if controlMode == 2 {
-				app.SetFocus(list)
-			} else {
-				app.SetFocus(table)
-			}
+			app.SetFocus(table)
 		}
 		modalOpen = true
 		app.SetRoot(overlayRootOn(pageRoot, helpModal.Body(), width, height), true)
@@ -3266,6 +3563,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			helpModal = nil
 			detailModal = nil
+			aliasModalCapture = nil
 			if pageRoot != nil {
 				app.SetRoot(pageRoot, true)
 			}
@@ -3294,14 +3592,15 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			}
 			return page.LoadDetail(runIndex, originalRow, pageIndex, itemIndex)
 		}
-		runDetailBlast := func(pageIndex int, itemIndex int) {
-			if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
-				return
+		detailAction := firstNonEmptyText(page.DetailAction, page.ExtraAction)
+		var runDetailBlast func(pageIndex int, itemIndex int)
+		if strings.TrimSpace(detailAction) != "" {
+			runDetailBlast = func(pageIndex int, itemIndex int) {
+				if pageIndex < 0 || pageIndex >= len(pages) || !strings.EqualFold(strings.TrimSpace(pages[pageIndex].Title), "FASTA") {
+					return
+				}
+				runActionForRow(detailAction, runIndex, originalRow)
 			}
-			if strings.TrimSpace(page.ExtraAction) == "" {
-				return
-			}
-			runExtraActionForRow(runIndex, originalRow)
 		}
 		detailModal = newDetailOverlay(app, title, pages, copyDetailItem, loadDetailItem, runDetailBlast, closeModal)
 		modalOpen = true
@@ -3543,6 +3842,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				headerColumn = -1
 			}
 			refresh()
+			if updateAliasButtonVisibility != nil {
+				updateAliasButtonVisibility()
+			}
 		} else {
 			list.SetCurrentItem(currentRun)
 		}
@@ -3632,10 +3934,267 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			showInfoModal("Copy failed", err.Error(), 72, 12)
 		}
 	}
+	aliasColumnID := strings.TrimSpace(page.AliasColumnID)
+	if aliasColumnID == "" {
+		aliasColumnID = "label_name"
+	}
+	currentDataColumn := func() int {
+		if controlMode != 0 {
+			return -1
+		}
+		_, column := table.GetSelection()
+		if column < rowSelectionFirstDataColumn {
+			return -1
+		}
+		item := currentItem()
+		dataColumn := column - rowSelectionFirstDataColumn
+		if dataColumn < 0 || dataColumn >= len(item.Columns) {
+			return -1
+		}
+		return dataColumn
+	}
+	canAliasCurrent := func() bool {
+		if page.LoadAliases == nil || page.ApplyAlias == nil {
+			return false
+		}
+		dataColumn := currentDataColumn()
+		item := currentItem()
+		if dataColumn < 0 || dataColumn >= len(item.Columns) || !strings.EqualFold(item.Columns[dataColumn].ID, aliasColumnID) {
+			return false
+		}
+		originalRow := currentOriginalRow()
+		return currentRun >= 0 && currentRun < len(page.Items) && originalRow >= 0 && originalRow < len(item.Rows)
+	}
+	selectOriginalRow := func(originalRow int, column int) {
+		displayRow := layout.firstDataRow
+		for i, rowIndex := range order {
+			if rowIndex == originalRow {
+				displayRow = i + layout.firstDataRow
+				break
+			}
+		}
+		keepSelectionVisible(displayRow, column)
+	}
+	showAliasModal := func() {
+		if !canAliasCurrent() {
+			showInfoModal(page.Title, "Aliases are available only when a label_name data cell is selected.", 64, 10)
+			return
+		}
+		runIndex := currentRun
+		originalRow := currentOriginalRow()
+		choices := page.LoadAliases(runIndex, originalRow)
+		aliases := rowSelectionAliasLabels(choices)
+		if len(aliases) == 0 {
+			showInfoModal("Aliases", "No alias labelnames are available for this row.", 58, 10)
+			return
+		}
+		list := tview.NewList()
+		list.ShowSecondaryText(false)
+		list.SetSelectedTextColor(tcell.ColorBlack)
+		list.SetSelectedBackgroundColor(tcell.ColorWhite)
+		list.SetSelectedFocusOnly(false)
+		list.SetBorder(true).SetTitle(" Alias labelnames ").SetTitleAlign(tview.AlignCenter)
+		for _, alias := range aliases {
+			list.AddItem(alias, "", 0, nil)
+		}
+		if current := strings.TrimSpace(choices.LabelName); current != "" {
+			for i, alias := range aliases {
+				if strings.EqualFold(alias, current) {
+					list.SetCurrentItem(i)
+					break
+				}
+			}
+		}
+		selectedAlias := func() string {
+			index := list.GetCurrentItem()
+			if index < 0 {
+				index = 0
+			}
+			if index >= len(aliases) {
+				index = len(aliases) - 1
+			}
+			if index < 0 || index >= len(aliases) {
+				return ""
+			}
+			return aliases[index]
+		}
+		closeAliasModal := func() {
+			modalOpen = false
+			modalText = nil
+			helpModal = nil
+			detailModal = nil
+			aliasModalCapture = nil
+			if pageRoot != nil {
+				app.SetRoot(pageRoot, true)
+			}
+			app.SetFocus(table)
+		}
+		copyAlias := func() {
+			alias := selectedAlias()
+			if alias == "" {
+				return
+			}
+			if err := writeClipboardText(alias); err != nil {
+				showInfoModal("Copy failed", err.Error(), 72, 12)
+			}
+		}
+		applyAliasLabel := func(alias string) bool {
+			alias = strings.TrimSpace(alias)
+			if alias == "" || page.ApplyAlias == nil {
+				return false
+			}
+			nextRow, err := page.ApplyAlias(runIndex, originalRow, alias)
+			if err != nil {
+				showInfoModal("Aliases", err.Error(), 72, 12)
+				return false
+			}
+			if runIndex >= 0 && runIndex < len(page.Items) && originalRow >= 0 && originalRow < len(page.Items[runIndex].Rows) {
+				if len(nextRow.Cells) > 0 || len(nextRow.DetailPages) > 0 || strings.TrimSpace(nextRow.Detail) != "" {
+					page.Items[runIndex].Rows[originalRow] = nextRow
+				}
+				itemLayout := newRowSelectionLayout(page.Items[runIndex].Columns)
+				columnWidthsByRun[runIndex] = rowSelectionColumnWidths(page.Items[runIndex].Columns, page.Items[runIndex].Rows, itemLayout, false)
+			}
+			if currentRun == runIndex {
+				sortRows()
+				refresh()
+				selectOriginalRow(originalRow, displayColumn(currentDataColumn()))
+				if updateAliasButtonVisibility != nil {
+					updateAliasButtonVisibility()
+				}
+			}
+			return true
+		}
+		setAliasAsLabel := func() {
+			if !applyAliasLabel(selectedAlias()) {
+				return
+			}
+			closeAliasModal()
+		}
+		showCustomAliasInputModal := func() {
+			input := tview.NewInputField().SetLabel("name ").SetText(strings.TrimSpace(choices.LabelName)).SetFieldWidth(24)
+			input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
+			input.SetLabelColor(tview.Styles.SecondaryTextColor)
+			input.SetFieldBackgroundColor(colorPanel)
+			message := hintView("")
+			closeInputModal := func() {
+				modalOpen = false
+				modalText = nil
+				helpModal = nil
+				detailModal = nil
+				aliasModalCapture = nil
+				if pageRoot != nil {
+					app.SetRoot(pageRoot, true)
+				}
+				app.SetFocus(table)
+			}
+			confirmInput := func() {
+				name := strings.TrimSpace(input.GetText())
+				if name == "" {
+					message.SetText("Enter a labelname.")
+					return
+				}
+				if !applyAliasLabel(name) {
+					return
+				}
+				closeInputModal()
+			}
+			box := newButtonFlex()
+			box.SetBorder(true)
+			box.SetTitle(" Rename item labelname ")
+			box.SetTitleAlign(tview.AlignCenter)
+			box.AddItem(input, 1, 0, true)
+			box.AddItem(message, 1, 0, false)
+			addButtonRow(box, modalButtons([]buttonSpec{
+				{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeInputModal, Visible: true},
+			}, true, "Rename", ShortcutApply, func(NavAction) {}, confirmInput))
+			closeModal = closeInputModal
+			modalOpen = true
+			modalText = nil
+			helpModal = nil
+			detailModal = nil
+			aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+				if event == nil {
+					return nil
+				}
+				switch event.Key() {
+				case tcell.KeyEscape:
+					closeInputModal()
+					return nil
+				case tcell.KeyEnter:
+					if event.Modifiers()&tcell.ModCtrl != 0 {
+						return nil
+					}
+					confirmInput()
+					return nil
+				case tcell.KeyTab, tcell.KeyBacktab:
+					return nil
+				}
+				if inputFieldEditKey(event) {
+					deliverInputFieldKey(input, event, app)
+					return nil
+				}
+				return nil
+			}
+			app.SetRoot(overlayRootOn(pageRoot, box, 40, 7), true)
+			app.SetFocus(input)
+		}
+		box := newButtonFlex()
+		box.SetBorder(true)
+		box.SetTitle(" Aliases ")
+		box.SetTitleAlign(tview.AlignCenter)
+		box.AddItem(textBlock("Choose an alias labelname. Copy copies the selected alias; Set as labelname fixes it as this row's labelname."), 3, 0, false)
+		box.AddItem(list, 0, 1, true)
+		addButtonRow(box, buttonRow(
+			buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeAliasModal, Visible: true},
+			buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyAlias, Visible: true},
+			buttonSpec{Label: "Rename", Shortcut: "F2", Action: showCustomAliasInputModal, Visible: true},
+			buttonSpec{Label: "Set as labelname", Shortcut: ShortcutApply, Action: setAliasAsLabel, Visible: true, Primary: true},
+		))
+		closeModal = closeAliasModal
+		modalOpen = true
+		helpModal = nil
+		detailModal = nil
+		aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
+			if event == nil {
+				return nil
+			}
+			if isCopyShortcut(event) {
+				copyAlias()
+				return nil
+			}
+			if event.Key() == tcell.KeyF2 {
+				showCustomAliasInputModal()
+				return nil
+			}
+			switch event.Key() {
+			case tcell.KeyEscape:
+				closeAliasModal()
+				return nil
+			case tcell.KeyEnter:
+				if event.Modifiers()&tcell.ModCtrl != 0 {
+					return nil
+				}
+				setAliasAsLabel()
+				return nil
+			}
+			if handler := list.InputHandler(); handler != nil {
+				handler(event, func(p tview.Primitive) {
+					if p != nil {
+						app.SetFocus(p)
+					}
+				})
+			}
+			return nil
+		}
+		app.SetRoot(overlayRootOn(pageRoot, box, 68, rowSelectionAliasOverlayHeight(len(aliases))), true)
+		app.SetFocus(list)
+	}
 	actions := []buttonSpec{
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; result.State = captureState(); app.Stop() }, Visible: page.AllowBack},
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; result.State = captureState(); app.Stop() }, Visible: page.AllowHome},
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
+		{Label: "Aliases", Shortcut: "Ctrl+L", Action: showAliasModal, Visible: canAliasCurrent()},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
 		{Label: conciseActionLabel(page.DoneAllText, ButtonExportAll), Shortcut: ShortcutExportAll, Action: func() { generate(true) }, Visible: true, Primary: true},
 		{Label: conciseActionLabel(page.ExtraText, ButtonRunBLAST), Shortcut: firstNonEmptyText(page.ExtraShortcut, ShortcutBlast), Action: runExtraAction, Visible: strings.TrimSpace(page.ExtraAction) != "", Primary: true},
@@ -3648,8 +4207,28 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	}
 	content = tview.NewFlex().SetDirection(tview.FlexColumn)
 	body.AddItem(content, 0, 1, true)
-	addButtonRow(body, buttonRow(actions...))
-	addHints(body, append(page.Hints, "Tab cycles table, headers, and query list. Ctrl+F opens filter when available. Ctrl+G exports current query; Ctrl+D exports all queries with results.", modeHint()))
+	actionButtonRow = buttonRow(actions...)
+	addButtonRow(body, actionButtonRow)
+	updateAliasButtonVisibility = func() {
+		if actionButtonRow == nil {
+			return
+		}
+		visible := canAliasCurrent()
+		for i := range actionButtonRow.buttons {
+			if strings.EqualFold(actionButtonRow.buttons[i].Label, "Aliases") && strings.EqualFold(actionButtonRow.buttons[i].Shortcut, "Ctrl+L") {
+				actionButtonRow.buttons[i].Visible = visible
+			}
+		}
+	}
+	updateAliasButtonVisibility()
+	table.SetSelectionChangedFunc(func(row int, column int) {
+		updateAliasButtonVisibility()
+	})
+	shortcutHint := "Tab cycles table, headers, and query list. Ctrl+F opens filter when available. Ctrl+G exports current query; Ctrl+D exports all queries with results."
+	if page.LoadAliases != nil && page.ApplyAlias != nil {
+		shortcutHint = "Tab cycles table, headers, and query list. Ctrl+L opens aliases on label_name cells. Ctrl+F opens filter when available. Ctrl+G exports current query; Ctrl+D exports all queries with results."
+	}
+	addHints(body, append(page.Hints, shortcutHint, modeHint()))
 	pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	refresh()
 	initializing = false
@@ -3657,6 +4236,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	app.SetFocus(table)
 	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
 		if modalOpen {
+			if aliasModalCapture != nil {
+				return aliasModalCapture(event)
+			}
 			if helpModal != nil {
 				_ = helpModal.HandleKey(app, event, closeModal)
 				return nil
@@ -3715,6 +4297,10 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			copyCurrent()
 			return nil
 		}
+		if shortcutMatchesEvent("Ctrl+L", event) && canAliasCurrent() {
+			showAliasModal()
+			return nil
+		}
 		switch event.Key() {
 		case tcell.KeyEscape:
 			if page.AllowBack {
@@ -3741,6 +4327,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				app.SetFocus(table)
 			}
 			refresh()
+			if updateAliasButtonVisibility != nil {
+				updateAliasButtonVisibility()
+			}
 			return nil
 		case tcell.KeyCtrlA:
 			if len(currentSelected()) > 0 {
@@ -3867,6 +4456,19 @@ func taskCancelError(page TaskPage) error {
 		return page.CancelError
 	}
 	return ErrTaskCancelled
+}
+
+func waitForTaskStart(ctx context.Context, ready <-chan struct{}) bool {
+	timer := time.NewTimer(350 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		return true
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func RunTaskValueContext[T any](page TaskPage, task func(ctx context.Context, update func(string)) (T, error)) (T, error) {
@@ -7257,9 +7859,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 		})
 	}
 	go func() {
-		select {
-		case <-taskReady:
-		case <-taskCtx.Done():
+		if !waitForTaskStart(taskCtx, taskReady) {
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
@@ -7283,9 +7883,7 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 	}()
 
 	go func() {
-		select {
-		case <-taskReady:
-		case <-taskCtx.Done():
+		if !waitForTaskStart(taskCtx, taskReady) {
 			taskErr = taskCtx.Err()
 			app.QueueUpdateDraw(func() {
 				if stopped.CompareAndSwap(false, true) {
@@ -7453,9 +8051,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 		})
 	}
 	go func() {
-		select {
-		case <-taskReady:
-		case <-taskCtx.Done():
+		if !waitForTaskStart(taskCtx, taskReady) {
 			return
 		}
 		frames := []string{"|", "/", "-", "\\"}
@@ -7479,9 +8075,7 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 	}()
 
 	go func() {
-		select {
-		case <-taskReady:
-		case <-taskCtx.Done():
+		if !waitForTaskStart(taskCtx, taskReady) {
 			taskErr = taskCtx.Err()
 			app.QueueUpdateDraw(func() {
 				if stopped.CompareAndSwap(false, true) {
@@ -7558,6 +8152,32 @@ func normalizeSelection(values []bool, size int, defaultValue bool) []bool {
 	}
 	copy(out, values)
 	return out
+}
+
+func rowSelectionAliasLabels(choices RowAliasChoices) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(choices.Aliases)+1)
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	add(choices.LabelName)
+	for _, alias := range choices.Aliases {
+		add(alias)
+	}
+	return out
+}
+
+func rowSelectionAliasOverlayHeight(aliasCount int) int {
+	return minInt(rowSelectionDetailModalHeight, maxInt(12, aliasCount+8))
 }
 
 func cloneBoolMatrix(values [][]bool) [][]bool {
@@ -8490,7 +9110,7 @@ func (d *detailOverlay) SetPage(index int) {
 	d.list.SetItems(d.pages[index].Items)
 	if d.buttons != nil && len(d.buttons.buttons) >= 3 {
 		isFastaPage := strings.EqualFold(strings.TrimSpace(d.pages[index].Title), "FASTA")
-		d.buttons.buttons[2].Visible = isFastaPage
+		d.buttons.buttons[2].Visible = isFastaPage && d.extra != nil
 	}
 	d.autoLoadCurrentPage()
 }

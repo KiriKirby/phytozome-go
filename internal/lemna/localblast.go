@@ -33,6 +33,8 @@ import (
 
 type localBlastThreadsContextKey struct{}
 
+const maxBlastDBPrefixPathLen = 220
+
 func WithLocalBlastThreads(ctx context.Context, threads int) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -115,30 +117,35 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 		return model.BlastJob{}, fmt.Errorf("build FASTA index: %w", err)
 	}
 
-	// Run BLAST
 	progressctx.Report(ctx, 80, fmt.Sprintf("Running local %s...", strings.ToUpper(blastProg)))
 	result, err := runBlastAndParse(ctx, blastProg, dbPrefix, fastaIdx, req)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("run blast: %w", err)
 	}
-	progressctx.Report(ctx, 100, fmt.Sprintf("Local %s completed with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
+	progressctx.Report(ctx, 90, fmt.Sprintf("Parsed local %s results with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
 
-	// Enrich rows using GFF3-derived mappings and AHRD when available.
-	// First attempt to build protein->transcript and transcript->gene maps from the GFF.
+	if err := ctx.Err(); err != nil {
+		return model.BlastJob{}, err
+	}
+	progressctx.Report(ctx, 92, "Enriching local BLAST hits with Lemna release metadata...")
 	if protToTrans, transToGene, perr := c.cachedProteinTranscriptMaps(ctx, rel); perr == nil {
-		// best-effort load AHRD map
 		ahrdMap := map[string]ahrdRecord{}
+		progressctx.Report(ctx, 95, "Loading Lemna AHRD annotations for local BLAST hits...")
 		if recs, aerr := c.loadAHRDRecords(ctx, rel); aerr == nil {
 			ahrdMap = recs
 		}
-		// Use combined mappings to enrich parsed rows
+		progressctx.Report(ctx, 98, "Applying Lemna gene, transcript, and annotation mappings...")
 		enrichBlastRowsWithMappings(rel, &result.Rows, ahrdMap, protToTrans, transToGene, fastaIdx)
 	} else {
-		// Fall back to AHRD-only enrichment if available.
+		progressctx.Report(ctx, 96, "Loading fallback Lemna annotations for local BLAST hits...")
 		if ahrdMap, aerr := c.loadAHRDRecords(ctx, rel); aerr == nil && len(ahrdMap) > 0 {
 			enrichBlastRowsWithAHRD(result.Rows, ahrdMap)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return model.BlastJob{}, err
+	}
+	progressctx.Report(ctx, 100, fmt.Sprintf("Local %s completed with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
 
 	// Construct a Job id and message
 	job := model.BlastJob{
@@ -210,6 +217,17 @@ func localBlastDatabase(rel releaseInfo, program string) (fastaURL string, dbTyp
 		return fastaURL, "nucl", localBlastDBKey(fastaURL, program), nil
 	default:
 		return "", "", "", fmt.Errorf("unsupported local BLAST program %q", program)
+	}
+}
+
+func localBlastDBTypeForProgram(program string) string {
+	switch strings.ToLower(strings.TrimSpace(program)) {
+	case "blastp", "blastx":
+		return "prot"
+	case "blastn", "tblastn":
+		return "nucl"
+	default:
+		return ""
 	}
 }
 
@@ -324,6 +342,17 @@ func localBlastDBPrefix(cacheDir string, dbType string, dbKey string) (string, e
 		return "", fmt.Errorf("create BLAST database cache directory: %w", err)
 	}
 	prefix := filepath.Join(cacheDir, prefixName)
+	prefixLen := len(prefix)
+	if absPrefix, err := filepath.Abs(prefix); err == nil {
+		prefixLen = len(absPrefix)
+	}
+	if prefixLen > maxBlastDBPrefixPathLen {
+		shortDir, err := shortLocalBlastDBCacheDir(cacheDir, dbType, dbKey)
+		if err != nil {
+			return "", err
+		}
+		prefix = filepath.Join(shortDir, "db")
+	}
 	abs, err := filepath.Abs(prefix)
 	if err != nil {
 		return "", fmt.Errorf("resolve BLAST database output path: %w", err)
@@ -332,6 +361,12 @@ func localBlastDBPrefix(cacheDir string, dbType string, dbKey string) (string, e
 		return "", fmt.Errorf("invalid empty BLAST database output path")
 	}
 	return abs, nil
+}
+
+func shortLocalBlastDBCacheDir(cacheDir string, dbType string, dbKey string) (string, error) {
+	sum := sha256.Sum256([]byte(filepath.Clean(cacheDir) + "\x00" + strings.ToLower(strings.TrimSpace(dbType)) + "\x00" + strings.TrimSpace(dbKey)))
+	name := sanitizeFileName(strings.ToLower(strings.TrimSpace(dbType))) + "_" + hex.EncodeToString(sum[:10])
+	return appfs.CacheDir("lemna", "localblastdb", name)
 }
 
 // ensureCacheDir returns (and creates) a cache directory for species and release.
@@ -343,14 +378,18 @@ func resetLocalBlastCache(jbrowseName string, releaseDir string) error {
 	jbrowseName = strings.TrimSpace(jbrowseName)
 	releaseDir = sanitizeFileName(releaseDir)
 	if jbrowseName == "" && releaseDir == "" {
+		_ = appfs.RemoveCacheSubtree("lemna", "localblastdb")
 		return appfs.RemoveCacheSubtree("lemna", "localblast")
 	}
 	if jbrowseName == "" {
+		_ = appfs.RemoveCacheSubtree("lemna", "localblastdb")
 		return appfs.RemoveCacheSubtree("lemna", "localblast")
 	}
 	if releaseDir == "" {
+		_ = appfs.RemoveCacheSubtree("lemna", "localblastdb")
 		return appfs.RemoveCacheSubtree("lemna", "localblast", jbrowseName)
 	}
+	_ = appfs.RemoveCacheSubtree("lemna", "localblastdb")
 	return appfs.RemoveCacheSubtree("lemna", "localblast", jbrowseName, releaseDir)
 }
 
@@ -362,33 +401,17 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 		return "", err
 	}
 
-	// If file already exists on disk, skip download
-	if info, err := os.Stat(destPath); err == nil {
-		if info.IsDir() || info.Size() <= 0 {
-			_ = os.Remove(destPath)
-		} else {
-			// If gz, ensure decompressed version exists
-			if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-				progressctx.Report(ctx, 10, fmt.Sprintf("Using cached FASTA archive: %s", filepath.Base(destPath)))
-				return ensureDecompressed(ctx, c, destPath)
-			}
-			progressctx.Report(ctx, 20, fmt.Sprintf("Using cached FASTA: %s", filepath.Base(destPath)))
-			return destPath, nil
-		}
+	if path, ok, err := cachedPreparedFasta(ctx, c, destPath); err != nil {
+		return "", err
+	} else if ok {
+		return path, nil
 	}
 
 	value, err, _ := c.sf.Do("download-fasta:"+destPath, func() (any, error) {
-		if info, err := os.Stat(destPath); err == nil {
-			if info.IsDir() || info.Size() <= 0 {
-				_ = os.Remove(destPath)
-			} else {
-				if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-					progressctx.Report(ctx, 10, fmt.Sprintf("Using cached FASTA archive: %s", filepath.Base(destPath)))
-					return ensureDecompressed(ctx, c, destPath)
-				}
-				progressctx.Report(ctx, 20, fmt.Sprintf("Using cached FASTA: %s", filepath.Base(destPath)))
-				return destPath, nil
-			}
+		if path, ok, err := cachedPreparedFasta(ctx, c, destPath); err != nil {
+			return "", err
+		} else if ok {
+			return path, nil
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -433,7 +456,20 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 		}
 
 		if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
-			return ensureDecompressed(ctx, c, destPath)
+			path, err := ensureDecompressed(ctx, c, destPath)
+			if err != nil {
+				return "", err
+			}
+			if !fastaFileLooksUsable(path) {
+				_ = os.Remove(path)
+				_ = os.Remove(destPath)
+				return "", fmt.Errorf("downloaded FASTA archive %s did not produce a valid FASTA file", filepath.Base(destPath))
+			}
+			return path, nil
+		}
+		if !fastaFileLooksUsable(destPath) {
+			_ = os.Remove(destPath)
+			return "", fmt.Errorf("downloaded FASTA %s is not a valid FASTA file", filepath.Base(destPath))
 		}
 		progressctx.Report(ctx, 40, fmt.Sprintf("Downloaded FASTA: %s", filepath.Base(destPath)))
 		return destPath, nil
@@ -442,6 +478,41 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 		return "", err
 	}
 	return value.(string), nil
+}
+
+func cachedPreparedFasta(ctx context.Context, c *Client, destPath string) (string, bool, error) {
+	info, err := os.Stat(destPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("stat cached FASTA %s: %w", destPath, err)
+	}
+	if info.IsDir() || info.Size() <= 0 {
+		_ = os.Remove(destPath)
+		return "", false, nil
+	}
+	if strings.HasSuffix(strings.ToLower(destPath), ".gz") {
+		progressctx.Report(ctx, 10, fmt.Sprintf("Using cached FASTA archive: %s", filepath.Base(destPath)))
+		path, err := ensureDecompressed(ctx, c, destPath)
+		if err != nil {
+			_ = os.Remove(decompressedFastaPath(destPath))
+			_ = os.Remove(destPath)
+			return "", false, nil
+		}
+		if !fastaFileLooksUsable(path) {
+			_ = os.Remove(path)
+			_ = os.Remove(destPath)
+			return "", false, nil
+		}
+		return path, true, nil
+	}
+	if !fastaFileLooksUsable(destPath) {
+		_ = os.Remove(destPath)
+		return "", false, nil
+	}
+	progressctx.Report(ctx, 20, fmt.Sprintf("Using cached FASTA: %s", filepath.Base(destPath)))
+	return destPath, true, nil
 }
 
 func localFastaCachePath(cacheDir string, rawURL string) (string, error) {
@@ -493,20 +564,21 @@ func ensureDecompressed(ctx context.Context, c *Client, gzPath string) (string, 
 	if !strings.HasSuffix(strings.ToLower(gzPath), ".gz") {
 		return gzPath, nil
 	}
-	target := gzPath[:len(gzPath)-3]
+	target := decompressedFastaPath(gzPath)
 	if target == "" || target == gzPath {
 		return "", fmt.Errorf("invalid gzip FASTA target for %s", gzPath)
 	}
-	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
+	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 && fastaFileLooksUsable(target) {
 		progressctx.Report(ctx, 59, fmt.Sprintf("Using cached decompressed FASTA: %s", filepath.Base(target)))
 		return target, nil
 	}
 
 	value, err, _ := c.sf.Do("decompress-fasta:"+gzPath, func() (any, error) {
-		if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
+		if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 && fastaFileLooksUsable(target) {
 			progressctx.Report(ctx, 59, fmt.Sprintf("Using cached decompressed FASTA: %s", filepath.Base(target)))
 			return target, nil
 		}
+		_ = os.Remove(target)
 
 		gzFile, err := os.Open(gzPath)
 		if err != nil {
@@ -552,6 +624,10 @@ func ensureDecompressed(ctx context.Context, c *Client, gzPath string) (string, 
 			_ = os.Remove(tmpPath)
 			return "", err
 		}
+		if !fastaFileLooksUsable(target) {
+			_ = os.Remove(target)
+			return "", fmt.Errorf("decompressed FASTA %s is not a valid FASTA file", filepath.Base(target))
+		}
 		progressctx.Report(ctx, 59, fmt.Sprintf("Decompressed FASTA: %s", filepath.Base(target)))
 		return target, nil
 	})
@@ -559,6 +635,40 @@ func ensureDecompressed(ctx context.Context, c *Client, gzPath string) (string, 
 		return "", err
 	}
 	return value.(string), nil
+}
+
+func decompressedFastaPath(gzPath string) string {
+	if strings.HasSuffix(strings.ToLower(gzPath), ".gz") {
+		return gzPath[:len(gzPath)-3]
+	}
+	return gzPath
+}
+
+func fastaFileLooksUsable(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 64*1024)
+	n, err := f.Read(buf)
+	if n <= 0 {
+		return false
+	}
+	if err != nil && err != io.EOF {
+		return false
+	}
+	for _, b := range buf[:n] {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '>':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // ensureBlastTools checks that makeblastdb and the requested program are available.
@@ -580,9 +690,11 @@ func ensureBlastDB(ctx context.Context, fastaPath string, dbPrefix string, dbTyp
 		return err
 	}
 
-	tmpPrefix := temporaryBlastDBPrefix(spec.dbPrefix)
-	_ = removeBlastDBFiles(tmpPrefix)
-	defer removeBlastDBFiles(tmpPrefix)
+	tmpDir, tmpPrefix, err := temporaryBlastDBPrefix(spec.dbPrefix)
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
 
 	err = runMakeBlastDB(ctx, spec.fastaPath, tmpPrefix, spec.dbType, true)
 	if err != nil {
@@ -696,9 +808,13 @@ func runMakeBlastDB(ctx context.Context, fastaPath string, dbPrefix string, dbTy
 	return nil
 }
 
-func temporaryBlastDBPrefix(dbPrefix string) string {
+func temporaryBlastDBPrefix(dbPrefix string) (string, string, error) {
 	sum := sha256.Sum256([]byte(dbPrefix + "\x00" + strconv.FormatInt(time.Now().UnixNano(), 10)))
-	return filepath.Join(filepath.Dir(dbPrefix), "."+filepath.Base(dbPrefix)+".building-"+hex.EncodeToString(sum[:4]))
+	dir, err := os.MkdirTemp("", "phgo-blastdb-"+hex.EncodeToString(sum[:4])+"-*")
+	if err != nil {
+		return "", "", fmt.Errorf("create short temporary BLAST database directory: %w", err)
+	}
+	return dir, filepath.Join(dir, "db"), nil
 }
 
 func moveBlastDBFiles(tmpPrefix string, finalPrefix string) error {
@@ -722,8 +838,34 @@ func moveBlastDBFiles(tmpPrefix string, finalPrefix string) error {
 		}
 		target := finalPrefix + suffix
 		if err := os.Rename(match, target); err != nil {
-			return fmt.Errorf("move BLAST database file %s to %s: %w", match, target, err)
+			if copyErr := copyFile(match, target); copyErr != nil {
+				return fmt.Errorf("move BLAST database file %s to %s: rename failed: %v; copy failed: %w", match, target, err, copyErr)
+			}
+			_ = os.Remove(match)
 		}
+	}
+	return nil
+}
+
+func copyFile(src string, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.CopyBuffer(out, in, make([]byte, 1024*1024))
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(dst)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(dst)
+		return closeErr
 	}
 	return nil
 }
@@ -822,6 +964,9 @@ func runBlastAndParse(ctx context.Context, prog string, dbPrefix string, fastaIn
 	prog, err := normalizeProgram(prog)
 	if err != nil {
 		return model.BlastResult{}, err
+	}
+	if dbType := localBlastDBTypeForProgram(prog); dbType != "" && !blastDBComplete(dbPrefix, dbType) {
+		return model.BlastResult{}, fmt.Errorf("local %s database is incomplete or missing at %s; rebuild the local BLAST cache", strings.ToUpper(prog), dbPrefix)
 	}
 	queryFASTA, queryLengths, fallbackQueryLength, err := localBlastQueryFASTA(req.Sequence)
 	if err != nil {

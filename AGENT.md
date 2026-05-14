@@ -46,6 +46,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
     - expose at least two visible progress phases: fetching keyword peptide sequences, then building cached BLAST query items
 - A `label_name` selected from a keyword result table is the BLAST query/source label, not the label for every BLAST hit. It is preserved as query metadata, written to hit rows through `blast_labelname`, used in TXT query-sequence headers, and included in the Excel query metadata sheet. BLAST hit rows have their own independent `label_name`, with `labelname_type` recording how that row label was obtained.
 - In keyword modes, `phgo_alias` is each keyword result item's ranked alias list. In BLAST modes, `phgo_alias` is each BLAST hit/result row's ranked alias list, not the BLAST source/query item's alias list. Source/query aliases stay on `QuerySequenceSource.PhgoAliases` for metadata, family BLAST, and custom grouping.
+- Identifier naming must stay biologically explicit in every user-facing table, detail view, Excel sheet, TXT/PDF report, and help text: use `geneid`, `protein_id`, and `transcript`/`transcript_id`/`blast_transcript` according to the biological identifier actually being shown. Preserve established user-facing mappings unless the stored value is clearly a different identifier class; for example, the historical internal `BlastGeneID` field stores query transcript-like IDs in BLAST rows and should be displayed/exported as `blast_transcript`. Internal helper names may use `ID2` only for generic workflow tracking identifiers that deliberately span gene/protein/transcript/sequence IDs; `ID2`, `id2`, or `blast_id2` must never appear in user-facing output.
+- Any BLAST workflow that starts from more than one query item must remain in multi-file/multi-run review mode for all databases and BLAST programs, even if failures, skips, filtering, or no-hit queries leave only one query with visible result rows. Single-file review is only for workflows that originally had one query item.
 - Keyword-to-BLAST skips the BLAST query label input page only when every selected keyword row already carries a non-empty query-source `label_name`; otherwise the normal BLAST label input flow still runs for the remaining unlabeled query items. This query label flow is separate from optional automatic BLAST-hit label identification.
 - Family BLAST, the custom grouping editor, and multi-file BLAST grouping define groups by the genes/sequences used as BLAST queries (`blast_labelname`/query-source gene identity), not by each BLAST hit row's own `label_name`. Hit-level labels may differ inside one family table and must not change the query-family grouping definition.
 - Family BLAST and the custom grouping editor must consume the ranked alias lists already stored by the workflow during auto-identification for grouping, member alias dialogs, semantic alias tokens, and default member names. They must not query labelname again or independently rebuild alias ranking.
@@ -99,6 +101,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - `View` in table-cell control means a large modal showing all available details for the currently focused normal data row, not a summary of all selected rows or the whole table. The row-number column is a valid row focus for row View. In column-header control, `View` shows a column explanation modal for the currently focused header, with English, Chinese, and Japanese explanations. On group/header rows outside header-control, on the checkbox column, or when no data row/column can be viewed, invalid view attempts should show a small OK-only modal instead of returning a workflow error.
   - `Copy` in row-selection tables copies only the currently focused normal data cell to the clipboard. The row-number column is copyable and copies the row number. It is exposed as a button plus `Ctrl+Shift+C`, and is disabled with a small OK-only modal in header control, on checkbox/group/header cells, or when no copyable cell is selected.
   - Copy success should be silent. Do not open a success modal, do not flash the Copy button, and do not call `Application.Draw()` directly from table/button callbacks; only failure or invalid-copy cases should open a small OK-only modal.
+  - Keyword and BLAST result row-selection tables expose an `Aliases` action with `Ctrl+L` only when a normal `label_name` data cell is focused. It opens the same alias-labelname chooser semantics as the Family BLAST custom-group editor, including adaptive height from alias count, a `Rename`/`F2` single-input custom labelname dialog, and row updates to `label_name`, `labelname_type`, and pinned `phgo_alias` so later BLAST transfer, FASTA/TXT headers, Excel export, and reports consume the chosen label.
   - Display-column lists affect only the table view. Exports, generated files, and View row-detail dialogs must continue to use the full underlying model data.
   - Every table type must keep explicit column lists for display columns and full-detail/export columns. Manage column order and column names through those lists rather than scattering ad-hoc header order in render/export code.
   - BLAST UniProt display-column ordering rule: the two pre-existing comparison columns, original-database `target_length / UniProt canonical length (%)` and `UniProt canonical length`, stay in their original length-reference positions in the table and details. The comparison header must name the current original database, for example `Phytozome target_length / UniProt canonical length (%)` or `lemna target_length / UniProt canonical length (%)`. Other UniProt display columns belong after the original database columns. Table view must not show `UniProt keywords`, `UniProt EC`, or `UniProt GO`, although details and exports may include them.
@@ -261,7 +264,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - BLAST loading states must describe the actual step, such as capability detection, online BLAST submission, local fallback check, BLAST+ installation, local BLAST execution, or result polling
   - when a loading task has no known total, use a modal spinner/status dialog; when a meaningful total exists, use a modal progress dialog
   - every loading/progress/status task modal must include a left-side `Cancel (Esc)` button. Cancel means abandon the running task, cancel its context when possible, close the modal, and return to the relevant previous workflow page without showing a workflow error modal.
-  - BLAST fallback flow is TUI-owned: try online BLAST explicitly when available, show a modal decision if online BLAST fails or cannot produce a usable automated result, then only run local BLAST+ after the user chooses the local fallback
+  - BLAST fallback flow is TUI-owned: for lemna `blastn`, `blastx`, `tblastn`, and `blastp`, try online BLAST first whenever the server capability exists; if online submission/result automation fails or server capability is absent, continue to the matching local BLAST+ fallback when local FASTA is available
   - if local BLAST+ tools are missing, close the fallback decision and show a dedicated BLAST+ install modal; installation itself runs in a loading modal, then local BLAST resumes in its own progress/status modal
   - use a long single-choice list only when there are many choices or each choice needs long explanatory secondary text
   - use tview widgets such as `Pages`, `Modal`, `TextView`, and shared buttons for dialogs; do not print ad-hoc messages to stdout during interactive workflows
@@ -607,14 +610,16 @@ In lemna mode, keyword search reads the selected lemna.org release GFF3 and AHRD
      - If local BLAST is requested, download the matching FASTA, run `makeblastdb` with the correct DB type, run `blastn`/`blastx`/`tblastn`/`blastp`, parse, and return unified results.
 
 4. BLAST submission strategy
+   - For every lemna BLAST program (`blastn`, `blastx`, `tblastn`, `blastp`), if both online server capability and local FASTA capability are available, choose online first. Local BLAST+ is the fallback path, not a program-specific first choice.
    - Prefer server submission when:
      - The server exposes the required DB id(s).
      - The server form can be parsed reliably and submission can be polled.
    - Use local BLAST fallback when:
      - Server DB is not exposed for the requested program (particularly protein DB may be absent).
      - Server form parsing/submission/result retrieval is fragile/unreliable.
-   - Current implementation treats server BLAST as best-effort probing only; if automated result retrieval cannot be guaranteed, it falls back to local BLAST when matching FASTA + BLAST+ are available.
-   - Always surface the capability and the chosen path to the user (explicit prompt).
+   - Current implementation treats server BLAST as the first execution path whenever capability detection says it is available; if automated result retrieval cannot be guaranteed, it falls back to local BLAST when matching FASTA + BLAST+ are available.
+   - Do not pre-download FASTA or build local BLAST databases while the online path is still viable; defer local work until fallback is actually needed so the common online-first path stays fast.
+   - Always surface the capability and the chosen path to the user.
 
 5. Graceful failure and caching
    - Cache release metadata and capability detection to avoid repeated fragile parsing.
@@ -762,7 +767,7 @@ Priority 4 (low / optional)
   - `appfs.CacheRoot()` is the single source of truth for the app-local cache root
   - startup cache reset clears the whole app-local `.cache` tree for the new run; do not add side caches outside that root
   - modules may also expose narrower subtree cleanup for known-bad artifacts, but that is a supplement to the startup reset, not a replacement
-- Lemna local BLAST assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`.
+- Lemna local BLAST FASTA assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`. BLAST database index files may use `.cache/lemna/localblastdb/<dbtype_hash>/` when the species/release cache path would make Windows BLAST+ output prefixes too long; `makeblastdb` itself should build in a short OS temp directory and then move complete DB files into the app-local cache.
 - Persistent Phytozome caches should live under `.cache/phytozome/...`.
 
 ## Current implementation status
@@ -775,6 +780,7 @@ Priority 4 (low / optional)
   - lemna keyword search from GFF3 + AHRD with dynamic export columns.
   - lemna BLAST capability detection from download assets and concrete BLAST selector pages.
   - local BLAST fallback for `blastn`, `blastx`, `tblastn`, and `blastp` using the matching nucleotide/protein FASTA.
+  - Single-query and batch BLAST execution now run behind cancellable task/progress modals; local Lemna BLAST reports FASTA preparation, database build, BLAST execution, result parsing, and release-metadata enrichment instead of silently continuing after BLAST+ exits.
   - BLAST submission errors support retry, back to BLAST program selection, or exit.
 - Remaining:
   - Robust server-side lemna result retrieval. Server form probing exists, but local BLAST remains the dependable execution path.

@@ -440,7 +440,7 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 	headers := []string{
 		"query_index",
 		"blast_labelname",
-		"blast_geneid",
+		"geneid",
 		"protein_id",
 		"transcript_id",
 		"source_database",
@@ -613,6 +613,7 @@ var blastExcelHeaderIDs = map[string]string{
 	"protein":                          "protein",
 	"geneid":                           "protein",
 	"blast_labelname":                  "blast_labelname",
+	"blast_transcript":                 "blast_geneid",
 	"blast_geneid":                     "blast_geneid",
 	"subject_id":                       "subject_id",
 	"identity (%)":                     "percent_identity",

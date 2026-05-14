@@ -1084,7 +1084,7 @@ func blastColumnMeaning(header string) string {
 	case "blast_labelname":
 		return "Labelname of the query gene or sequence that produced this hit."
 	case "blast_geneid":
-		return "Gene/protein identifier of the query gene or sequence that produced this hit."
+		return "Transcript-style identifier of the query sequence that produced this hit; displayed externally as blast_transcript."
 	case "subject_id":
 		return "BLAST subject identifier."
 	case "e_value":

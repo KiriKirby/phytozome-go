@@ -151,6 +151,29 @@ func TestKeywordReportColumnIDsIncludeFormalNonDisplayColumns(t *testing.T) {
 	}
 }
 
+func TestIdentifierHeadersRemainBiologicallyExplicit(t *testing.T) {
+	if got := ColumnCompactHeader("protein_id", ColumnDisplayOptions{}); got != "protein_id" {
+		t.Fatalf("protein_id compact header = %q, want protein_id", got)
+	}
+	if got := ColumnDetailLabel("gene_identifier", ColumnDisplayOptions{}); got != "geneid" {
+		t.Fatalf("gene_identifier detail label = %q, want geneid", got)
+	}
+	if got := ColumnExportHeader("blast_geneid", ColumnDisplayOptions{}); got != "blast_transcript" {
+		t.Fatalf("blast_geneid export header = %q, want blast_transcript", got)
+	}
+	for _, id := range []string{"protein", "blast_geneid", "protein_id", "gene_identifier"} {
+		for _, label := range []string{
+			ColumnCompactHeader(id, ColumnDisplayOptions{}),
+			ColumnDetailLabel(id, ColumnDisplayOptions{}),
+			ColumnExportHeader(id, ColumnDisplayOptions{}),
+		} {
+			if strings.Contains(strings.ToLower(label), "id2") {
+				t.Fatalf("%s leaked internal ID2 label %q", id, label)
+			}
+		}
+	}
+}
+
 func TestKeywordReportColumnIDsIncludeLemnaFormalExtras(t *testing.T) {
 	ids := KeywordReportColumnIDs("lemna", true, nil)
 	seen := map[string]bool{}

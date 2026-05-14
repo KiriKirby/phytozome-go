@@ -55,6 +55,15 @@ func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
 	}
 }
 
+func TestRowSelectionAliasOverlayHeightUsesDetailModalMaximum(t *testing.T) {
+	if got := rowSelectionAliasOverlayHeight(1); got != 12 {
+		t.Fatalf("small alias overlay height = %d, want 12", got)
+	}
+	if got := rowSelectionAliasOverlayHeight(40); got != rowSelectionDetailModalHeight {
+		t.Fatalf("large alias overlay height = %d, want detail modal height %d", got, rowSelectionDetailModalHeight)
+	}
+}
+
 func TestBlastFilterSecondPageThreeColumnRowsFitModal(t *testing.T) {
 	rankingRows := 2 + 1 + 5 + 1 + 2 + 10 + 1 + 4
 	softScoreRows := 3 + 1 + 4 + 1 + 6 + 1 + 2
@@ -677,6 +686,16 @@ func TestDetailOverlayShowsBlastButtonOnlyOnFASTATab(t *testing.T) {
 	overlay.SetPage(1)
 	if !overlay.buttons.buttons[2].Visible {
 		t.Fatal("blast button should be visible on FASTA page")
+	}
+}
+
+func TestDetailOverlayHidesBlastButtonWithoutDetailAction(t *testing.T) {
+	overlay := newDetailOverlay(nil, "Row details", []DetailPage{
+		{Title: "FASTA", Items: []DetailItem{{Label: "FASTA", Value: ">PAL1\nMPEPTIDE"}}},
+	}, func() error { return nil }, nil, nil, func() {})
+	overlay.SetPage(0)
+	if overlay.buttons.buttons[2].Visible {
+		t.Fatal("blast button should be hidden when no detail action is configured")
 	}
 }
 

@@ -596,6 +596,41 @@ func TestLocalBlastDBPrefixAndArgsNeverProduceEmptyOut(t *testing.T) {
 	t.Fatalf("makeblastdb args missing -out: %#v", args)
 }
 
+func TestLocalBlastDBPrefixUsesShortSharedCacheForLongPaths(t *testing.T) {
+	tmpDir := filepath.Join(t.TempDir(), strings.Repeat("very-long-cache-component-", 6))
+	prefix, err := localBlastDBPrefix(tmpDir, "prot", "blastp_Sp_polyrhiza_9509-REF-OXFORD-3.0_CSHL2022v1.genes.filt.proteins")
+	if err != nil {
+		t.Fatalf("localBlastDBPrefix: %v", err)
+	}
+	if len(prefix) > maxBlastDBPrefixPathLen {
+		t.Fatalf("short fallback prefix is still too long: len=%d prefix=%s", len(prefix), prefix)
+	}
+	if !strings.Contains(filepath.Clean(prefix), filepath.Clean(filepath.Join(".cache", "lemna", "localblastdb"))) {
+		t.Fatalf("long cache path should fall back to shared localblastdb cache, got %s", prefix)
+	}
+}
+
+func TestTemporaryBlastDBPrefixUsesShortBuildDirectory(t *testing.T) {
+	longPrefix := filepath.Join(t.TempDir(), strings.Repeat("release-", 20), "lemna_prot_long_name_db")
+	tmpDir, tmpPrefix, err := temporaryBlastDBPrefix(longPrefix)
+	if err != nil {
+		t.Fatalf("temporaryBlastDBPrefix: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+	if tmpDir == "" || tmpPrefix == "" {
+		t.Fatalf("empty temporary DB path: dir=%q prefix=%q", tmpDir, tmpPrefix)
+	}
+	if filepath.Dir(tmpPrefix) != tmpDir {
+		t.Fatalf("temporary prefix dir = %q, want %q", filepath.Dir(tmpPrefix), tmpDir)
+	}
+	if strings.Contains(tmpPrefix, filepath.Base(longPrefix)) {
+		t.Fatalf("temporary prefix should not inherit long final prefix name: %s", tmpPrefix)
+	}
+	if len(tmpPrefix) > maxBlastDBPrefixPathLen {
+		t.Fatalf("temporary prefix too long: len=%d prefix=%s", len(tmpPrefix), tmpPrefix)
+	}
+}
+
 func TestPrepareBlastDBSpecRejectsEmptyOutPrefixBeforeMakeblastdb(t *testing.T) {
 	tmpDir := t.TempDir()
 	fasta := filepath.Join(tmpDir, "query.fasta")
@@ -608,6 +643,39 @@ func TestPrepareBlastDBSpecRejectsEmptyOutPrefixBeforeMakeblastdb(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "without -out") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDownloadAndPrepareFastaRedownloadsInvalidCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	rawURL := "https://example.test/proteins.fasta"
+	destPath, err := localFastaCachePath(cacheDir, rawURL)
+	if err != nil {
+		t.Fatalf("localFastaCachePath: %v", err)
+	}
+	if err := os.WriteFile(destPath, []byte("<html>not fasta</html>"), 0o644); err != nil {
+		t.Fatalf("write invalid cache: %v", err)
+	}
+	client := NewClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(">prot1\nMPEPTIDE\n")),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		}),
+	})
+	path, err := downloadAndPrepareFasta(context.Background(), client, rawURL, cacheDir)
+	if err != nil {
+		t.Fatalf("downloadAndPrepareFasta: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read prepared FASTA: %v", err)
+	}
+	if !strings.HasPrefix(string(data), ">prot1\n") {
+		t.Fatalf("invalid cache was not replaced, got %q", string(data))
 	}
 }
 
@@ -670,6 +738,20 @@ func TestBlastDBCompleteRequiresCoreFilesByType(t *testing.T) {
 	}
 	if !blastDBComplete(nuclPrefix, "nucl") {
 		t.Fatal("nucleotide db should be complete with .nin/.nhr/.nsq")
+	}
+}
+
+func TestRunBlastAndParseRejectsMissingDatabaseBeforeRunningBlast(t *testing.T) {
+	_, err := runBlastAndParse(context.Background(), "blastp", filepath.Join(t.TempDir(), "missing_db"), nil, model.BlastRequest{
+		Program:          "BLASTP",
+		Sequence:         "MPEPTIDE",
+		AlignmentsToShow: 1,
+	})
+	if err == nil {
+		t.Fatal("expected missing database error")
+	}
+	if !strings.Contains(err.Error(), "database is incomplete or missing") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

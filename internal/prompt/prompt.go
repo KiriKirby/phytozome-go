@@ -119,9 +119,9 @@ var columnHelpText = map[string]string{
 		"BLAST ヒット内の HSP セグメント番号です。1 つの subject に複数の high-scoring segment pair がある場合、この行がどのアラインメント片段かを示します。",
 	),
 	"protein": columnHelp(
-		"Target gene/protein/sequence identifier from the original database. The table header is geneid because this is the main local gene-side identifier used for review, source reports, peptide retrieval, and external references.",
-		"原始数据库中的目标 gene/protein/sequence 编号。表头显示为 geneid，因为这是复查、源报告、肽序列获取和外部参考映射使用的主要本地 gene 侧编号。",
-		"元データベースの target gene/protein/sequence identifier です。review、source report、peptide retrieval、external references に使う主要な local gene-side ID なので、表では geneid と表示します。",
+		"Legacy BLAST hit target identifier column. It keeps the original geneid display mapping for compatibility with existing tables and exports; check subject_id, sequence_id, transcript_id, and defline when you need the exact source identifier type.",
+		"历史 BLAST hit 目标编号列。为了兼容既有表格和导出，继续保持原来的 geneid 显示映射；需要确认源编号类型时，请结合 subject_id、sequence_id、transcript_id 和 defline 查看。",
+		"従来の BLAST hit target identifier 列です。既存の table/export との互換性のため geneid 表示を維持します。正確な source identifier type は subject_id、sequence_id、transcript_id、defline と合わせて確認します。",
 	),
 	"blast_labelname": columnHelp(
 		"Labelname of the query gene or sequence that produced this BLAST hit. This is separate from the hit row's own label_name.",
@@ -129,9 +129,9 @@ var columnHelpText = map[string]string{
 		"この BLAST hit を生んだ query gene/sequence の labelname です。hit 自身の label_name とは別です。",
 	),
 	"blast_geneid": columnHelp(
-		"Gene/protein identifier of the query sequence that produced this BLAST hit. This identifies the source gene used for BLAST grouping, family merging, export metadata, and query-sequence headers.",
-		"产生这个 BLAST hit 的查询序列的 gene/protein 编号。",
-		"この BLAST hit を生んだ query sequence の gene/protein identifier です。",
+		"Transcript-style identifier of the query sequence that produced this BLAST hit. Internally this is the legacy BlastGeneID field, but it is shown as blast_transcript because keyword-to-BLAST and PHGO headers normally store the query transcript or transcript-like ID here.",
+		"产生这个 BLAST hit 的查询序列的 transcript 风格编号。内部仍使用历史 BlastGeneID 字段，但外部显示为 blast_transcript，因为 keyword-to-BLAST 和 PHGO header 通常把 query transcript 或类似 transcript 的编号放在这里。",
+		"この BLAST hit を生んだ query sequence の transcript 形式 ID です。内部では従来の BlastGeneID field を使いますが、keyword-to-BLAST と PHGO header では通常 query transcript または transcript-like ID が入るため、外部表示は blast_transcript です。",
 	),
 	"subject_id": columnHelp(
 		"Subject identifier reported directly by BLAST. When it is empty or less readable, the program may display the protein identifier elsewhere, but this field preserves the BLAST-level subject name for debugging and traceability.",
@@ -309,9 +309,9 @@ var columnHelpText = map[string]string{
 		"hit の元データベースレポート URL です。alias、遺伝子モデル、transcript/protein ページ、注釈文脈、browser link を直接確認したいときに使います。",
 	),
 	"protein_id": columnHelp(
-		"Gene/protein identifier from the source database record. The visible column name is geneid to keep source identifiers consistently gene-oriented in tables.",
-		"源数据库记录中的 gene/protein identifier。可见列名显示为 geneid，使表格里的源编号命名保持以 gene 为中心。",
-		"source database record の gene/protein identifier です。table では source identifier の呼び方を gene-oriented に統一するため geneid と表示します。",
+		"Protein-level identifier from the source database record. This should be populated only when the source record naturally provides a protein ID or protein accession.",
+		"源数据库记录中的蛋白层面编号。只有当源记录自然提供 protein ID 或 protein accession 时才应该填入这里。",
+		"source database record の protein-level identifier です。source record が protein ID または protein accession を自然に提供する場合だけここに入ります。",
 	),
 	"transcript": columnHelp(
 		"Transcript or transcript-like identifier shown in keyword results. It helps distinguish isoforms and connect keyword hits to the source gene model.",
@@ -319,9 +319,9 @@ var columnHelpText = map[string]string{
 		"keyword 結果に表示される transcript または transcript 相当の ID です。isoform の区別や、keyword hit と元の遺伝子モデルの接続に役立ちます。",
 	),
 	"gene_identifier": columnHelp(
-		"Gene-level identifier associated with the record. Use it when you want to group multiple transcripts or proteins back to the same gene locus.",
-		"记录关联的基因层面编号。当需要把多个转录本或蛋白归回同一个基因位点时使用。",
-		"レコードに関連する gene-level ID です。複数の transcript や protein を同じ gene locus にまとめたいときに使います。",
+		"Gene-level identifier associated with the record. It is displayed as geneid and should not contain protein IDs or generic BLAST subject IDs.",
+		"记录关联的基因层面编号。界面显示为 geneid，不应混入 protein ID 或通用 BLAST subject ID。",
+		"レコードに関連する gene-level ID です。表示名は geneid で、protein ID や一般的な BLAST subject ID を混ぜないでください。",
 	),
 	"genome": columnHelp(
 		"Genome assembly or dataset label from the source database. It tells you which release the record belongs to and is useful when comparing results across database versions.",
@@ -559,6 +559,7 @@ type BlastRowSelection struct {
 	Rows             []model.BlastResultRow
 	GenerateFile     bool
 	DoneAll          bool
+	RunBlast         bool
 	RunIndex         int
 	Selected         []bool
 	SelectedByRun    [][]bool
@@ -2829,13 +2830,19 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 	totalRows := countKeywordResultRows(groups)
 	selected := make([]bool, totalRows)
 	flatRows := make([]model.KeywordResultRow, 0, totalRows)
+	type flatRowRef struct {
+		group int
+		row   int
+	}
+	flatRefs := make([]flatRowRef, 0, totalRows)
 	offset := 0
-	for _, group := range groups {
+	for groupIndex, group := range groups {
 		if len(group.Rows) > 0 {
 			selected[offset] = true
 		}
-		for _, row := range group.Rows {
+		for rowIndex, row := range group.Rows {
 			flatRows = append(flatRows, row)
+			flatRefs = append(flatRefs, flatRowRef{group: groupIndex, row: rowIndex})
 		}
 		offset += len(group.Rows)
 	}
@@ -2869,6 +2876,41 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 			ExtraShortcut: tui.ShortcutBlast,
 			ExtraAction:   "blast",
 			State:         p.rowStates[stateKey],
+			AliasColumnID: "label_name",
+			LoadAliases: func(rowIndex int) tui.RowAliasChoices {
+				if rowIndex < 0 || rowIndex >= len(flatRows) {
+					return tui.RowAliasChoices{}
+				}
+				return keywordRowAliasChoices(flatRows[rowIndex])
+			},
+			ApplyAlias: func(rowIndex int, alias string) (tui.TableRow, error) {
+				alias = strings.TrimSpace(alias)
+				if alias == "" {
+					return tui.TableRow{}, fmt.Errorf("alias labelname cannot be empty")
+				}
+				if rowIndex < 0 || rowIndex >= len(flatRows) || rowIndex >= len(flatRefs) {
+					return tui.TableRow{}, fmt.Errorf("no keyword row is selected")
+				}
+				oldLabel := strings.TrimSpace(flatRows[rowIndex].LabelName)
+				row := keywordRowWithSelectedAlias(flatRows[rowIndex], alias)
+				flatRows[rowIndex] = row
+				ref := flatRefs[rowIndex]
+				if ref.group >= 0 && ref.group < len(groups) && ref.row >= 0 && ref.row < len(groups[ref.group].Rows) {
+					groups[ref.group].Rows[ref.row] = row
+					if strings.TrimSpace(groups[ref.group].LabelName) == "" || strings.EqualFold(strings.TrimSpace(groups[ref.group].LabelName), oldLabel) || len(groups[ref.group].Rows) == 1 {
+						groups[ref.group].LabelName = alias
+						groups[ref.group].LabelSourceField = "user selected alias"
+						groups[ref.group].LabelSourceValue = alias
+						groups[ref.group].LabelMethod = "manual alias selection"
+					}
+				}
+				_, refreshedRows := buildKeywordSelectionTable(flatRows)
+				if rowIndex >= len(refreshedRows) {
+					return tui.TableRow{}, fmt.Errorf("updated keyword row is unavailable")
+				}
+				tableRows[rowIndex] = refreshedRows[rowIndex]
+				return tableRows[rowIndex], nil
+			},
 			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
 				if !detailPageIsFASTA(pageIndex, itemIndex, len(keywordRowDetailPages(model.KeywordResultRow{}))) || rowIndex < 0 || rowIndex >= len(flatRows) {
 					return tui.DetailItem{}, false, nil
@@ -2993,11 +3035,33 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 			AllowHome:     true,
 			ConfirmText:   tui.ButtonView,
 			GenerateText:  tui.ButtonExport,
-			ExtraText:     tui.ButtonRunBLAST,
-			ExtraShortcut: tui.ShortcutBlast,
-			ExtraAction:   "blast",
+			DetailAction:  "blast",
 			DoneAllText:   tui.ButtonExportAll,
 			State:         p.blastRunStates[stateKey],
+			AliasColumnID: "label_name",
+			LoadAliases: func(runIndex int, rowIndex int) tui.RowAliasChoices {
+				if runIndex < 0 || runIndex >= len(runs) || rowIndex < 0 || rowIndex >= len(runs[runIndex].Rows) {
+					return tui.RowAliasChoices{}
+				}
+				return blastRowAliasChoices(runs[runIndex].Rows[rowIndex])
+			},
+			ApplyAlias: func(runIndex int, rowIndex int, alias string) (tui.TableRow, error) {
+				alias = strings.TrimSpace(alias)
+				if alias == "" {
+					return tui.TableRow{}, fmt.Errorf("alias labelname cannot be empty")
+				}
+				if runIndex < 0 || runIndex >= len(runs) || runIndex >= len(items) || rowIndex < 0 || rowIndex >= len(runs[runIndex].Rows) || rowIndex >= len(items[runIndex].Rows) {
+					return tui.TableRow{}, fmt.Errorf("no BLAST row is selected")
+				}
+				row := blastRowWithSelectedAlias(runs[runIndex].Rows[rowIndex], alias)
+				runs[runIndex].Rows[rowIndex] = row
+				_, refreshedRows := buildBlastSelectionTable(runs[runIndex].Rows)
+				if rowIndex >= len(refreshedRows) {
+					return tui.TableRow{}, fmt.Errorf("updated BLAST row is unavailable")
+				}
+				items[runIndex].Rows[rowIndex] = refreshedRows[rowIndex]
+				return items[runIndex].Rows[rowIndex], nil
+			},
 			LoadDetail: func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
 				if runIndex < 0 || runIndex >= len(runs) || rowIndex < 0 || rowIndex >= len(runs[runIndex].Rows) {
 					return tui.DetailItem{}, false, nil
@@ -3103,7 +3167,7 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 		}
 		if result.Action == "blast" {
 			if result.RunIndex >= 0 && result.RunIndex < len(runs) && result.ActionRow >= 0 && result.ActionRow < len(runs[result.RunIndex].Rows) {
-				return BlastRowSelection{Rows: []model.BlastResultRow{runs[result.RunIndex].Rows[result.ActionRow]}}, nil
+				return BlastRowSelection{Rows: []model.BlastResultRow{runs[result.RunIndex].Rows[result.ActionRow]}, RunBlast: true, RunIndex: result.RunIndex}, nil
 			}
 			rows := make([]model.BlastResultRow, 0)
 			for runIndex := range items {
@@ -3116,7 +3180,7 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 					}
 				}
 			}
-			return BlastRowSelection{Rows: rows}, nil
+			return BlastRowSelection{Rows: rows, RunBlast: true, RunIndex: result.RunIndex}, nil
 		}
 		if result.RunIndex < 0 || result.RunIndex >= len(runs) {
 			result.RunIndex = 0
@@ -3340,24 +3404,49 @@ func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll boo
 	filterCleared := false
 	for {
 		result, err := tui.RunRowSelectionPage(tui.RowSelectionPage{
-			Path:         p.blastTUIPath("BLAST input", "BLAST results", "Row selection"),
-			Title:        "BLAST row selection",
-			Description:  fmt.Sprintf("%d/%d rows currently selected. Review and toggle rows before choosing an action.", countSelected(selected), len(rows)),
-			Columns:      columns,
-			Rows:         tableRows,
-			Selected:     selected,
-			FilterFlags:  filterFlags,
-			Sort:         tui.TableSort{Column: -1, Direction: tui.SortAscending},
-			AllowFilter:  blastRowsHaveAllExternalReferences(rows),
-			FilterText:   tui.ButtonFilter,
-			AllowDoneAll: allowDoneAll,
-			AllowBack:    true,
-			AllowHome:    true,
-			ConfirmText:  tui.ButtonView,
-			GenerateText: tui.ButtonExport,
-			DoneAllText:  tui.ButtonExportAll,
-			Hints:        []string{"Ctrl+G exports selected rows"},
-			State:        p.rowStates[stateKey],
+			Path:          p.blastTUIPath("BLAST input", "BLAST results", "Row selection"),
+			Title:         "BLAST row selection",
+			Description:   fmt.Sprintf("%d/%d rows currently selected. Review and toggle rows before choosing an action.", countSelected(selected), len(rows)),
+			Columns:       columns,
+			Rows:          tableRows,
+			Selected:      selected,
+			FilterFlags:   filterFlags,
+			Sort:          tui.TableSort{Column: -1, Direction: tui.SortAscending},
+			AllowFilter:   blastRowsHaveAllExternalReferences(rows),
+			FilterText:    tui.ButtonFilter,
+			AllowDoneAll:  allowDoneAll,
+			AllowBack:     true,
+			AllowHome:     true,
+			ConfirmText:   tui.ButtonView,
+			GenerateText:  tui.ButtonExport,
+			DetailAction:  "blast",
+			DoneAllText:   tui.ButtonExportAll,
+			Hints:         []string{"Ctrl+G exports selected rows"},
+			State:         p.rowStates[stateKey],
+			AliasColumnID: "label_name",
+			LoadAliases: func(rowIndex int) tui.RowAliasChoices {
+				if rowIndex < 0 || rowIndex >= len(rows) {
+					return tui.RowAliasChoices{}
+				}
+				return blastRowAliasChoices(rows[rowIndex])
+			},
+			ApplyAlias: func(rowIndex int, alias string) (tui.TableRow, error) {
+				alias = strings.TrimSpace(alias)
+				if alias == "" {
+					return tui.TableRow{}, fmt.Errorf("alias labelname cannot be empty")
+				}
+				if rowIndex < 0 || rowIndex >= len(rows) || rowIndex >= len(tableRows) {
+					return tui.TableRow{}, fmt.Errorf("no BLAST row is selected")
+				}
+				row := blastRowWithSelectedAlias(rows[rowIndex], alias)
+				rows[rowIndex] = row
+				_, refreshedRows := buildBlastSelectionTable(rows)
+				if rowIndex >= len(refreshedRows) {
+					return tui.TableRow{}, fmt.Errorf("updated BLAST row is unavailable")
+				}
+				tableRows[rowIndex] = refreshedRows[rowIndex]
+				return tableRows[rowIndex], nil
+			},
 			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
 				if rowIndex < 0 || rowIndex >= len(rows) {
 					return tui.DetailItem{}, false, nil
@@ -3455,6 +3544,18 @@ func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll boo
 			p.blastFilterFlags[stateKey] = append([]bool(nil), filterFlags...)
 			continue
 		}
+		if result.Action == "blast" {
+			if result.ActionRow >= 0 && result.ActionRow < len(rows) {
+				return BlastRowSelection{Rows: []model.BlastResultRow{rows[result.ActionRow]}, RunBlast: true}, nil
+			}
+			chosen := make([]model.BlastResultRow, 0, len(rows))
+			for i, ok := range selected {
+				if ok && i < len(rows) {
+					chosen = append(chosen, rows[i])
+				}
+			}
+			return BlastRowSelection{Rows: chosen, RunBlast: true}, nil
+		}
 		chosen := make([]model.BlastResultRow, 0, len(rows))
 		chosenNumbers := make([]int, 0, len(rows))
 		for i, ok := range selected {
@@ -3526,6 +3627,89 @@ func buildKeywordSelectionTable(rows []model.KeywordResultRow) ([]tui.TableColum
 		})
 	}
 	return columns, tableRows
+}
+
+func keywordRowAliasChoices(row model.KeywordResultRow) tui.RowAliasChoices {
+	aliases := splitPromptAliasText(row.PhgoAliases)
+	if len(aliases) == 0 {
+		aliases = splitPromptAliasText(row.Aliases)
+	}
+	return tui.RowAliasChoices{
+		LabelName: strings.TrimSpace(row.LabelName),
+		Aliases:   aliases,
+	}
+}
+
+func keywordRowWithSelectedAlias(row model.KeywordResultRow, alias string) model.KeywordResultRow {
+	alias = strings.TrimSpace(alias)
+	row.LabelName = alias
+	row.LabelNameType = "user selected alias"
+	row.PhgoAliases = promptAliasTextWithPinned(alias, row.PhgoAliases)
+	return row
+}
+
+func blastRowAliasChoices(row model.BlastResultRow) tui.RowAliasChoices {
+	aliases := splitPromptAliasText(row.PhgoAliases)
+	if len(aliases) == 0 {
+		aliases = splitPromptAliasText(strings.Join([]string{
+			row.UniProtGeneNames,
+			row.FamilyMemberLabels,
+			row.FamilySemanticAliasTokens,
+			row.Protein,
+			row.SubjectID,
+			row.SequenceID,
+			row.TranscriptID,
+			row.BlastLabelName,
+		}, "; "))
+	}
+	label := strings.TrimSpace(row.LabelName)
+	return tui.RowAliasChoices{LabelName: label, Aliases: uniquePromptStrings(append([]string{label}, aliases...))}
+}
+
+func blastRowWithSelectedAlias(row model.BlastResultRow, alias string) model.BlastResultRow {
+	alias = strings.TrimSpace(alias)
+	row.LabelName = alias
+	row.LabelNameType = "user selected alias"
+	row.PhgoAliases = promptAliasTextWithPinned(alias, row.PhgoAliases)
+	return row
+}
+
+func promptAliasTextWithPinned(pin string, value string) string {
+	aliases := make([]string, 0, 1+len(splitPromptAliasText(value)))
+	if strings.TrimSpace(pin) != "" {
+		aliases = append(aliases, strings.TrimSpace(pin))
+	}
+	aliases = append(aliases, splitPromptAliasText(value)...)
+	return strings.Join(uniquePromptStrings(aliases), "; ")
+}
+
+func splitPromptAliasText(value string) []string {
+	return uniquePromptStrings(strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ';', ',', '|', '\n', '\r', '\t':
+			return true
+		default:
+			return false
+		}
+	}))
+}
+
+func uniquePromptStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func buildBlastSelectionTable(rows []model.BlastResultRow) ([]tui.TableColumn, []tui.TableRow) {
@@ -4025,6 +4209,22 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 				return keywordPhgoAliases(row)
 			},
 		},
+		"gene_identifier": {
+			ID:       "gene_identifier",
+			Header:   ColumnCompactHeader("gene_identifier", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return strings.TrimSpace(row.GeneIdentifier)
+			},
+		},
+		"protein_id": {
+			ID:       "protein_id",
+			Header:   ColumnCompactHeader("protein_id", options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				return strings.TrimSpace(row.ProteinID)
+			},
+		},
 		"transcript": {
 			ID:       "transcript",
 			Header:   ColumnCompactHeader("transcript", options),
@@ -4054,6 +4254,12 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 	defs := make([]tableColumnValue[model.KeywordResultRow], 0, len(ids))
 	for _, id := range ids {
 		if id == "label_name" && !keywordRowsHaveLabelName(rows) {
+			continue
+		}
+		if id == "gene_identifier" && !keywordRowsHaveGeneIdentifier(rows) {
+			continue
+		}
+		if id == "protein_id" && !keywordRowsHaveProteinID(rows) {
 			continue
 		}
 		if def, ok := defByID[id]; ok {
@@ -4094,6 +4300,15 @@ func keywordRowsHaveLabelName(rows []model.KeywordResultRow) bool {
 func keywordRowsHaveProteinID(rows []model.KeywordResultRow) bool {
 	for _, row := range rows {
 		if strings.TrimSpace(row.ProteinID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func keywordRowsHaveGeneIdentifier(rows []model.KeywordResultRow) bool {
+	for _, row := range rows {
+		if strings.TrimSpace(row.GeneIdentifier) != "" {
 			return true
 		}
 	}

@@ -24,8 +24,8 @@ type columnMetadata struct {
 }
 
 var keywordDisplayColumnIDsByDatabase = map[string][]string{
-	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "transcript", "description", "genome"},
-	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "transcript", "description", "genome"},
+	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
+	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
@@ -151,8 +151,8 @@ var columnMetadataByID = map[string]columnMetadata{
 	"transcript":                       {CompactHeader: "transcript", DetailLabel: "transcript", ExportHeader: "transcript"},
 	"discripition":                     {CompactHeader: "discripition", DetailLabel: "description", ExportHeader: "description"},
 	"gnome":                            {CompactHeader: "gnome", DetailLabel: "genome", ExportHeader: "genome"},
-	"protein_id":                       {CompactHeader: "geneid", DetailLabel: "geneid", ExportHeader: "geneid"},
-	"gene_identifier":                  {CompactHeader: "gene_identifier", DetailLabel: "gene_identifier", ExportHeader: "gene_identifier"},
+	"protein_id":                       {CompactHeader: "protein_id", DetailLabel: "protein_id", ExportHeader: "protein_id"},
+	"gene_identifier":                  {CompactHeader: "geneid", DetailLabel: "geneid", ExportHeader: "geneid"},
 	"genome":                           {CompactHeader: "gnome", DetailLabel: "genome", ExportHeader: "genome"},
 	"location":                         {CompactHeader: "location", DetailLabel: "location", ExportHeader: "location"},
 	"aliases":                          {CompactHeader: "alias", DetailLabel: "alias", ExportHeader: "alias"},
@@ -170,7 +170,7 @@ var columnMetadataByID = map[string]columnMetadata{
 	"hsp_number":                       {CompactHeader: "hsp_number", DetailLabel: "hsp_number", ExportHeader: "hsp_number"},
 	"protein":                          {CompactHeader: "geneid", DetailLabel: "geneid", ExportHeader: "geneid"},
 	"blast_labelname":                  {CompactHeader: "blast_labelname", DetailLabel: "blast_labelname", ExportHeader: "blast_labelname"},
-	"blast_geneid":                     {CompactHeader: "blast_geneid", DetailLabel: "blast_geneid", ExportHeader: "blast_geneid"},
+	"blast_geneid":                     {CompactHeader: "blast_transcript", DetailLabel: "blast_transcript", ExportHeader: "blast_transcript"},
 	"subject_id":                       {CompactHeader: "subject_id", DetailLabel: "subject_id", ExportHeader: "subject_id"},
 	"species":                          {CompactHeader: "species", DetailLabel: "species", ExportHeader: "species"},
 	"e_value":                          {CompactHeader: "e_value", DetailLabel: "e_value", ExportHeader: "e_value"},

@@ -1529,6 +1529,181 @@ func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.Sp
 	return w.executePreparedBlast(ctx, targetSpecies, prepared, blastRequestConfig{})
 }
 
+func (w *BlastWizard) runBlastRowsBlastMode(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	databaseName, err := w.prompt.ChooseBlastTargetDatabase()
+	if err != nil {
+		return err
+	}
+
+	prepared, err := w.resolveBlastRowsToBlastItems(ctx, selected, rows)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("BLAST", "No selected BLAST result rows could be converted into BLAST queries.", prompt.ErrBackToRowSelection)
+	}
+	prepared, err = w.prepareKeywordBlastItems(ctx, selected, prepared)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("BLAST", "No selected BLAST result rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
+	}
+
+	var targetSource source.DataSource
+	switch strings.ToLower(strings.TrimSpace(databaseName)) {
+	case "phytozome":
+		targetSource = phytozome.NewClient(w.httpClient)
+	case "lemna":
+		targetSource = lemna.NewClient(w.httpClient)
+	default:
+		return fmt.Errorf("unsupported BLAST target database %q", databaseName)
+	}
+
+	previousSource := w.source
+	previousBlastProgram := w.blastProgramPath
+	previousDB := databaseDisplayName(previousSource.Name())
+	defer func() {
+		w.source = previousSource
+		w.prompt.SetDatabaseContext(previousDB)
+		w.setBlastProgramContext(previousBlastProgram)
+	}()
+
+	w.source = targetSource
+	w.prompt.SetDatabaseContext(databaseDisplayName(targetSource.Name()))
+	w.setBlastProgramContext("")
+
+	candidates, err := w.loadSpeciesCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	targetSpecies, err := w.selectSpecies(candidates)
+	if err != nil {
+		return err
+	}
+
+	return w.executePreparedBlast(ctx, targetSpecies, prepared, blastRequestConfig{})
+}
+
+func (w *BlastWizard) resolveBlastRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow) ([]blastQueryItem, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	run := func(taskCtx context.Context, update func(int, string)) ([]blastQueryItem, error) {
+		progress := safeProgress(update)
+		resolveCtx := mergeContexts(ctx, taskCtx)
+		progress(0, "Fetching BLAST hit peptide sequences...")
+		items := make([]blastQueryItem, len(rows))
+		var mu sync.Mutex
+		converted := 0
+		if err := runParallel(resolveCtx, len(rows), blastSequenceFetchWorkerCount(len(rows)), func(fetchCtx context.Context, index int) error {
+			item, err := w.blastRowToBlastQueryItem(fetchCtx, selected, rows[index])
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			items[index] = item
+			converted++
+			progress(converted, fmt.Sprintf("Building BLAST queries from result rows... %d/%d", converted, len(rows)))
+			mu.Unlock()
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		out := make([]blastQueryItem, 0, len(rows))
+		for _, item := range items {
+			if item.QuerySource != nil && strings.TrimSpace(item.Sequence) != "" {
+				out = append(out, item)
+			}
+		}
+		progress(len(rows), fmt.Sprintf("Resolved BLAST result rows for BLAST... %d/%d", len(out), len(rows)))
+		return out, nil
+	}
+	if w.suppressTaskModals {
+		return run(ctx, nil)
+	}
+	return tui.RunProgressTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("BLAST", "BLAST", "Resolving selected rows"),
+		Title:       "Resolving BLAST rows for BLAST",
+		Description: "Fetching peptide FASTA for selected BLAST result rows and converting them into new BLAST queries.",
+		Initial:     "Resolving BLAST rows for BLAST...",
+		Total:       len(rows),
+		CancelError: prompt.ErrBackToRowSelection,
+	}, run)
+}
+
+func (w *BlastWizard) blastRowToBlastQueryItem(ctx context.Context, selected model.SpeciesCandidate, row model.BlastResultRow) (blastQueryItem, error) {
+	sequenceID := strings.TrimSpace(firstNonEmpty(row.SequenceID, row.TranscriptID, row.Protein))
+	if sequenceID == "" {
+		return blastQueryItem{}, fmt.Errorf("BLAST row is missing sequence id")
+	}
+	targetID := row.TargetID
+	if targetID == 0 {
+		targetID = w.phytozomeTargetIDForRow(ctx, row)
+	}
+	if targetID == 0 {
+		targetID = selected.ProteomeID
+	}
+	record, err := w.fetchProteinSequenceCached(ctx, targetID, sequenceID)
+	if err != nil {
+		return blastQueryItem{}, err
+	}
+	sequence := strings.TrimSpace(record.Sequence)
+	if sequence == "" {
+		return blastQueryItem{}, fmt.Errorf("resolved empty peptide sequence for %s", sequenceID)
+	}
+	header := strings.TrimSpace(record.OriginalHeader)
+	if header == "" {
+		header = ">" + firstNonEmpty(strings.TrimSpace(row.Protein), strings.TrimSpace(row.SequenceID), strings.TrimSpace(row.TranscriptID), strings.TrimSpace(row.SubjectID))
+	}
+	fasta := formatDetailFASTA(header, sequence)
+	headerText, parsedSequence := splitFastaHeaderAndSequence(fasta)
+	if parsedSequence == "" {
+		parsedSequence = normalizeBlastSequence(sequence, model.SequenceProtein)
+	}
+	source := &model.QuerySequenceSource{
+		Sequence:            parsedSequence,
+		ProteinSequence:     parsedSequence,
+		SequenceKind:        model.SequenceProtein,
+		PreferredSequenceID: firstNonEmpty(strings.TrimSpace(row.Protein), strings.TrimSpace(row.SequenceID), strings.TrimSpace(row.TranscriptID), strings.TrimSpace(row.SubjectID)),
+		SourceDatabase:      firstNonEmpty(strings.TrimSpace(row.SourceDatabase), w.source.Name()),
+		SourceProteomeID:    targetID,
+		SourceJBrowseName:   firstNonEmpty(strings.TrimSpace(row.JBrowseName), selected.JBrowseName),
+		SourceGenomeLabel:   firstNonEmpty(strings.TrimSpace(row.Species), selected.GenomeLabel),
+		LabelName:           strings.TrimSpace(row.LabelName),
+		PhgoAliases:         strings.TrimSpace(row.PhgoAliases),
+		UniProtAccession:    strings.TrimSpace(row.UniProtAccession),
+		GeneID:              blastHitRowGeneID(row),
+		TranscriptID:        strings.TrimSpace(row.TranscriptID),
+		ProteinID:           firstNonEmpty(strings.TrimSpace(row.Protein), strings.TrimSpace(row.SequenceID), strings.TrimSpace(row.SubjectID)),
+		OrganismShort:       firstNonEmpty(strings.TrimSpace(row.Species), selected.SearchAlias, selected.GenomeLabel),
+		Annotation:          firstNonEmpty(strings.TrimSpace(row.Defline), strings.TrimSpace(headerText), strings.TrimSpace(row.Species)),
+	}
+	return blastQueryItem{
+		RawInput:        fasta,
+		LabelName:       strings.TrimSpace(row.LabelName),
+		Sequence:        parsedSequence,
+		ProteinSequence: parsedSequence,
+		QuerySource:     source,
+	}, nil
+}
+
+func blastHitRowGeneID(row model.BlastResultRow) string {
+	for _, value := range []string{
+		strings.TrimSpace(row.TranscriptID),
+		strings.TrimSpace(row.SequenceID),
+	} {
+		if geneID := stripTranscriptSuffix(value); geneID != "" && !strings.EqualFold(geneID, value) {
+			return stripTranscriptDecorations(geneID)
+		}
+	}
+	return ""
+}
+
 func (w *BlastWizard) prepareKeywordBlastItems(ctx context.Context, selected model.SpeciesCandidate, items []blastQueryItem) ([]blastQueryItem, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -1584,7 +1759,7 @@ func (w *BlastWizard) prepareKeywordBlastItems(ctx context.Context, selected mod
 		}
 
 		if allLabelsPresent(prepared) {
-			if keywordBlastItemsHaveReusableAliases(prepared) {
+			if blastItemsHaveReusableAliases(prepared) {
 				return prepared, nil
 			}
 			prepared, err = w.supplementBlastAliasesWithProgress(ctx, selected, prepared)
@@ -1820,7 +1995,7 @@ func keywordBlastItemFromRow(selected model.SpeciesCandidate, row model.KeywordR
 		UniProtAccession:    strings.TrimSpace(row.UniProt),
 		GeneID:              stripTranscriptDecorations(strings.TrimSpace(row.GeneIdentifier)),
 		TranscriptID:        strings.TrimSpace(row.TranscriptID),
-		ProteinID:           firstNonEmpty(row.ProteinID, row.TranscriptID, row.SequenceID),
+		ProteinID:           strings.TrimSpace(row.ProteinID),
 		OrganismShort:       firstNonEmpty(strings.TrimSpace(row.SequenceHeaderLabel), strings.TrimSpace(row.Genome), selected.SearchAlias, selected.GenomeLabel),
 		Annotation:          firstNonEmpty(strings.TrimSpace(row.Description), strings.TrimSpace(row.Comments), strings.TrimSpace(row.Genome), selected.GenomeLabel),
 	}
@@ -2435,9 +2610,9 @@ func (w *BlastWizard) executeConfiguredBlastBatchWithReferences(ctx context.Cont
 		Runs:              cloneBlastQueryRuns(queryRuns),
 		OriginalRuns:      cloneBlastQueryRuns(queryRuns),
 		ConfiguredRequest: configuredRequest,
-		OriginalRunCount:  len(queryRuns),
+		OriginalRunCount:  len(prepared),
 	}
-	originalRunCount := len(queryRuns)
+	originalRunCount := len(prepared)
 	if familyPlan != nil && familyPlan.Settings.Enabled {
 		prepared, queryRuns = applyFamilyBlastPlan(prepared, queryRuns, familyPlan)
 		if w.lastBlastReviewContext != nil {
@@ -2454,6 +2629,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		return nil, err
 	}
 	prepared = alignedPrepared
+	const queryProgressSpan = 100
 	run := func(update func(int, string)) ([]blastQueryRun, error) {
 		baseProgress := updateWithContext(ctx, update)
 		var progressMu sync.Mutex
@@ -2464,8 +2640,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		}
 		runCtx := contextWithBlastReferenceConfig(contextWithUpdate(ctx, progress), references)
 		previousSuppress := w.suppressTaskModals
-		batchMode := len(prepared) > 1
-		suppressTaskModals := previousSuppress || batchMode
+		suppressTaskModals := previousSuppress || update != nil
 		w.suppressTaskModals = suppressTaskModals
 		defer func() {
 			w.suppressTaskModals = previousSuppress
@@ -2479,7 +2654,17 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 			if item.QuerySource != nil {
 				request.Sequence = item.QuerySource.Sequence
 			}
-			progressBase := i * 2
+			progressBase := i * queryProgressSpan
+			queryProgress := func(current int, message string) {
+				if current < 0 {
+					current = 0
+				}
+				if current > queryProgressSpan {
+					current = queryProgressSpan
+				}
+				progress(progressBase+current, message)
+			}
+			queryCtx := contextWithBlastReferenceConfig(contextWithUpdate(ctx, queryProgress), references)
 			label := oneLinePreview(reportQueryLabel(item))
 			actionLabel := "Submitting"
 			if isLocalBlastRequest(request) {
@@ -2488,7 +2673,8 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 			progress(progressBase, fmt.Sprintf("%s BLAST query %d/%d (%s)...", actionLabel, i+1, len(prepared), label))
 
 			for {
-				job, err := w.submitBlastWithRetry(ctx, request)
+				job, effectiveRequest, err := w.submitBlastWithRetry(queryCtx, request)
+				request = effectiveRequest
 				if errors.Is(err, prompt.ErrBackToBlastProgram) || errors.Is(err, prompt.ErrExitRequested) {
 					return blastQueryRun{}, err
 				}
@@ -2496,11 +2682,11 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					return blastQueryRun{}, &blastBatchRunError{Stage: "submit BLAST job", Index: i + 1, Total: len(prepared), Label: label, Err: err}
 				}
 				if isLocalBlastRequest(request) {
-					progress(progressBase+1, fmt.Sprintf("Loading local BLAST results for query %d/%d (%s)...", i+1, len(prepared), label))
+					progress(progressBase+80, fmt.Sprintf("Loading local BLAST results for query %d/%d (%s)...", i+1, len(prepared), label))
 				} else {
-					progress(progressBase+1, fmt.Sprintf("Waiting for BLAST query %d/%d (%s)...", i+1, len(prepared), label))
+					progress(progressBase+35, fmt.Sprintf("Waiting for BLAST query %d/%d (%s)...", i+1, len(prepared), label))
 				}
-				results, err := w.waitForBlastResultsWithRetry(ctx, job.JobID)
+				results, err := w.waitForBlastResultsWithRetry(queryCtx, job.JobID)
 				if errors.Is(err, prompt.ErrExitRequested) || errors.Is(err, prompt.ErrBackToQueryInput) || errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) {
 					return blastQueryRun{}, err
 				}
@@ -2513,13 +2699,13 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 							return blastQueryRun{}, err
 						}
 					}
-					progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+					progress(progressBase+queryProgressSpan, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
 					return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
 				}
 				results.Rows = prepareBlastRowsForReferences(results.Rows, item, request, w.source.Name())
 				if references.UseUniProt {
-					w.prefetchBlastRowUniProtAccessions(ctx, results.Rows)
-					enriched, enrichErr := w.enrichBlastRowsWithUniProt(ctx, results.Rows)
+					w.prefetchBlastRowUniProtAccessions(queryCtx, results.Rows)
+					enriched, enrichErr := w.enrichBlastRowsWithUniProt(queryCtx, results.Rows)
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
 						return blastQueryRun{}, enrichErr
 					}
@@ -2528,7 +2714,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					}
 				}
 				if references.UseInterPro {
-					enriched, enrichErr := w.enrichBlastRowsWithInterPro(ctx, item, results.Rows, references.InterProSettings)
+					enriched, enrichErr := w.enrichBlastRowsWithInterPro(queryCtx, item, results.Rows, references.InterProSettings)
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
 						return blastQueryRun{}, enrichErr
 					}
@@ -2537,14 +2723,14 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					}
 				}
 				if references.AutoLabelBlastHits {
-					results.Rows = w.autoIdentifyBlastHitLabels(ctx, request.Species, item, results.Rows)
+					results.Rows = w.autoIdentifyBlastHitLabels(queryCtx, request.Species, item, results.Rows)
 				}
 				results.Rows = annotateBlastRowsForQueryContext(results.Rows, item)
-				progress(progressBase+2, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
+				progress(progressBase+queryProgressSpan, fmt.Sprintf("Finished BLAST query %d/%d (%s).", i+1, len(prepared), label))
 				return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
 			}
 		}
-		if !batchMode {
+		if len(prepared) <= 1 {
 			run, err := runOne(runCtx, 0, prepared[0])
 			if err != nil {
 				return nil, err
@@ -2563,6 +2749,8 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		workerCount := batchBlastWorkerCount(len(prepared), configuredRequest)
 		batchCtx := runCtx
 		if isLocalBlastRequest(configuredRequest) {
+			batchCtx = lemna.WithLocalBlastThreads(runCtx, localBlastThreadsPerWorker(workerCount, configuredRequest))
+		} else if _, ok := w.source.(*lemna.Client); ok {
 			batchCtx = lemna.WithLocalBlastThreads(runCtx, localBlastThreadsPerWorker(workerCount, configuredRequest))
 		}
 		batchCtx, cancelBatch := context.WithCancel(batchCtx)
@@ -2644,22 +2832,40 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 		}
 		return queryRuns, nil
 	}
-	if len(prepared) <= 1 {
-		return run(nil)
-	}
 	if w.suppressTaskModals {
 		return run(nil)
 	}
 	return tui.RunProgressTaskValueContext(tui.TaskPage{
-		Path:        w.tuiPath("BLAST", "Running batch"),
-		Title:       "Running BLAST batch",
+		Path:        w.tuiPath("BLAST", blastRunTaskPath(len(prepared))),
+		Title:       blastRunTaskTitle(len(prepared)),
 		Description: batchBlastDescription(configuredRequest),
-		Initial:     "Starting BLAST batch...",
-		Total:       len(prepared) * 2,
+		Initial:     blastRunTaskInitial(len(prepared)),
+		Total:       maxInt(1, len(prepared)*queryProgressSpan),
 		CancelError: prompt.ErrBackToQueryInput,
 	}, func(taskCtx context.Context, update func(int, string)) ([]blastQueryRun, error) {
 		return run(updateWithContext(mergeContexts(ctx, taskCtx), update))
 	})
+}
+
+func blastRunTaskTitle(queryCount int) string {
+	if queryCount <= 1 {
+		return "Running BLAST"
+	}
+	return "Running BLAST batch"
+}
+
+func blastRunTaskPath(queryCount int) string {
+	if queryCount <= 1 {
+		return "Running"
+	}
+	return "Running batch"
+}
+
+func blastRunTaskInitial(queryCount int) string {
+	if queryCount <= 1 {
+		return "Starting BLAST..."
+	}
+	return "Starting BLAST batch..."
 }
 
 func parallelBlastBatchResumeError(resumeIndex int, prepared []blastQueryItem, failedIndex int, err error) error {
@@ -2697,9 +2903,9 @@ func parallelBlastBatchResumeError(resumeIndex int, prepared []blastQueryItem, f
 
 func batchBlastDescription(request model.BlastRequest) string {
 	if isLocalBlastRequest(request) {
-		return "Running local BLAST+ queries and loading cached result tables."
+		return "Running local BLAST+ with visible download, database, execution, and result-loading progress."
 	}
-	return "Submitting BLAST queries and collecting results."
+	return "Submitting BLAST queries and collecting results with visible progress."
 }
 
 func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext blastRowContext) error {
@@ -2722,6 +2928,18 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 			continue
 		}
 		w.postRunBackTarget = prompt.ErrBackToQueryInput
+		if selection.RunBlast {
+			if err := w.runBlastRowsBlastMode(ctx, rowContext.Selected, selection.Rows); err != nil {
+				if errors.Is(err, prompt.ErrBackToRowSelection) {
+					continue
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
+				return err
+			}
+			continue
+		}
 		if !selection.GenerateFile {
 			continue
 		}
@@ -2817,10 +3035,14 @@ func (w *BlastWizard) reviewBlastRuns(ctx context.Context, selected model.Specie
 	if len(runs) == 0 {
 		return nil
 	}
-	if originalRunCount <= 1 && len(runs) == 1 {
+	if useSingleBlastRunReview(originalRunCount, runs) {
 		return w.reviewSingleBlastRun(ctx, selected, prepared, runs[0], configuredRequest)
 	}
 	return w.reviewMultiBlastRuns(ctx, selected, prepared, runs, configuredRequest)
+}
+
+func useSingleBlastRunReview(originalRunCount int, runs []blastQueryRun) bool {
+	return originalRunCount <= 1 && len(runs) == 1
 }
 
 func (w *BlastWizard) reviewSingleBlastRun(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, run blastQueryRun, configuredRequest model.BlastRequest) error {
@@ -2852,6 +3074,18 @@ func (w *BlastWizard) reviewSingleBlastRun(ctx context.Context, selected model.S
 				return navErr
 			}
 			if !retry {
+				return err
+			}
+			continue
+		}
+		if selection.RunBlast {
+			if err := w.runBlastRowsBlastMode(ctx, selected, selection.Rows); err != nil {
+				if errors.Is(err, prompt.ErrBackToRowSelection) {
+					continue
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
 				return err
 			}
 			continue
@@ -2900,6 +3134,18 @@ func (w *BlastWizard) reviewMultiBlastRuns(ctx context.Context, selected model.S
 				return navErr
 			}
 			if !retry {
+				return err
+			}
+			continue
+		}
+		if selection.RunBlast {
+			if err := w.runBlastRowsBlastMode(ctx, selected, selection.Rows); err != nil {
+				if errors.Is(err, prompt.ErrBackToRowSelection) {
+					continue
+				}
+				if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+					return err
+				}
 				return err
 			}
 			continue
@@ -3516,13 +3762,13 @@ func prepareBlastRowsForReferences(rows []model.BlastResultRow, item blastQueryI
 	out := make([]model.BlastResultRow, len(rows))
 	copy(out, rows)
 	label := blastQueryItemLabelName(item)
-	geneID := blastQueryItemGeneID(item)
+	id2 := blastQueryItemID2(item)
 	sourceName = strings.TrimSpace(sourceName)
 	program := canonicalBlastProgram(request.Program)
 	queryLength := inferredBlastQueryLength(out, request.Sequence)
 	for i := range out {
 		out[i].BlastLabelName = label
-		out[i].BlastGeneID = geneID
+		out[i].BlastGeneID = id2
 		if out[i].SourceDatabase == "" {
 			out[i].SourceDatabase = sourceName
 		}
@@ -3564,9 +3810,9 @@ func inferredBlastQueryLength(rows []model.BlastResultRow, sequence string) int 
 	return queryLength
 }
 
-func blastQueryItemGeneID(item blastQueryItem) string {
+func blastQueryItemID2(item blastQueryItem) string {
 	if item.QuerySource != nil {
-		return preferredPhgoIdentifier(item.QuerySource)
+		return querySourceID2(item.QuerySource)
 	}
 	return strings.TrimSpace(item.RawInput)
 }
@@ -3631,6 +3877,7 @@ func (w *BlastWizard) autoIdentifyBlastHitLabelsWithProgress(ctx context.Context
 	phytozomeSource, _ := w.phytozomeHitLabelSource(labelSpecies)
 	progress(0, fmt.Sprintf("Prefetching BLAST hit label candidates for %d rows...", len(rowsNeedingLabel)))
 	keywordRowsByTerm := w.fetchBlastHitKeywordRows(ctx, phytozomeSource, labelSpecies, rowsNeedingLabel)
+	lemnaKeywordRowsByTerm := w.fetchBlastHitLemnaKeywordRows(ctx, selected, rowsNeedingLabel)
 	taskTimestamp := time.Now().UTC().Format(time.RFC3339Nano)
 	identificationsByKey := make(map[string]blastHitLabelIdentification, len(out))
 	aliasRequests := make([]labelname.AliasRankRequest, 0, len(rowsNeedingLabel))
@@ -3645,7 +3892,7 @@ func (w *BlastWizard) autoIdentifyBlastHitLabelsWithProgress(ctx context.Context
 			identificationsByKey[cacheKey] = cached
 			continue
 		}
-		request, labelType, done := blastHitLabelAliasRankRequest(row, sourceLabel, keywordRowsByTerm, taskTimestamp)
+		request, labelType, done := blastHitLabelAliasRankRequest(row, sourceLabel, keywordRowsByTerm, lemnaKeywordRowsByTerm, taskTimestamp)
 		if done {
 			identificationsByKey[cacheKey] = blastHitLabelIdentification{
 				LabelType: labelType,
@@ -3687,7 +3934,7 @@ func (w *BlastWizard) autoIdentifyBlastHitLabelsWithProgress(ctx context.Context
 		cacheKey := blastHitLabelIdentificationCacheKey(out[i], sourceLabel)
 		identification, ok := identificationsByKey[cacheKey]
 		if !ok {
-			identification = autoIdentifyBlastHitLabelFromKeywordRows(out[i], sourceLabel, keywordRowsByTerm, taskTimestamp)
+			identification = autoIdentifyBlastHitLabelFromKeywordRows(out[i], sourceLabel, keywordRowsByTerm, lemnaKeywordRowsByTerm, taskTimestamp)
 			identificationsByKey[cacheKey] = identification
 			w.storeBlastHitLabelIdentification(cacheKey, identification)
 		}
@@ -3734,6 +3981,24 @@ func (w *BlastWizard) fetchBlastHitKeywordRows(ctx context.Context, phytozomeSou
 	return w.fetchKeywordRowsByTerms(ctx, phytozomeSource, selected, terms)
 }
 
+func (w *BlastWizard) fetchBlastHitLemnaKeywordRows(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow) map[string][]model.KeywordResultRow {
+	terms := make([]string, 0, len(rows)*2)
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.SourceDatabase), "lemna") {
+			terms = append(terms, blastHitLabelSearchTerms(row)...)
+		}
+	}
+	terms = uniqueStrings(terms)
+	if len(terms) == 0 {
+		return nil
+	}
+	lookupSource := w.source
+	if lookupSource == nil || !strings.EqualFold(strings.TrimSpace(lookupSource.Name()), "lemna") {
+		lookupSource = lemna.NewClient(w.httpClient)
+	}
+	return w.fetchKeywordRowsByTerms(ctx, lookupSource, selected, terms)
+}
+
 type blastHitLabelIdentification struct {
 	Label     string
 	LabelType string
@@ -3771,8 +4036,8 @@ func (w *BlastWizard) storeBlastHitLabelIdentification(cacheKey string, result b
 	w.blastHitLabelLookupMu.Unlock()
 }
 
-func autoIdentifyBlastHitLabelFromKeywordRows(row model.BlastResultRow, sourceLabel string, keywordRowsByTerm map[string][]model.KeywordResultRow, taskTimestamp string) blastHitLabelIdentification {
-	request, labelType, done := blastHitLabelAliasRankRequest(row, sourceLabel, keywordRowsByTerm, taskTimestamp)
+func autoIdentifyBlastHitLabelFromKeywordRows(row model.BlastResultRow, sourceLabel string, keywordRowsByTerm map[string][]model.KeywordResultRow, lemnaKeywordRowsByTerm map[string][]model.KeywordResultRow, taskTimestamp string) blastHitLabelIdentification {
+	request, labelType, done := blastHitLabelAliasRankRequest(row, sourceLabel, keywordRowsByTerm, lemnaKeywordRowsByTerm, taskTimestamp)
 	if done {
 		return blastHitLabelIdentification{LabelType: labelType}
 	}
@@ -3787,7 +4052,7 @@ func autoIdentifyBlastHitLabelFromKeywordRows(row model.BlastResultRow, sourceLa
 	return identification
 }
 
-func blastHitLabelAliasRankRequest(row model.BlastResultRow, sourceLabel string, keywordRowsByTerm map[string][]model.KeywordResultRow, taskTimestamp string) (labelname.AliasRankRequest, string, bool) {
+func blastHitLabelAliasRankRequest(row model.BlastResultRow, sourceLabel string, keywordRowsByTerm map[string][]model.KeywordResultRow, lemnaKeywordRowsByTerm map[string][]model.KeywordResultRow, taskTimestamp string) (labelname.AliasRankRequest, string, bool) {
 	taskTimestamp = strings.TrimSpace(taskTimestamp)
 	if taskTimestamp == "" {
 		taskTimestamp = time.Now().UTC().Format(time.RFC3339Nano)
@@ -3808,6 +4073,12 @@ func blastHitLabelAliasRankRequest(row model.BlastResultRow, sourceLabel string,
 			}, labelType, false
 		}
 	}
+	if aliases := lemnaLocalBlastHitKeywordAliasCandidates(row, lemnaKeywordRowsByTerm); len(aliases) > 0 {
+		return labelname.AliasRankRequest{
+			TaskTimestamp: taskTimestamp,
+			Aliases:       aliases,
+		}, "lemna local aliases", false
+	}
 	if aliases := lemnaLocalBlastHitAliasCandidates(row); len(aliases) > 0 {
 		return labelname.AliasRankRequest{
 			TaskTimestamp: taskTimestamp,
@@ -3821,6 +4092,28 @@ func blastHitLabelAliasRankRequest(row model.BlastResultRow, sourceLabel string,
 		}, "blast source labelname fallback", false
 	}
 	return labelname.AliasRankRequest{TaskTimestamp: taskTimestamp}, "not available", true
+}
+
+func lemnaLocalBlastHitKeywordAliasCandidates(row model.BlastResultRow, keywordRowsByTerm map[string][]model.KeywordResultRow) []string {
+	if !strings.EqualFold(strings.TrimSpace(row.SourceDatabase), "lemna") || len(keywordRowsByTerm) == 0 {
+		return nil
+	}
+	for _, term := range blastHitLabelSearchTerms(row) {
+		rows := keywordRowsByTerm[strings.ToLower(strings.TrimSpace(term))]
+		for _, candidateRows := range [][]model.KeywordResultRow{
+			filterKeywordRowsForBlastHit(rows, row),
+			rows,
+		} {
+			aliases := make([]string, 0, len(candidateRows)*4)
+			for _, candidate := range candidateRows {
+				aliases = append(aliases, lemnaLocalKeywordRowAliasCandidates(candidate)...)
+			}
+			if aliases = uniqueStrings(aliases); len(aliases) > 0 {
+				return aliases
+			}
+		}
+	}
+	return nil
 }
 
 func blastHitLabelIdentificationCacheKey(row model.BlastResultRow, sourceLabel string) string {
@@ -3897,8 +4190,8 @@ func lemnaLocalBlastHitAliasCandidates(row model.BlastResultRow) []string {
 	return lemnaLocalAliasCandidates(lemnaLocalAliasSeed{
 		LabelName:   row.LabelName,
 		PhgoAliases: row.PhgoAliases,
-		Aliases:     firstNonEmpty(row.UniProtGeneNames, row.UniProtProteinName),
-		AutoDefine:  row.Defline,
+		Aliases:     row.UniProtGeneNames,
+		AutoDefine:  firstNonEmpty(row.Defline, row.UniProtProteinName),
 	})
 }
 
@@ -5205,7 +5498,7 @@ func buildFamilyBlastRun(group familyBlastGroup, prepared []blastQueryItem, runs
 				row.BlastLabelName = memberLabel
 			}
 			if row.BlastGeneID == "" {
-				row.BlastGeneID = blastQueryItemGeneID(member)
+				row.BlastGeneID = blastQueryItemID2(member)
 			}
 			rows = append(rows, row)
 		}
@@ -7876,7 +8169,7 @@ func familyTXTHeaderLabel(source *model.QuerySequenceSource, fallback string) st
 	for _, value := range []string{
 		strings.TrimSpace(source.LabelName),
 		labelname.FirstAlias(source.Aliases),
-		preferredPhgoIdentifier(source),
+		querySourceID2(source),
 		strings.TrimSpace(fallback),
 	} {
 		if value != "" {
@@ -8065,18 +8358,15 @@ func (w *BlastWizard) collectQuerySequence(ctx context.Context, candidates []mod
 	}
 }
 
-func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.BlastRequest) (model.BlastJob, error) {
-	if w.suppressTaskModals {
-		return w.submitBlastOnce(ctx, request)
-	}
+func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.BlastRequest) (model.BlastJob, model.BlastRequest, error) {
 	for {
 		job, err := w.submitBlastOnce(ctx, request)
 		if err == nil {
-			return job, nil
+			return job, request, nil
 		}
 		var missingTools *blastplus.MissingToolsError
 		if errors.As(err, &missingTools) {
-			return model.BlastJob{}, err
+			return model.BlastJob{}, request, err
 		}
 		if !isLocalBlastRequest(request) {
 			localOK, localErr := w.canRunLocalBlastFallback(ctx, request)
@@ -8087,19 +8377,22 @@ func (w *BlastWizard) submitBlastWithRetry(ctx context.Context, request model.Bl
 				continue
 			}
 		}
+		if w.suppressTaskModals {
+			return model.BlastJob{}, request, err
+		}
 		action, actionErr := w.prompt.BlastSubmitErrorAction(fmt.Sprintf("submit BLAST job: %v", err))
 		if actionErr != nil {
-			return model.BlastJob{}, actionErr
+			return model.BlastJob{}, request, actionErr
 		}
 		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, false)
 		if navErr != nil {
-			return model.BlastJob{}, navErr
+			return model.BlastJob{}, request, navErr
 		}
 		switch decision {
 		case recoveryRetry:
 			continue
 		default:
-			return model.BlastJob{}, prompt.ErrBackToQueryInput
+			return model.BlastJob{}, request, prompt.ErrBackToQueryInput
 		}
 	}
 }
@@ -8977,8 +9270,8 @@ type lemnaLocalAliasSeed struct {
 
 func lemnaLocalAliasCandidates(seed lemnaLocalAliasSeed) []string {
 	aliases := make([]string, 0, 18)
-	aliases = append(aliases, seed.LabelName)
-	aliases = append(aliases, labelname.SplitAliases(seed.PhgoAliases)...)
+	aliases = append(aliases, splitLocalAliasText(seed.LabelName)...)
+	aliases = append(aliases, splitLocalAliasText(seed.PhgoAliases)...)
 	aliases = append(aliases, splitLocalAliasText(seed.Aliases)...)
 	aliases = append(aliases, splitLocalAliasText(seed.UniProt)...)
 	if seed.ExtraColumns != nil {
@@ -9019,10 +9312,63 @@ func splitLocalAliasText(value string) []string {
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part != "" {
-			out = append(out, part)
+			if fields, ok := splitWhitespaceLocalAliasList(part); ok {
+				out = append(out, fields...)
+			} else {
+				out = append(out, part)
+			}
 		}
 	}
 	return out
+}
+
+func splitWhitespaceLocalAliasList(value string) ([]string, bool) {
+	fields := strings.Fields(value)
+	if len(fields) <= 1 {
+		return nil, false
+	}
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.Trim(field, `"'()[]{}.,;`)
+		if !looksLikeLocalAliasToken(field) {
+			return nil, false
+		}
+		out = append(out, field)
+	}
+	return out, true
+}
+
+func looksLikeLocalAliasToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || len(value) > 40 {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	hasUpper := false
+	hasLower := false
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLetter = true
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '_' || r == '-' || r == '.' || r == '\'':
+		default:
+			return false
+		}
+	}
+	if !hasLetter {
+		return false
+	}
+	if hasLower && !hasUpper && !hasDigit {
+		return false
+	}
+	return true
 }
 
 func lemnaLocalKeywordRowAliasCandidates(row model.KeywordResultRow) []string {
@@ -10237,7 +10583,7 @@ func buildExportMetadata(baseName string, querySource *model.QuerySequenceSource
 
 	return &model.ExportMetadata{
 		GeneName:      baseName,
-		GeneID:        querySourceGeneID(querySource),
+		GeneID:        strings.TrimSpace(querySource.GeneID),
 		GeneReportURL: firstNonEmpty(querySource.OriginalInputURL, querySource.NormalizedURL),
 		Queries:       exportQueryMetadataFromSources([]*model.QuerySequenceSource{querySource}),
 	}
@@ -10264,7 +10610,7 @@ func exportQueryMetadataFromSources(querySources []*model.QuerySequenceSource) [
 		out = append(out, model.ExportQueryMetadata{
 			Index:             len(out) + 1,
 			LabelName:         strings.TrimSpace(source.LabelName),
-			GeneID:            querySourceGeneID(source),
+			GeneID:            strings.TrimSpace(source.GeneID),
 			ProteinID:         strings.TrimSpace(source.ProteinID),
 			TranscriptID:      strings.TrimSpace(source.TranscriptID),
 			SourceDatabase:    strings.TrimSpace(source.SourceDatabase),
@@ -10279,13 +10625,6 @@ func exportQueryMetadataFromSources(querySources []*model.QuerySequenceSource) [
 		})
 	}
 	return out
-}
-
-func querySourceGeneID(source *model.QuerySequenceSource) string {
-	if source == nil {
-		return ""
-	}
-	return preferredPhgoIdentifier(source)
 }
 
 func prependQuerySequenceRecord(records []model.ProteinSequenceRecord, querySource *model.QuerySequenceSource, baseName string) []model.ProteinSequenceRecord {
@@ -10387,7 +10726,7 @@ func stripTranscriptDecorations(value string) string {
 	return value
 }
 
-func preferredPhgoIdentifier(source *model.QuerySequenceSource) string {
+func querySourceID2(source *model.QuerySequenceSource) string {
 	if source == nil {
 		return ""
 	}
@@ -10498,6 +10837,9 @@ func describeQuerySourceDetails(source *model.QuerySequenceSource, targetDatabas
 	}
 	if source.TranscriptID != "" && source.TranscriptID != source.GeneID {
 		lines = append(lines, "Transcript ID: "+source.TranscriptID)
+	}
+	if source.ProteinID != "" && source.ProteinID != source.TranscriptID && source.ProteinID != source.GeneID {
+		lines = append(lines, "Protein ID: "+source.ProteinID)
 	}
 	if source.NormalizedURL != "" {
 		lines = append(lines, "URL: "+source.NormalizedURL)

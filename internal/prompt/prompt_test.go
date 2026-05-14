@@ -33,6 +33,70 @@ func TestIdentityRowOrder(t *testing.T) {
 	}
 }
 
+func TestKeywordRowAliasSelectionPinsAliasForDownstreamUse(t *testing.T) {
+	row := model.KeywordResultRow{
+		LabelName:   "OLD",
+		PhgoAliases: "OLD; C4H; C4H; CYP73A",
+	}
+
+	choices := keywordRowAliasChoices(row)
+	if got, want := strings.Join(choices.Aliases, "|"), "OLD|C4H|CYP73A"; got != want {
+		t.Fatalf("unexpected alias choices: got %q want %q", got, want)
+	}
+
+	row = keywordRowWithSelectedAlias(row, "C4H")
+	if row.LabelName != "C4H" {
+		t.Fatalf("label name was not updated: %q", row.LabelName)
+	}
+	if row.LabelNameType != "user selected alias" {
+		t.Fatalf("unexpected label type: %q", row.LabelNameType)
+	}
+	if got, want := row.PhgoAliases, "C4H; OLD; CYP73A"; got != want {
+		t.Fatalf("selected alias should be pinned in phgo_alias: got %q want %q", got, want)
+	}
+}
+
+func TestBlastRowAliasSelectionPinsAliasForDownstreamUse(t *testing.T) {
+	row := model.BlastResultRow{
+		LabelName:        "OLD",
+		PhgoAliases:      "OLD; PAL1; PAL1; PAL2",
+		UniProtGeneNames: "UPAL",
+		Protein:          "prot1",
+	}
+
+	choices := blastRowAliasChoices(row)
+	if got, want := strings.Join(choices.Aliases, "|"), "OLD|PAL1|PAL2"; got != want {
+		t.Fatalf("unexpected BLAST alias choices: got %q want %q", got, want)
+	}
+
+	row = blastRowWithSelectedAlias(row, "PAL1")
+	if row.LabelName != "PAL1" {
+		t.Fatalf("label name was not updated: %q", row.LabelName)
+	}
+	if row.LabelNameType != "user selected alias" {
+		t.Fatalf("unexpected label type: %q", row.LabelNameType)
+	}
+	if got, want := row.PhgoAliases, "PAL1; OLD; PAL2"; got != want {
+		t.Fatalf("selected alias should be pinned in phgo_alias: got %q want %q", got, want)
+	}
+}
+
+func TestBlastRowAliasChoicesFallBackToRowIdentifiers(t *testing.T) {
+	row := model.BlastResultRow{
+		LabelName:        "HIT",
+		UniProtGeneNames: "PAL1 PAL2",
+		Protein:          "prot1",
+		SequenceID:       "seq1",
+	}
+	choices := blastRowAliasChoices(row)
+	got := strings.Join(choices.Aliases, "|")
+	for _, want := range []string{"HIT", "PAL1 PAL2", "prot1", "seq1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback aliases missing %q from %q", want, got)
+		}
+	}
+}
+
 func TestApplySelectionCommandUpDownAndRange(t *testing.T) {
 	selected := []bool{false, false, false, false, false}
 	order := []int{0, 1, 2, 3, 4}
@@ -187,7 +251,7 @@ func TestKeywordRowDetailIncludesAllAvailableColumns(t *testing.T) {
 		Description:    "desc",
 	}
 	detail := keywordRowDetail(row)
-	for _, want := range []string{"search_type: keyword", "label_name: C4H", "geneid: prot123", "transcript: AT1G01010.1"} {
+	for _, want := range []string{"search_type: keyword", "label_name: C4H", "protein_id: prot123", "geneid: AT1G01010", "transcript: AT1G01010.1"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("keyword detail missing %q: %s", want, detail)
 		}
