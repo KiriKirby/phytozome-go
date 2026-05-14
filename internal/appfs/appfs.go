@@ -16,6 +16,7 @@ import (
 )
 
 var clearRunCacheOnce sync.Once
+var atomicWriteLocks sync.Map
 
 func ApplicationDir() (string, error) {
 	executablePath, err := os.Executable()
@@ -50,13 +51,9 @@ func CacheDir(parts ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := base
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		dir = filepath.Join(dir, part)
+	dir, err := cachePath(base, parts...)
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("ensure cache directory: %w", err)
@@ -132,16 +129,92 @@ func RemoveCacheSubtree(parts ...string) error {
 	if err != nil {
 		return err
 	}
+	target, err := cachePath(root, parts...)
+	if err != nil {
+		return err
+	}
+	if samePath(target, root) {
+		return fmt.Errorf("refusing to remove entire cache root without using ResetRunCache")
+	}
+	if err := os.RemoveAll(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove cache subtree %s: %w", target, err)
+	}
+	return nil
+}
+
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("empty atomic write path")
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("resolve atomic write path: %w", err)
+	}
+	lockValue, _ := atomicWriteLocks.LoadOrStore(absPath, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	path = absPath
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("ensure atomic write directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary file for %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("set temporary file permissions for %s: %w", path, err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary file for %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary file for %s: %w", path, err)
+	}
+	if err := replaceFile(tmpPath, path); err != nil {
+		return fmt.Errorf("replace %s atomically: %w", path, err)
+	}
+	cleanup = false
+	return nil
+}
+
+func cachePath(root string, parts ...string) (string, error) {
+	root = filepath.Clean(root)
 	target := root
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		target = filepath.Join(target, part)
+		cleaned := filepath.Clean(part)
+		if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("unsafe cache path component %q", part)
+		}
+		target = filepath.Join(target, cleaned)
 	}
-	if err := os.RemoveAll(target); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove cache subtree %s: %w", target, err)
+	target = filepath.Clean(target)
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return "", fmt.Errorf("resolve cache path: %w", err)
 	}
-	return nil
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("cache path escapes cache root: %s", target)
+	}
+	return target, nil
+}
+
+func samePath(a string, b string) bool {
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }

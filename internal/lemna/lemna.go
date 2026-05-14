@@ -34,8 +34,9 @@ import (
 )
 
 const (
-	baseURL     = "https://www.lemna.org"
-	downloadURL = "https://www.lemna.org/download/"
+	baseURL               = "https://www.lemna.org"
+	downloadURL           = "https://www.lemna.org/download/"
+	maxLemnaTextBodyBytes = 16 << 20
 )
 
 var (
@@ -1031,12 +1032,18 @@ func (c *Client) submitBlastToServer(ctx context.Context, req model.BlastRequest
 
 	// If site returned a non-200, treat as failure for robust behavior.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return model.BlastJob{}, fmt.Errorf("lemna.org submit returned status %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	// Try to extract a job id or results URL from the response body.
-	bbody, _ := io.ReadAll(resp.Body)
+	bbody, err := io.ReadAll(io.LimitReader(resp.Body, maxLemnaTextBodyBytes+1))
+	if err != nil {
+		return model.BlastJob{}, fmt.Errorf("read lemna.org submit response: %w", err)
+	}
+	if len(bbody) > maxLemnaTextBodyBytes {
+		return model.BlastJob{}, fmt.Errorf("lemna.org submit response exceeds %d bytes", maxLemnaTextBodyBytes)
+	}
 	respText := string(bbody)
 	jobID := extractBlastJobID(respText)
 	if jobID == "" && resp.Request != nil && resp.Request.URL != nil {
@@ -2301,9 +2308,12 @@ func (c *Client) fetchText(ctx context.Context, requestURL string) (string, erro
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxLemnaTextBodyBytes+1))
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", requestURL, err)
+		}
+		if len(body) > maxLemnaTextBodyBytes {
+			return "", fmt.Errorf("read %s: response exceeds %d bytes", requestURL, maxLemnaTextBodyBytes)
 		}
 		text := string(body)
 		c.mu.Lock()

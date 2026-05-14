@@ -16,25 +16,6 @@ function Get-WindowsWezTermCacheRoot {
     return (Join-Path $RepoRoot "bin\tooling\windows-wezterm")
 }
 
-function Get-PhytozomeWindowIconFileName {
-    return "phytozome-go-window-icon.png"
-}
-
-function Copy-PhytozomeWindowIcon {
-    param(
-        [string]$RepoRoot,
-        [string]$Destination
-    )
-
-    $source = Join-Path $RepoRoot "docs\logo2.png"
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        throw "Window icon source not found: $source"
-    }
-
-    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    Copy-Item -LiteralPath $source -Destination (Join-Path $Destination (Get-PhytozomeWindowIconFileName)) -Force
-}
-
 function Resolve-WezTermWindowsRelease {
     param([string]$Version = "latest")
 

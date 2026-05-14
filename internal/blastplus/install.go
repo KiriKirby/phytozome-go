@@ -263,6 +263,10 @@ func downloadArchive(ctx context.Context, httpClient *http.Client, url string, a
 
 func extractTarGz(ctx context.Context, archivePath string, targetDir string) error {
 	progressctx.Report(ctx, 41, "Opening BLAST+ archive...")
+	targetDir, err := filepath.Abs(filepath.Clean(targetDir))
+	if err != nil {
+		return fmt.Errorf("resolve BLAST+ target dir: %w", err)
+	}
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("open BLAST+ archive: %w", err)
@@ -291,13 +295,12 @@ func extractTarGz(ctx context.Context, archivePath string, targetDir string) err
 		if header == nil {
 			continue
 		}
-		name := filepath.Clean(header.Name)
-		if name == "." || name == string(filepath.Separator) {
-			continue
+		path, err := safeArchivePath(targetDir, header.Name)
+		if err != nil {
+			return err
 		}
-		path := filepath.Join(targetDir, name)
-		if !strings.HasPrefix(path, targetDir) {
-			return fmt.Errorf("refusing to extract unexpected path %s", header.Name)
+		if path == "" {
+			continue
 		}
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -325,6 +328,32 @@ func extractTarGz(ctx context.Context, archivePath string, targetDir string) err
 	}
 	progressctx.Report(ctx, 100, "BLAST+ extraction completed.")
 	return nil
+}
+
+func safeArchivePath(targetDir string, entryName string) (string, error) {
+	entryName = strings.TrimSpace(entryName)
+	if entryName == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(entryName, "/") || strings.HasPrefix(entryName, `\`) {
+		return "", fmt.Errorf("refusing to extract unexpected path %s", entryName)
+	}
+	name := filepath.Clean(entryName)
+	if name == "." || name == string(filepath.Separator) {
+		return "", nil
+	}
+	if filepath.IsAbs(name) || strings.Contains(filepath.ToSlash(name), ":") {
+		return "", fmt.Errorf("refusing to extract unexpected path %s", entryName)
+	}
+	targetPath := filepath.Join(targetDir, name)
+	rel, err := filepath.Rel(targetDir, targetPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve BLAST+ archive path %s: %w", entryName, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("refusing to extract unexpected path %s", entryName)
+	}
+	return targetPath, nil
 }
 
 type progressWriter struct {

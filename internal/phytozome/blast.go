@@ -165,7 +165,7 @@ func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model
 	}
 	defer resp.Body.Close()
 
-	payload, err := io.ReadAll(resp.Body)
+	payload, err := readLimited(resp.Body, maxPhytozomeJSONBytes, "blast submit response")
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("read blast submit response: %w", err)
 	}
@@ -230,7 +230,7 @@ func (c *Client) fetchBlastResult(ctx context.Context, jobID string) (model.Blas
 	}
 	defer resp.Body.Close()
 
-	payload, err := io.ReadAll(resp.Body)
+	payload, err := readLimited(resp.Body, maxPhytozomeJSONBytes, "blast results response")
 	if err != nil {
 		return model.BlastResult{}, false, fmt.Errorf("read blast results response: %w", err)
 	}
@@ -529,7 +529,7 @@ func (c *Client) fetchGeneRecord(ctx context.Context, requestURL string, descrip
 			return geneRecord{}, fmt.Errorf("no gene record for %s", description)
 		}
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body := readShortErrorBody(resp.Body)
 			return geneRecord{}, fmt.Errorf("fetch gene record for %s: status %s body %s", description, resp.Status, strings.TrimSpace(string(body)))
 		}
 
@@ -660,7 +660,7 @@ func (c *Client) fetchProteinSequenceByTranscript(ctx context.Context, transcrip
 			return model.ProteinSequenceData{}, fmt.Errorf("no protein sequence for transcript id %s", transcriptInternalID)
 		}
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body := readShortErrorBody(resp.Body)
 			return model.ProteinSequenceData{}, fmt.Errorf("fetch protein sequence: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
 		}
 
@@ -831,7 +831,7 @@ func (c *Client) SearchGenesByKeyword(ctx context.Context, proteomeID int, keywo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
+		payload := readShortErrorBody(resp.Body)
 		return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
 	}
 
@@ -1023,7 +1023,7 @@ func (c *Client) searchGenesWithBody(ctx context.Context, body map[string]any) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		payload, _ := io.ReadAll(resp.Body)
+		payload := readShortErrorBody(resp.Body)
 		return nil, fmt.Errorf("keyword search: status %s body %s", resp.Status, strings.TrimSpace(string(payload)))
 	}
 

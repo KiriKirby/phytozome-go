@@ -27,7 +27,10 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-const interProBaseURL = "https://www.ebi.ac.uk/interpro/api/entry/all/protein/uniprot/"
+const (
+	interProBaseURL          = "https://www.ebi.ac.uk/interpro/api/entry/all/protein/uniprot/"
+	maxInterProResponseBytes = 32 << 20
+)
 
 type Client struct {
 	httpClient *http.Client
@@ -182,9 +185,12 @@ func (c *Client) fetchPage(ctx context.Context, requestURL string) (apiPage, err
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return apiPage{}, fmt.Errorf("fetch InterPro: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxInterProResponseBytes+1))
 	if err != nil {
 		return apiPage{}, fmt.Errorf("read InterPro response: %w", err)
+	}
+	if len(body) > maxInterProResponseBytes {
+		return apiPage{}, fmt.Errorf("read InterPro response: response exceeds %d bytes", maxInterProResponseBytes)
 	}
 	var page apiPage
 	if err := json.Unmarshal(body, &page); err != nil {
@@ -395,7 +401,7 @@ func writeDiskEntry(accession string, entry Entry) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	_ = appfs.WriteFileAtomic(path, data, 0o644)
 }
 
 func diskEntryPath(accession string) (string, error) {

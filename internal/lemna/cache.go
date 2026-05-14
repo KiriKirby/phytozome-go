@@ -59,15 +59,7 @@ func writeCachedJSON(group string, key string, value any) {
 }
 
 func writeAtomically(path string, data []byte) error {
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return appfs.WriteFileAtomic(path, data, 0o644)
 }
 
 type proteinTranscriptDisk struct {

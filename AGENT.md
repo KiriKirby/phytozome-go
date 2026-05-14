@@ -527,10 +527,14 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 - Keep screenshots and README images in a stable repository location such as `docs/images/`.
 - Whenever output paths, cache paths, batch behavior, or recovery commands change, update the README and this file in the same change.
 - Release packaging rules:
-  - clear `bin/` before rebuilding release artifacts
-  - rebuild all supported platform binaries into `bin/`
+  - use the fixed release build template instead of hand-running ad hoc build commands:
+    - local artifact build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-release.ps1`
+    - GitHub release build after committing the intended changes: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Publish`
+    - optional explicit version format: `-BuildVersion vYYYYMMDDTHHMMSSZ`
+  - `scripts\build-release.ps1` owns clearing `bin/`, rebuilding all supported release artifacts, validating package contents, extracting/verifying Windows icons, and writing `bin\SHA256SUMS.txt`
   - keep release assets aligned with the actual executable names documented in the README
-  - Windows WezTerm bundles must apply `docs/logo2.png` to both the launcher executable icon and the embedded WezTerm window executable icon; keep the bundled `phytozome-go-window-icon.png` beside `wezterm.lua` as the stable source image
+  - Windows WezTerm bundles must apply `docs/logo2.png` to both the launcher executable icon and the embedded WezTerm window executable icon as executable resources only
+  - do not package source logo image files in release zips; specifically, `docs/logo.png`, `docs/logo2.png`, `logo.png`, `logo2.png`, and `phytozome-go-window-icon.png` must not appear in `phytozome-go_windows_amd64_wezterm.zip`
   - the README lead image must use `docs/logo.png`
   - prefer publishing GitHub releases with explicit release notes that summarize user-visible changes and supported platforms
 

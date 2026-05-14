@@ -465,6 +465,98 @@ func TestRunBlastAndParseProgramsWithRealBlastPlus(t *testing.T) {
 	}
 }
 
+func TestLocalBlastPWithUserProvidedFASTA(t *testing.T) {
+	queryPath := strings.TrimSpace(os.Getenv("PHYTO_LEMNA_USER_FASTA"))
+	if queryPath == "" {
+		t.Skip("set PHYTO_LEMNA_USER_FASTA to run a real lemna local BLASTP with a user FASTA")
+	}
+	if testing.Short() {
+		t.Skip("skipping real lemna local BLASTP in short mode")
+	}
+	if err := ensureBlastTools("blastp"); err != nil {
+		t.Skipf("BLAST+ blastp/makeblastdb not available: %v", err)
+	}
+	queryBytes, err := os.ReadFile(queryPath)
+	if err != nil {
+		t.Fatalf("read query FASTA %s: %v", queryPath, err)
+	}
+	queryFASTA, queryLengths, _, err := localBlastQueryFASTA(string(queryBytes))
+	if err != nil {
+		t.Fatalf("normalize query FASTA %s: %v", queryPath, err)
+	}
+	if len(queryLengths) < 2 {
+		t.Fatalf("expected multi-entry query FASTA, got lengths %#v", queryLengths)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	client := NewClient(nil)
+	candidates, err := client.FetchSpeciesCandidates(ctx)
+	if err != nil {
+		t.Fatalf("fetch lemna species candidates: %v", err)
+	}
+	targetName := strings.TrimSpace(os.Getenv("PHYTO_LEMNA_USER_FASTA_SPECIES"))
+	if targetName == "" {
+		targetName = "Sp_polyrhiza_9509"
+	}
+	species, ok := findTestSpeciesCandidate(candidates, targetName)
+	if !ok {
+		t.Fatalf("species %q not found in lemna candidates", targetName)
+	}
+	if os.Getenv("PHYTO_LEMNA_USER_FASTA_RESET_CACHE") != "" {
+		release, err := client.releaseForSpecies(ctx, species)
+		if err != nil {
+			t.Fatalf("resolve release before cache reset: %v", err)
+		}
+		if err := resetLocalBlastCache(release.RootDir, release.ReleaseDir); err != nil {
+			t.Fatalf("reset local blast cache: %v", err)
+		}
+	}
+
+	job, err := client.SubmitBlast(ctx, model.BlastRequest{
+		Species:          species,
+		Program:          "local:blastp",
+		Sequence:         queryFASTA,
+		EValue:           "1e-5",
+		AlignmentsToShow: 5,
+		AllowGaps:        true,
+	})
+	if err != nil {
+		t.Fatalf("SubmitBlast local blastp with %s: %v", queryPath, err)
+	}
+	result, err := client.WaitForBlastResults(ctx, job.JobID, time.Second, 30*time.Minute)
+	if err != nil {
+		t.Fatalf("WaitForBlastResults(%s): %v", job.JobID, err)
+	}
+	if len(result.Rows) == 0 {
+		t.Fatalf("local BLASTP completed but returned no hits for %s against %s", queryPath, species.DisplayLabel())
+	}
+	for _, row := range result.Rows {
+		if row.QueryID == "" {
+			t.Fatalf("row has empty QueryID: %#v", row)
+		}
+		if row.QueryLength <= 0 {
+			t.Fatalf("row has invalid QueryLength: %#v", row)
+		}
+	}
+	t.Logf("local BLASTP with %s against %s returned %d rows", queryPath, species.DisplayLabel(), len(result.Rows))
+}
+
+func findTestSpeciesCandidate(candidates []model.SpeciesCandidate, target string) (model.SpeciesCandidate, bool) {
+	target = strings.ToLower(strings.TrimSpace(target))
+	for _, candidate := range candidates {
+		if strings.ToLower(strings.TrimSpace(candidate.JBrowseName)) == target {
+			return candidate, true
+		}
+	}
+	for _, candidate := range candidates {
+		if strings.Contains(strings.ToLower(candidate.DisplayLabel()), target) {
+			return candidate, true
+		}
+	}
+	return model.SpeciesCandidate{}, false
+}
+
 func TestCompactLocalBlastDBPrefixStaysShortAndStable(t *testing.T) {
 	key := "blastp_Sp_polyrhiza_9509-REF-OXFORD-3.0_CSHL2022v1.genes.filt.proteins.with.extra.very.long.name.for.windows.path.behavior"
 	prefixA := compactLocalBlastDBPrefix("prot", key)
@@ -477,6 +569,72 @@ func TestCompactLocalBlastDBPrefixStaysShortAndStable(t *testing.T) {
 	}
 	if !strings.HasPrefix(prefixA, "lemna_prot_") || !strings.HasSuffix(prefixA, "_db") {
 		t.Fatalf("unexpected compact prefix shape: %q", prefixA)
+	}
+}
+
+func TestLocalBlastDBPrefixAndArgsNeverProduceEmptyOut(t *testing.T) {
+	tmpDir := t.TempDir()
+	prefix, err := localBlastDBPrefix(tmpDir, "prot", "blastp:weird/name\\with*chars")
+	if err != nil {
+		t.Fatalf("localBlastDBPrefix: %v", err)
+	}
+	if strings.TrimSpace(prefix) == "" {
+		t.Fatal("localBlastDBPrefix returned empty prefix")
+	}
+	if filepath.Dir(prefix) != tmpDir {
+		t.Fatalf("prefix dir = %q, want %q", filepath.Dir(prefix), tmpDir)
+	}
+	args := makeBlastDBArgs(filepath.Join(tmpDir, "input.fasta"), prefix, "prot", true)
+	for i, arg := range args {
+		if arg == "-out" {
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				t.Fatalf("makeblastdb args have empty -out value: %#v", args)
+			}
+			return
+		}
+	}
+	t.Fatalf("makeblastdb args missing -out: %#v", args)
+}
+
+func TestPrepareBlastDBSpecRejectsEmptyOutPrefixBeforeMakeblastdb(t *testing.T) {
+	tmpDir := t.TempDir()
+	fasta := filepath.Join(tmpDir, "query.fasta")
+	if err := os.WriteFile(fasta, []byte(">q\nMPEPTIDE\n"), 0o644); err != nil {
+		t.Fatalf("write fasta: %v", err)
+	}
+	_, err := prepareBlastDBSpec(fasta, "", "prot")
+	if err == nil {
+		t.Fatal("expected empty db prefix to be rejected")
+	}
+	if !strings.Contains(err.Error(), "without -out") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLocalBlastQueryFASTANormalizesPhgoMultiEntryHeaders(t *testing.T) {
+	input := strings.Join([]string{
+		">phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1/1",
+		"MAAA*",
+		"",
+		">phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1/2",
+		"MBBBB",
+		"",
+	}, "\n")
+	fasta, lengths, total, err := localBlastQueryFASTA(input)
+	if err != nil {
+		t.Fatalf("localBlastQueryFASTA: %v", err)
+	}
+	if !strings.Contains(fasta, ">LOC_Os08g14760.1 phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1/1") {
+		t.Fatalf("first normalized header missing from FASTA:\n%s", fasta)
+	}
+	if !strings.Contains(fasta, ">LOC_Os02g46970.1 phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1/2") {
+		t.Fatalf("second normalized header missing from FASTA:\n%s", fasta)
+	}
+	if lengths["LOC_Os08g14760.1"] != 5 || lengths["LOC_Os02g46970.1"] != 5 {
+		t.Fatalf("unexpected query lengths: %#v", lengths)
+	}
+	if total != 10 {
+		t.Fatalf("total length = %d, want 10", total)
 	}
 }
 

@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"regexp"
 	"slices"
@@ -153,7 +152,7 @@ func (c *Client) fetchReleaseDates(ctx context.Context) (map[string]string, erro
 		return nil, fmt.Errorf("fetch project overview: unexpected status %s", resp.Status)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxPhytozomeJSONBytes, "project overview response")
 	if err != nil {
 		return nil, fmt.Errorf("read project overview: %w", err)
 	}
@@ -459,7 +458,7 @@ func (c *Client) fetchHomePage(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("fetch homepage: unexpected status %s", resp.Status)
 	}
 
-	homePage, err := io.ReadAll(resp.Body)
+	homePage, err := readLimited(resp.Body, maxPhytozomeHTMLBytes, "homepage response")
 	if err != nil {
 		return nil, fmt.Errorf("read homepage: %w", err)
 	}
@@ -482,7 +481,7 @@ func (c *Client) fetchBundle(ctx context.Context, scriptURL string) ([]byte, err
 		return nil, fmt.Errorf("fetch bundle %s: unexpected status %s", scriptURL, resp.Status)
 	}
 
-	bundle, err := io.ReadAll(resp.Body)
+	bundle, err := readLimited(resp.Body, maxPhytozomeBundleSize, "bundle response")
 	if err != nil {
 		return nil, fmt.Errorf("read bundle %s: %w", scriptURL, err)
 	}

@@ -42,7 +42,6 @@ if (-not $wezRoot) {
 
 New-Item -ItemType Directory -Force -Path $preparedDir | Out-Null
 Copy-WezTermRuntimeFiles -WezRoot $wezRoot.FullName -Destination $preparedDir
-Copy-PhytozomeWindowIcon -RepoRoot $repoRoot -Destination $preparedDir
 Write-PhytozomeWezTermConfig -Path (Join-Path $preparedDir "wezterm.lua")
 
 & (Join-Path $PSScriptRoot "update-windows-icon.ps1") -Source "docs\logo2.png"

@@ -8,7 +8,14 @@
 package blastplus
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -126,4 +133,58 @@ func TestEnsureToolsOnPathDoesNotCacheFailures(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("failed lookup calls = %d, want 2 because failures are not cached", calls)
 	}
+}
+
+func TestSafeArchivePathRejectsEscapes(t *testing.T) {
+	target := filepath.Clean(t.TempDir())
+	unsafeNames := []string{"../escape.txt", "/absolute/escape.txt", "C:/escape.txt"}
+	for _, name := range unsafeNames {
+		if got, err := safeArchivePath(target, name); err == nil {
+			t.Fatalf("safeArchivePath(%q) = %q, nil error", name, got)
+		}
+	}
+	got, err := safeArchivePath(target, "ncbi-blast/bin/makeblastdb.exe")
+	if err != nil {
+		t.Fatalf("safeArchivePath rejected valid entry: %v", err)
+	}
+	if !strings.HasPrefix(filepath.Clean(got), target) {
+		t.Fatalf("safeArchivePath returned path outside target: %q", got)
+	}
+}
+
+func TestExtractTarGzRejectsPathTraversal(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "bad.tar.gz")
+	if err := writeTestTarGz(archive, "../escape.txt", []byte("bad")); err != nil {
+		t.Fatalf("write test archive: %v", err)
+	}
+	target := t.TempDir()
+	err := extractTarGz(context.Background(), archive, target)
+	if err == nil {
+		t.Fatal("expected path traversal archive to be rejected")
+	}
+	if !strings.Contains(err.Error(), "refusing to extract") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, "..", "escape.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("archive wrote outside target, stat err=%v", statErr)
+	}
+}
+
+func writeTestTarGz(path string, name string, data []byte) error {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+		return err
+	}
+	if _, err := tw.Write(data); err != nil {
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	if err := gz.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }

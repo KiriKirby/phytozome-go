@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	uniprotBaseURL = "https://rest.uniprot.org/uniprotkb/"
-	searchFields   = "accession,id,reviewed,protein_name,gene_names,organism_name,organism_id,length,cc_function,cc_catalytic_activity,go,go_id,ec,keyword,xref_pfam,xref_interpro,cc_pathway,cc_subcellular_location,protein_existence,annotation_score,fragment,cc_sequence_caution,ft_domain,ft_region,ft_motif,ft_act_site,ft_binding,xref_alphafolddb,xref_pdb"
+	uniprotBaseURL   = "https://rest.uniprot.org/uniprotkb/"
+	searchFields     = "accession,id,reviewed,protein_name,gene_names,organism_name,organism_id,length,cc_function,cc_catalytic_activity,go,go_id,ec,keyword,xref_pfam,xref_interpro,cc_pathway,cc_subcellular_location,protein_existence,annotation_score,fragment,cc_sequence_caution,ft_domain,ft_region,ft_motif,ft_act_site,ft_binding,xref_alphafolddb,xref_pdb"
+	maxResponseBytes = 16 << 20
 )
 
 type Client struct {
@@ -156,12 +157,15 @@ func (c *Client) lookupByQuery(ctx context.Context, cacheKey string, query strin
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			return Entry{}, fmt.Errorf("fetch UniProt: status %s body %s", resp.Status, strings.TrimSpace(string(body)))
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 		if err != nil {
 			return Entry{}, fmt.Errorf("read UniProt response: %w", err)
+		}
+		if len(body) > maxResponseBytes {
+			return Entry{}, fmt.Errorf("read UniProt response: response exceeds %d bytes", maxResponseBytes)
 		}
 		entries, err := parseTSV(string(body))
 		if err != nil {
@@ -262,7 +266,7 @@ func writeDiskEntry(cacheKey string, entry Entry) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	_ = appfs.WriteFileAtomic(path, data, 0o644)
 }
 
 func diskEntryPath(cacheKey string) (string, error) {
