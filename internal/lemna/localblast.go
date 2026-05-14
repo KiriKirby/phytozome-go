@@ -1162,13 +1162,11 @@ func fastaQueryID(header string, index int) string {
 		return fmt.Sprintf("query_%d", index)
 	}
 	if strings.HasPrefix(strings.ToLower(header), "phgo://") {
-		parts := strings.Split(header, "/")
-		candidates := make([]string, 0, 3)
-		if len(parts) >= 4 {
-			candidates = append(candidates, parts[len(parts)-2])
-		}
-		if len(parts) >= 3 {
-			candidates = append(candidates, parts[len(parts)-3])
+		main := strings.TrimSpace(strings.SplitN(header[len("phgo://"):], "\\", 2)[0])
+		parts := strings.Split(main, "/")
+		candidates := make([]string, 0, 2)
+		if len(parts) == 3 {
+			candidates = append(candidates, parts[2], parts[1])
 		}
 		for _, candidate := range candidates {
 			if id := safeQueryID(candidate); id != "" {

@@ -763,7 +763,7 @@ func TestKeywordProteinSequenceHeaderUsesLabelName(t *testing.T) {
 
 func TestApplyOriginalHeadersRestoresOriginalHeader(t *testing.T) {
 	records := []model.ProteinSequenceRecord{{
-		Header:         ">phgo://species/PAL1/AT2G37040/1",
+		Header:         ">phgo://species/PAL1/AT2G37040\\1",
 		OriginalHeader: ">Arabidopsis thaliana TAIR10|AT2G37040.1 (PAL1)",
 		SourceKey:      "keyword|phytozome|AT2G37040.1|AT2G37040.1|AT2G37040",
 		Sequence:       "MPEPTIDE",
@@ -852,7 +852,7 @@ func TestBuildKeywordSequenceAuditMatchesBySourceKeyNotHeader(t *testing.T) {
 
 func TestBuildPhgoHeaderIncludesRowNumber(t *testing.T) {
 	got := buildPhgoHeader("Sp7498", "PAL1", "AT2G37040", 7)
-	want := ">phgo://Sp7498/PAL1/AT2G37040/7"
+	want := ">phgo://Sp7498/PAL1/AT2G37040\\7"
 	if got != want {
 		t.Fatalf("buildPhgoHeader()=%q want %q", got, want)
 	}
@@ -866,17 +866,18 @@ func TestBuildPhgoHeaderOmitsRowNumberWhenZero(t *testing.T) {
 	}
 }
 
-func TestBlastPhgoHeaderUsesBlastGeneIDOnly(t *testing.T) {
+func TestBlastPhgoHeaderIncludesHitAndBlastSourceMetadata(t *testing.T) {
 	got := blastPhgoHeader(model.BlastResultRow{
-		Species:      "Sp7498",
-		LabelName:    "PAL1",
-		BlastGeneID:  "AT2G37040",
-		TranscriptID: "AT2G37040.1",
-		Protein:      "PAC:123456",
-		SequenceID:   "PAC:123456",
-		SubjectID:    "PAC:123456",
+		Species:        "Sp7498",
+		LabelName:      "C4H",
+		BlastLabelName: "PAL1",
+		BlastGeneID:    "AT2G37040",
+		TranscriptID:   "AT2G37040.1",
+		Protein:        "Sp7498_C4H_001",
+		SequenceID:     "PAC:123456",
+		SubjectID:      "PAC:123456",
 	}, 7)
-	want := ">phgo://Sp7498/PAL1/AT2G37040/7"
+	want := ">phgo://Sp7498/C4H/Sp7498_C4H_001\\PAL1/AT2G37040\\7"
 	if got != want {
 		t.Fatalf("blastPhgoHeader()=%q want %q", got, want)
 	}
@@ -889,7 +890,7 @@ func TestKeywordPhgoHeaderPrefersTranscriptID(t *testing.T) {
 		TranscriptID:        "AT2G37040.1",
 		GeneIdentifier:      "AT2G37040 (PAC:123456)",
 	}, 7)
-	want := ">phgo://Athaliana_TAIR10/PAL1/AT2G37040.1/7"
+	want := ">phgo://Athaliana_TAIR10/PAL1/AT2G37040.1\\7"
 	if got != want {
 		t.Fatalf("keywordPhgoHeader()=%q want %q", got, want)
 	}
@@ -2901,7 +2902,7 @@ func TestParseFastaQuerySequenceInputSingleLineWithTrailingLabel(t *testing.T) {
 }
 
 func TestParseFastaQuerySequenceInputPhgoHeaderWithRowNumber(t *testing.T) {
-	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040/7\nMEPNTMASFDDEH\n")
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040\\7\nMEPNTMASFDDEH\n")
 	if !ok {
 		t.Fatalf("expected phgo FASTA header to parse")
 	}
@@ -2933,7 +2934,7 @@ func TestParseFastaQuerySequenceInputPhgoHeaderWithoutRowNumber(t *testing.T) {
 }
 
 func TestParseFastaQuerySequenceInputSingleLinePhgoHeader(t *testing.T) {
-	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040/7 MEPNTMASFDDEH")
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/PAL1/AT2G37040\\7 MEPNTMASFDDEH")
 	if !ok {
 		t.Fatalf("expected single-line phgo FASTA header to parse")
 	}
@@ -2942,6 +2943,32 @@ func TestParseFastaQuerySequenceInputSingleLinePhgoHeader(t *testing.T) {
 	}
 	if source.Sequence != "MEPNTMASFDDEH" {
 		t.Fatalf("unexpected single-line phgo sequence: %q", source.Sequence)
+	}
+}
+
+func TestParseFastaQuerySequenceInputBlastPhgoHeader(t *testing.T) {
+	source, ok := parseFastaQuerySequenceInput(">phgo://Sp7498/C4H/Sp7498_C4H_001\\PAL1/AT2G37040\\7\nMEPNTMASFDDEH\n")
+	if !ok {
+		t.Fatalf("expected BLAST phgo FASTA header to parse")
+	}
+	if source.LabelName != "C4H" || source.GeneID != "Sp7498_C4H_001" || source.OrganismShort != "Sp7498" {
+		t.Fatalf("unexpected BLAST phgo metadata: %#v", source)
+	}
+	if source.Sequence != "MEPNTMASFDDEH" {
+		t.Fatalf("unexpected BLAST phgo sequence: %q", source.Sequence)
+	}
+}
+
+func TestParseFastaQuerySequenceInputPhgoSourceHeaderWithSpaces(t *testing.T) {
+	source, ok := parseFastaQuerySequenceInput(">phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1\\h MEPNTMASFDDEH")
+	if !ok {
+		t.Fatalf("expected source phgo FASTA header with spaces to parse")
+	}
+	if source.LabelName != "4CL1" || source.GeneID != "LOC_Os08g14760.1" || source.OrganismShort != "Oryza sativa v7.0" {
+		t.Fatalf("unexpected source phgo metadata: %#v", source)
+	}
+	if source.Sequence != "MEPNTMASFDDEH" {
+		t.Fatalf("unexpected source phgo sequence: %q", source.Sequence)
 	}
 }
 

@@ -270,7 +270,7 @@ func DefaultFamilyBlastSettings() FamilyBlastSettings {
 		GroupByDetectedPrefix:      true,
 		MergeRowsByTarget:          true,
 		KeepBestHitPerTarget:       true,
-		PrependOnlyFirstQuery:      true,
+		PrependOnlyFirstQuery:      false,
 		CustomizeGroups:            false,
 		MinimumGroupSize:           2,
 		StripLeadingSpeciesPrefix:  true,

@@ -7856,7 +7856,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 				prependStart := time.Now()
 				rawRecords = prependQuerySequenceRecord(rawRecords, querySource, txtHeaderLabel)
 				if settings.UsePhgoHeader {
-					rawRecords = applyBlastPhgoHeaders(rawRecords, allRows, len(rawRecords)-len(hitRecords))
+					rawRecords = applyBlastPhgoHeaders(rawRecords, allRows, []*model.QuerySequenceSource{querySource}, len(rawRecords)-len(hitRecords))
 				} else {
 					rawRecords = applyOriginalHeaders(rawRecords)
 				}
@@ -7915,7 +7915,7 @@ func (w *BlastWizard) exportBlastSelectionsToDir(ctx context.Context, selectedRo
 		prependStart := time.Now()
 		records = prependQuerySequenceRecord(records, querySource, txtHeaderLabel)
 		if settings.UsePhgoHeader {
-			records = applyBlastPhgoHeaders(records, selectedRows, len(records)-len(hitRecords))
+			records = applyBlastPhgoHeaders(records, selectedRows, []*model.QuerySequenceSource{querySource}, len(records)-len(hitRecords))
 		} else {
 			records = applyOriginalHeaders(records)
 		}
@@ -8010,9 +8010,10 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 				hitRecords := append([]model.ProteinSequenceRecord(nil), rawRecords...)
 				prependStart := time.Now()
 				var prependedQueries int
+				prependedSources := familyTXTQuerySources(querySources, familySettings)
 				rawRecords, prependedQueries = prependFamilyQuerySequenceRecords(rawRecords, querySources, txtHeaderLabel, familySettings)
 				if settings.UsePhgoHeader {
-					rawRecords = applyBlastPhgoHeaders(rawRecords, allRows, prependedQueries)
+					rawRecords = applyBlastPhgoHeaders(rawRecords, allRows, prependedSources, prependedQueries)
 				} else {
 					rawRecords = applyOriginalHeaders(rawRecords)
 				}
@@ -8069,9 +8070,10 @@ func (w *BlastWizard) exportFamilyBlastSelectionsToDir(ctx context.Context, sele
 		hitRecords := append([]model.ProteinSequenceRecord(nil), records...)
 		prependStart := time.Now()
 		var prependedQueries int
+		prependedSources := familyTXTQuerySources(querySources, familySettings)
 		records, prependedQueries = prependFamilyQuerySequenceRecords(records, querySources, txtHeaderLabel, familySettings)
 		if settings.UsePhgoHeader {
-			records = applyBlastPhgoHeaders(records, selectedRows, prependedQueries)
+			records = applyBlastPhgoHeaders(records, selectedRows, prependedSources, prependedQueries)
 		} else {
 			records = applyOriginalHeaders(records)
 		}
@@ -8162,6 +8164,17 @@ func familyTXTQueryIndexes(querySources []*model.QuerySequenceSource, settings m
 	return indexes
 }
 
+func familyTXTQuerySources(querySources []*model.QuerySequenceSource, settings model.FamilyBlastSettings) []*model.QuerySequenceSource {
+	indexes := familyTXTQueryIndexes(querySources, settings)
+	out := make([]*model.QuerySequenceSource, 0, len(indexes))
+	for _, index := range indexes {
+		if index >= 0 && index < len(querySources) && querySources[index] != nil {
+			out = append(out, querySources[index])
+		}
+	}
+	return out
+}
+
 func familyTXTHeaderLabel(source *model.QuerySequenceSource, fallback string) string {
 	if source == nil {
 		return strings.TrimSpace(fallback)
@@ -8198,18 +8211,16 @@ func familySequenceHeaderMode(onlyFirst bool) string {
 }
 
 func prependFamilyQuerySequenceRecords(records []model.ProteinSequenceRecord, querySources []*model.QuerySequenceSource, fallback string, familySettings model.FamilyBlastSettings) ([]model.ProteinSequenceRecord, int) {
-	prepended := 0
-	queryIndexes := familyTXTQueryIndexes(querySources, familySettings)
-	for i := len(queryIndexes) - 1; i >= 0; i-- {
-		source := querySources[queryIndexes[i]]
+	prependedSources := familyTXTQuerySources(querySources, familySettings)
+	for i := len(prependedSources) - 1; i >= 0; i-- {
+		source := prependedSources[i]
 		if source == nil {
 			continue
 		}
 		headerLabel := familyTXTHeaderLabel(source, fallback)
 		records = prependQuerySequenceRecord(records, source, headerLabel)
-		prepended++
 	}
-	return records, prepended
+	return records, len(prependedSources)
 }
 
 func (w *BlastWizard) exportBlastExcelAndFetchRecords(ctx context.Context, rows []model.BlastResultRow, rowNumbers []int, filterFlags []bool, excelPath string, metadata *model.ExportMetadata) ([]model.ProteinSequenceRecord, error) {
@@ -10671,8 +10682,14 @@ func applyKeywordPhgoHeaders(records []model.ProteinSequenceRecord, rows []model
 	return out
 }
 
-func applyBlastPhgoHeaders(records []model.ProteinSequenceRecord, rows []model.BlastResultRow, prependedQueryCount int) []model.ProteinSequenceRecord {
+func applyBlastPhgoHeaders(records []model.ProteinSequenceRecord, rows []model.BlastResultRow, querySources []*model.QuerySequenceSource, prependedQueryCount int) []model.ProteinSequenceRecord {
 	out := append([]model.ProteinSequenceRecord(nil), records...)
+	queryLimit := minInt(minInt(prependedQueryCount, len(out)), len(querySources))
+	for i := 0; i < queryLimit; i++ {
+		if header := querySourcePhgoHeader(querySources[i]); header != "" {
+			out[i].Header = header
+		}
+	}
 	start := minInt(prependedQueryCount, len(out))
 	limit := minInt(len(out)-start, len(rows))
 	for i := 0; i < limit; i++ {
@@ -10693,15 +10710,50 @@ func keywordPhgoHeader(row model.KeywordResultRow, rowNumber int) string {
 }
 
 func blastPhgoHeader(row model.BlastResultRow, rowNumber int) string {
-	return buildPhgoHeader(
+	return buildBlastPhgoHeader(
 		strings.TrimSpace(row.Species),
 		firstNonEmpty(strings.TrimSpace(row.LabelName), strings.TrimSpace(row.BlastLabelName)),
+		blastRowID2(row),
+		strings.TrimSpace(row.BlastLabelName),
 		strings.TrimSpace(row.BlastGeneID),
 		rowNumber,
 	)
 }
 
+func querySourcePhgoHeader(source *model.QuerySequenceSource) string {
+	if source == nil {
+		return ""
+	}
+	return buildPhgoHeaderWithSuffix(
+		firstNonEmpty(strings.TrimSpace(source.OrganismShort), strings.TrimSpace(source.SourceJBrowseName), strings.TrimSpace(source.SourceGenomeLabel)),
+		firstNonEmpty(strings.TrimSpace(source.LabelName), preferredStoredQuerySourceAlias(source), querySourceID2(source)),
+		querySourceID2(source),
+		"h",
+	)
+}
+
 func buildPhgoHeader(species string, label string, geneID string, rowNumber int) string {
+	suffix := ""
+	if rowNumber > 0 {
+		suffix = strconv.Itoa(rowNumber)
+	}
+	return buildPhgoHeaderWithSuffix(species, label, geneID, suffix)
+}
+
+func buildBlastPhgoHeader(species string, label string, geneID string, blastSourceLabel string, blastSourceGeneID string, rowNumber int) string {
+	sourceLabel := sanitizePhgoHeaderPart(blastSourceLabel)
+	sourceGeneID := sanitizePhgoHeaderPart(blastSourceGeneID)
+	if sourceLabel == "" || sourceGeneID == "" {
+		return buildPhgoHeader(species, label, geneID, rowNumber)
+	}
+	suffix := sourceLabel + "/" + sourceGeneID
+	if rowNumber > 0 {
+		suffix += "\\" + strconv.Itoa(rowNumber)
+	}
+	return buildPhgoHeaderWithSuffix(species, label, geneID, suffix)
+}
+
+func buildPhgoHeaderWithSuffix(species string, label string, geneID string, suffix string) string {
 	species = sanitizePhgoHeaderPart(species)
 	label = sanitizePhgoHeaderPart(label)
 	geneID = sanitizePhgoHeaderPart(geneID)
@@ -10709,8 +10761,9 @@ func buildPhgoHeader(species string, label string, geneID string, rowNumber int)
 		return ""
 	}
 	header := ">phgo://" + species + "/" + label + "/" + geneID
-	if rowNumber > 0 {
-		header += "/" + strconv.Itoa(rowNumber)
+	suffix = strings.TrimSpace(suffix)
+	if suffix != "" {
+		header += "\\" + suffix
 	}
 	return header
 }
@@ -10733,10 +10786,29 @@ func querySourceID2(source *model.QuerySequenceSource) string {
 	for _, value := range []string{
 		strings.TrimSpace(source.TranscriptID),
 		strings.TrimSpace(source.GeneID),
+		strings.TrimSpace(source.ProteinID),
+		strings.TrimSpace(source.PreferredSequenceID),
 	} {
 		if value != "" {
 			return stripTranscriptDecorations(value)
 		}
+	}
+	return ""
+}
+
+func blastRowID2(row model.BlastResultRow) string {
+	for _, value := range []string{
+		strings.TrimSpace(row.Protein),
+		strings.TrimSpace(row.SequenceID),
+		strings.TrimSpace(row.TranscriptID),
+		strings.TrimSpace(row.SubjectID),
+	} {
+		if value != "" {
+			return stripTranscriptDecorations(value)
+		}
+	}
+	if row.TargetID > 0 {
+		return strconv.Itoa(row.TargetID)
 	}
 	return ""
 }
@@ -11006,12 +11078,7 @@ func splitFastaHeaderAndSequence(input string) (string, string) {
 	}
 
 	if strings.HasPrefix(strings.ToLower(headerLine), "phgo://") {
-		tokenIndex := findFirstWhitespace(headerLine)
-		if tokenIndex < 0 {
-			return headerLine, ""
-		}
-		header := strings.TrimSpace(headerLine[:tokenIndex])
-		sequence := sanitizeSequence(headerLine[tokenIndex+1:])
+		header, sequence := splitSingleLinePhgoHeaderAndSequence(headerLine)
 		if header == "" || sequence == "" {
 			return "", ""
 		}
@@ -11053,12 +11120,15 @@ func splitFastaHeaderAndSequence(input string) (string, string) {
 }
 
 type phgoFastaHeader struct {
-	RawHeader  string
-	Species    string
-	LabelName  string
-	GeneID     string
-	RowNumber  int
-	HasRowPart bool
+	RawHeader            string
+	Species              string
+	LabelName            string
+	GeneID               string
+	BlastSourceLabelName string
+	BlastSourceGeneID    string
+	RowNumber            int
+	HasRowPart           bool
+	IsBlastQuerySource   bool
 }
 
 func parsePhgoFastaHeader(header string) (phgoFastaHeader, bool) {
@@ -11073,31 +11143,72 @@ func parsePhgoFastaHeader(header string) (phgoFastaHeader, bool) {
 	if body == "" {
 		return phgoFastaHeader{}, false
 	}
-	parts := strings.Split(body, "/")
-	if len(parts) != 3 && len(parts) != 4 {
+	sections := strings.Split(body, "\\")
+	if len(sections) > 3 {
 		return phgoFastaHeader{}, false
 	}
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
-		if parts[i] == "" {
-			return phgoFastaHeader{}, false
-		}
+	mainParts := strings.Split(strings.TrimSpace(sections[0]), "/")
+	if len(mainParts) != 3 {
+		return phgoFastaHeader{}, false
+	}
+	for i := range mainParts {
+		mainParts[i] = strings.TrimSpace(mainParts[i])
+	}
+	if mainParts[0] == "" || mainParts[1] == "" || mainParts[2] == "" {
+		return phgoFastaHeader{}, false
 	}
 	parsed := phgoFastaHeader{
 		RawHeader: header,
-		Species:   parts[0],
-		LabelName: parts[1],
-		GeneID:    parts[2],
+		Species:   mainParts[0],
+		LabelName: mainParts[1],
+		GeneID:    mainParts[2],
 	}
-	if len(parts) == 4 {
-		row, err := strconv.Atoi(parts[3])
-		if err != nil || row <= 0 {
+	if len(sections) == 1 {
+		return parsed, true
+	}
+	firstSuffix := strings.TrimSpace(sections[1])
+	if firstSuffix == "" {
+		return phgoFastaHeader{}, false
+	}
+	switch {
+	case strings.EqualFold(firstSuffix, "h"):
+		if len(sections) != 2 {
 			return phgoFastaHeader{}, false
 		}
+		parsed.IsBlastQuerySource = true
+		return parsed, true
+	case isPositiveInteger(firstSuffix):
+		if len(sections) != 2 {
+			return phgoFastaHeader{}, false
+		}
+		row, _ := strconv.Atoi(firstSuffix)
 		parsed.RowNumber = row
 		parsed.HasRowPart = true
+		return parsed, true
+	default:
+		sourceParts := strings.Split(firstSuffix, "/")
+		if len(sourceParts) != 2 {
+			return phgoFastaHeader{}, false
+		}
+		for i := range sourceParts {
+			sourceParts[i] = strings.TrimSpace(sourceParts[i])
+		}
+		if sourceParts[0] == "" || sourceParts[1] == "" {
+			return phgoFastaHeader{}, false
+		}
+		parsed.BlastSourceLabelName = sourceParts[0]
+		parsed.BlastSourceGeneID = sourceParts[1]
+		if len(sections) == 3 {
+			rowPart := strings.TrimSpace(sections[2])
+			if !isPositiveInteger(rowPart) {
+				return phgoFastaHeader{}, false
+			}
+			row, _ := strconv.Atoi(rowPart)
+			parsed.RowNumber = row
+			parsed.HasRowPart = true
+		}
+		return parsed, true
 	}
-	return parsed, true
 }
 
 func fastaHeaderPrimaryID(header string) string {
@@ -11105,6 +11216,45 @@ func fastaHeaderPrimaryID(header string) string {
 		return parsed.GeneID
 	}
 	return ""
+}
+
+func splitSingleLinePhgoHeaderAndSequence(headerLine string) (string, string) {
+	headerLine = strings.TrimSpace(headerLine)
+	if headerLine == "" {
+		return "", ""
+	}
+	if parsed, ok := parsePhgoFastaHeader(headerLine); ok {
+		_ = parsed
+		return headerLine, ""
+	}
+	for i := len(headerLine) - 1; i >= 0; i-- {
+		if headerLine[i] != ' ' && headerLine[i] != '\t' {
+			continue
+		}
+		header := strings.TrimSpace(headerLine[:i])
+		sequence := sanitizeSequence(headerLine[i+1:])
+		if header == "" || sequence == "" {
+			continue
+		}
+		if _, ok := parsePhgoFastaHeader(header); ok {
+			return header, sequence
+		}
+	}
+	return "", ""
+}
+
+func isPositiveInteger(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	row, err := strconv.Atoi(value)
+	return err == nil && row > 0
 }
 
 func trailingParentheticalLabel(value string) string {

@@ -681,10 +681,10 @@ func TestDownloadAndPrepareFastaRedownloadsInvalidCache(t *testing.T) {
 
 func TestLocalBlastQueryFASTANormalizesPhgoMultiEntryHeaders(t *testing.T) {
 	input := strings.Join([]string{
-		">phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1/1",
+		">phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1\\1",
 		"MAAA*",
 		"",
-		">phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1/2",
+		">phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1\\2",
 		"MBBBB",
 		"",
 	}, "\n")
@@ -692,10 +692,10 @@ func TestLocalBlastQueryFASTANormalizesPhgoMultiEntryHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("localBlastQueryFASTA: %v", err)
 	}
-	if !strings.Contains(fasta, ">LOC_Os08g14760.1 phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1/1") {
+	if !strings.Contains(fasta, ">LOC_Os08g14760.1 phgo://Oryza sativa v7.0/4CL1/LOC_Os08g14760.1\\1") {
 		t.Fatalf("first normalized header missing from FASTA:\n%s", fasta)
 	}
-	if !strings.Contains(fasta, ">LOC_Os02g46970.1 phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1/2") {
+	if !strings.Contains(fasta, ">LOC_Os02g46970.1 phgo://Oryza sativa v7.0/4CL2/LOC_Os02g46970.1\\2") {
 		t.Fatalf("second normalized header missing from FASTA:\n%s", fasta)
 	}
 	if lengths["LOC_Os08g14760.1"] != 5 || lengths["LOC_Os02g46970.1"] != 5 {
