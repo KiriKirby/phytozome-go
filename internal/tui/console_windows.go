@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
@@ -27,19 +28,16 @@ var (
 	consoleCloseHandlerMu          sync.Mutex
 	consoleCloseHandlerRefCount    int
 	consoleCloseHandlerApp         *tview.Application
-	consoleCloseHandlerCallback    = syscall.NewCallback(func(ctrlType uintptr) uintptr {
-		switch ctrlType {
-		case ctrlCEvent, ctrlBreakEvent, ctrlCloseEvent, ctrlLogoffEvent, ctrlShutdownEvent:
-			consoleCloseHandlerMu.Lock()
-			app := consoleCloseHandlerApp
-			consoleCloseHandlerMu.Unlock()
-			if app != nil {
-				app.Stop()
-				return 1
-			}
+	consoleCloseHandlerStopQueued  atomic.Bool
+	consoleCloseHandlerRequestStop = func(app *tview.Application) {
+		if app == nil {
+			return
 		}
-		return 0
-	})
+		go func() {
+			app.QueueEvent(tcell.NewEventKey(tcell.KeyCtrlC, 0, tcell.ModNone))
+		}()
+	}
+	consoleCloseHandlerCallback = syscall.NewCallback(handleConsoleCloseEvent)
 )
 
 const (
@@ -71,9 +69,28 @@ type consoleScreenBufferInfo struct {
 	MaximumWindowSize coord
 }
 
+func handleConsoleCloseEvent(ctrlType uintptr) uintptr {
+	switch ctrlType {
+	case ctrlCEvent, ctrlBreakEvent, ctrlCloseEvent, ctrlLogoffEvent, ctrlShutdownEvent:
+		consoleCloseHandlerMu.Lock()
+		app := consoleCloseHandlerApp
+		consoleCloseHandlerMu.Unlock()
+		if app == nil {
+			return 0
+		}
+		if consoleCloseHandlerStopQueued.CompareAndSwap(false, true) {
+			consoleCloseHandlerRequestStop(app)
+		}
+		return 1
+	default:
+		return 0
+	}
+}
+
 func installConsoleCloseHandler(app *tview.Application) func() {
 	consoleCloseHandlerMu.Lock()
 	consoleCloseHandlerApp = app
+	consoleCloseHandlerStopQueued.Store(false)
 	if consoleCloseHandlerRefCount == 0 {
 		_, _, _ = procSetConsoleCtrlHandler.Call(consoleCloseHandlerCallback, 1)
 	}
@@ -89,6 +106,7 @@ func installConsoleCloseHandler(app *tview.Application) func() {
 			}
 			if consoleCloseHandlerRefCount == 0 {
 				consoleCloseHandlerApp = nil
+				consoleCloseHandlerStopQueued.Store(false)
 				_, _, _ = procSetConsoleCtrlHandler.Call(consoleCloseHandlerCallback, 0)
 			}
 			consoleCloseHandlerMu.Unlock()

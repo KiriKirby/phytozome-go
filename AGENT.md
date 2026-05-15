@@ -64,6 +64,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 
 - Treat the terminal UI like a commercial wizard: every major step must be easy to scan, self-explanatory, and safe to recover from.
 - The product is pure TUI for all interactive workflows. All interactive workflow design and implementation must target the shared tview template layer; do not preserve, add, or keep a traditional text wizard fallback.
+- Bundled WezTerm startup has one special packaging-only preflight: when the packaged app itself is opened, the first tab may run a short cache-clean startup CLI with visible text/spinner feedback, then that cleaner should open the main wizard in a fresh tab in the same WezTerm window and exit. User-created new tabs inside that same WezTerm window must bypass cache cleaning and launch the main wizard directly.
+- Window titles are fixed to `PHgo (version)` and must not be rewritten to tab labels; tab titles keep the existing instance naming / hierarchy logic.
+- Only root tabs may expose Home. Child tabs created after clicking `+` must not show Home buttons or accept `Ctrl+O`.
 - Delete traditional interactive paths instead of hiding them. The interactive wizard must not contain stdin `readLine` prompts, `Press Enter to continue` pauses, stdout banners, stdout status logs, stdout tables, stdout spinners, or stdout progress bars.
 - Use mature Go TUI libraries as the primary implementation path. The default stack for interactive screens is now `github.com/rivo/tview` plus `github.com/gdamore/tcell/v2` so the app can rely on mature widgets, focus handling, mouse handling, forms, lists, tables, buttons, pages, and layout primitives instead of custom drawing.
 - Do not hand-roll custom terminal widgets when tview already covers the need. Custom code should be limited to app-specific screen composition, workflow state, and small adapters between workflow data and tview primitives.
@@ -538,6 +541,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
     - optional explicit version format: `-BuildVersion vYYYYMMDDTHHMMSSZ`
   - `scripts\build-release.ps1` owns clearing `bin/`, rebuilding all supported release artifacts, validating package contents, extracting/verifying Windows icons, and writing `bin\SHA256SUMS.txt`
   - keep release assets aligned with the actual executable names documented in the README
+  - all desktop release assets should use the bundled `WezTerm` runtime model instead of shipping bare `linux` or `darwin` binaries
+  - macOS release artifacts should be normal app bundles packaged as archives containing `phytozome GO.app`, not raw `darwin` executables
   - Windows WezTerm bundles must apply `docs/logo2.png` to both the launcher executable icon and the embedded WezTerm window executable icon as executable resources only
   - do not package source logo image files in release zips; specifically, `docs/logo.png`, `docs/logo2.png`, `logo.png`, `logo2.png`, and `phytozome-go-window-icon.png` must not appear in `phytozome-go_windows_amd64_wezterm.zip`
   - the README lead image must use `docs/logo.png`
@@ -767,8 +772,8 @@ Priority 4 (low / optional)
 - Runtime caches must live under a single hidden-capable `.cache/` directory next to the executable, not scattered across OS temp or user cache roots.
 - Cache layout rule:
   - `appfs.CacheRoot()` is the single source of truth for the app-local cache root
-  - startup cache reset clears the whole app-local `.cache` tree for the new run; do not add side caches outside that root
-  - modules may also expose narrower subtree cleanup for known-bad artifacts, but that is a supplement to the startup reset, not a replacement
+  - packaged desktop startup uses a dedicated cache-cleaner first tab that cleans `.cache`, then spawns the main wizard in a fresh tab in the same WezTerm window and exits; user-created tabs inside that same WezTerm session must bypass cache cleaning and launch the main wizard directly
+  - modules may also expose narrower subtree cleanup for known-bad artifacts, but that is a supplement to the startup cleanup path, not a replacement
 - Lemna local BLAST FASTA assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`. BLAST database index files may use `.cache/lemna/localblastdb/<dbtype_hash>/` when the species/release cache path would make Windows BLAST+ output prefixes too long; `makeblastdb` itself should build in a short OS temp directory and then move complete DB files into the app-local cache.
 - Persistent Phytozome caches should live under `.cache/phytozome/...`.
 

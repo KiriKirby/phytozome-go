@@ -9,8 +9,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/KiriKirby/phytozome-go/internal/workflow"
 )
@@ -22,10 +24,14 @@ const author = "wangsychn"
 const repoURL = "https://github.com/KiriKirby/phytozome-go"
 
 func main() {
-	args := os.Args[1:]
+	launch, args, err := parseLaunchArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 
 	if len(args) < 1 {
-		runDesktopWizard()
+		runDesktopWizard(launch)
 		return
 	}
 
@@ -33,7 +39,7 @@ func main() {
 	case "version", "--version", "-version":
 		printVersion()
 	case "blast":
-		runBlast(args[1:])
+		runBlast(launch, args[1:])
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -43,13 +49,13 @@ func main() {
 	}
 }
 
-func runDesktopWizard() {
-	if err := runInteractiveWizard(); err != nil {
+func runDesktopWizard(launch workflow.InstanceLaunchRequest) {
+	if err := runInteractiveWizard(launch); err != nil {
 		os.Exit(1)
 	}
 }
 
-func runBlast(args []string) {
+func runBlast(launch workflow.InstanceLaunchRequest, args []string) {
 	if len(args) == 0 {
 		printBlastUsage()
 		return
@@ -59,7 +65,7 @@ func runBlast(args []string) {
 	case "plan":
 		printBlastPlan()
 	case "wizard":
-		if err := runInteractiveWizard(); err != nil {
+		if err := runInteractiveWizard(launch); err != nil {
 			os.Exit(1)
 		}
 	default:
@@ -79,8 +85,8 @@ func printBlastPlan() {
 	fmt.Println("  4) review results, select rows, and export files")
 }
 
-func runInteractiveWizard() error {
-	wizard := workflow.NewBlastWizardWithTUIInfo(os.Stdout, workflowTUIInfo())
+func runInteractiveWizard(launch workflow.InstanceLaunchRequest) error {
+	wizard := workflow.NewBlastWizardWithLaunch(os.Stdout, workflowTUIInfo(), launch)
 	err := wizard.Run(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "blast wizard failed: %v\n", err)
@@ -124,4 +130,55 @@ func workflowTUIInfo() workflow.TUIInfo {
 		LicenseName: licenseName,
 		LicenseID:   licenseID,
 	}
+}
+
+func parseLaunchArgs(args []string) (workflow.InstanceLaunchRequest, []string, error) {
+	fs := flag.NewFlagSet("phytozome-go", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	runID := fs.String("instance-run-id", "", "shared run id for spawned instances")
+	instanceID := fs.String("instance-id", "", "instance id for spawned instances")
+	parentID := fs.String("instance-parent-id", "", "parent instance id for spawned instances")
+	handoffPath := fs.String("handoff", "", "path to instance handoff json")
+	versionFlag := fs.Bool("version", false, "print version information")
+	helpFlag := fs.Bool("help", false, "show help")
+	helpShortFlag := fs.Bool("h", false, "show help")
+	if err := fs.Parse(args); err != nil {
+		return workflow.InstanceLaunchRequest{}, nil, err
+	}
+
+	launch := workflow.InstanceLaunchRequest{
+		RunID:            strings.TrimSpace(*runID),
+		InstanceID:       strings.TrimSpace(*instanceID),
+		ParentInstanceID: strings.TrimSpace(*parentID),
+		HandoffPath:      strings.TrimSpace(*handoffPath),
+	}
+	if launch.HandoffPath != "" {
+		handoff, err := workflow.LoadInstanceHandoff(launch.HandoffPath)
+		if err != nil {
+			return workflow.InstanceLaunchRequest{}, nil, fmt.Errorf("load instance handoff: %w", err)
+		}
+		launch.Handoff = handoff
+		if launch.RunID == "" {
+			launch.RunID = strings.TrimSpace(handoff.RunID)
+		}
+		if launch.InstanceID == "" {
+			launch.InstanceID = strings.TrimSpace(handoff.InstanceID)
+		}
+		if launch.ParentInstanceID == "" {
+			launch.ParentInstanceID = strings.TrimSpace(handoff.ParentID)
+		}
+		if launch.Database == "" {
+			launch.Database = strings.TrimSpace(handoff.Database)
+		}
+		if launch.Mode == "" {
+			launch.Mode = workflow.QueryMode(strings.TrimSpace(handoff.Mode))
+		}
+	}
+	if *versionFlag {
+		return launch, []string{"--version"}, nil
+	}
+	if *helpFlag || *helpShortFlag {
+		return launch, []string{"--help"}, nil
+	}
+	return launch, fs.Args(), nil
 }

@@ -30,17 +30,21 @@ Remove-Item -LiteralPath $bundleDir -Recurse -Force -ErrorAction SilentlyContinu
 New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 
 Copy-Item -Path (Join-Path $preparedDir "*") -Destination $bundleDir -Recurse -Force
+Write-PhytozomeWezTermConfig -Path (Join-Path $bundleDir "wezterm.lua") -Version $BuildVersion
 Remove-Item -LiteralPath (Join-Path $bundleDir "phytozome-go-window-icon.png") -Force -ErrorAction SilentlyContinue
 & (Join-Path $PSScriptRoot "update-windows-icon.ps1") -Source "docs\logo2.png"
-& (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $bundleDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
 
 Push-Location $repoRoot
 try {
-    go build -trimpath -ldflags="-X main.version=$BuildVersion" -o $appPath .\cmd\phytozome-go
-    go build -trimpath -ldflags="-H=windowsgui -X main.version=$BuildVersion" -o (Join-Path $bundleDir "phytozome-go.exe") .\cmd\phytozome-go-winlauncher
+	go build -trimpath -ldflags="-X main.version=$BuildVersion" -o $appPath .\cmd\phytozome-go
+	go build -trimpath -ldflags="-H=windowsgui -X main.version=$BuildVersion" -o (Join-Path $bundleDir "phytozome-go.exe") .\cmd\phytozome-go-winlauncher
+	go build -trimpath -ldflags="-X main.version=$BuildVersion" -o (Join-Path $bundleDir "phytozome-go-cleancache.bin") .\cmd\phytozome-go-cleancache
 } finally {
-    Pop-Location
+	Pop-Location
 }
+
+& (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $bundleDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
+Copy-Item -LiteralPath (Join-Path $bundleDir "wezterm.bin") -Destination (Join-Path $bundleDir "wezterm-cli.bin") -Force
 
 if (-not $SkipZip) {
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue

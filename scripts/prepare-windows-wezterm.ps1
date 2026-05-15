@@ -20,11 +20,11 @@ $preparedDir = Get-PreparedWindowsWezTermDir $repoRoot $release.Tag
 $downloadZip = Join-Path $cacheRoot $release.ZipName
 $extractDir = Join-Path $cacheRoot ("extract-" + [IO.Path]::GetFileNameWithoutExtension($release.ZipName))
 
+New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
+
 if ($Force) {
     Remove-Item -LiteralPath $preparedDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
 
 if (-not (Test-Path -LiteralPath $downloadZip -PathType Leaf)) {
     Invoke-WebRequest -Uri $release.URL -OutFile $downloadZip
@@ -42,10 +42,11 @@ if (-not $wezRoot) {
 
 New-Item -ItemType Directory -Force -Path $preparedDir | Out-Null
 Copy-WezTermRuntimeFiles -WezRoot $wezRoot.FullName -Destination $preparedDir
-Write-PhytozomeWezTermConfig -Path (Join-Path $preparedDir "wezterm.lua")
+Write-PhytozomeWezTermConfig -Path (Join-Path $preparedDir "wezterm.lua") -Version "dev"
 
 & (Join-Path $PSScriptRoot "update-windows-icon.ps1") -Source "docs\logo2.png"
 & (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $preparedDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
+Copy-Item -LiteralPath (Join-Path $preparedDir "wezterm.bin") -Destination (Join-Path $preparedDir "wezterm-cli.bin") -Force
 
 Push-Location $repoRoot
 try {

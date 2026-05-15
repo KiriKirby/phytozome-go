@@ -697,6 +697,16 @@ func (t *rowSelectionTable) MouseHandler() func(action tview.MouseAction, event 
 		case tview.MouseScrollRight:
 			t.scrollColumns(1)
 			return true, t
+		case tview.MouseScrollUp:
+			if event.Modifiers()&tcell.ModShift != 0 {
+				t.scrollColumns(-1)
+				return true, t
+			}
+		case tview.MouseScrollDown:
+			if event.Modifiers()&tcell.ModShift != 0 {
+				t.scrollColumns(1)
+				return true, t
+			}
 		}
 		if base != nil {
 			return base(action, event, setFocus)
@@ -4790,20 +4800,21 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	type exportModule struct {
 		primitive tview.Primitive
 		input     *tview.InputField
+		group     int
 	}
 	fields := make([]exportModule, 0, 3)
 	if showFileModule {
-		fields = append(fields, exportModule{primitive: fileModule, input: fileInput})
+		fields = append(fields, exportModule{primitive: fileModule, input: fileInput, group: 0})
 	}
 	if page.AllowFolder {
-		fields = append(fields, exportModule{primitive: folderModule, input: folderInput})
+		fields = append(fields, exportModule{primitive: folderModule, input: folderInput, group: 1})
 	}
 	fields = append(fields,
-		exportModule{primitive: outputTextBox},
-		exportModule{primitive: outputExcelBox},
-		exportModule{primitive: outputRawBox},
-		exportModule{primitive: phgoHeaderBox},
-		exportModule{primitive: reportBox},
+		exportModule{primitive: outputTextBox, group: 2},
+		exportModule{primitive: outputExcelBox, group: 2},
+		exportModule{primitive: outputRawBox, group: 2},
+		exportModule{primitive: phgoHeaderBox, group: 2},
+		exportModule{primitive: reportBox, group: 3},
 	)
 	focusIndex := 0
 	focusCurrent := func() {
@@ -4825,12 +4836,24 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 		app.Stop()
 	}
 	focusNext := func() {
+		currentGroup := fields[focusIndex].group
+		for next := focusIndex + 1; next < len(fields); next++ {
+			if fields[next].group != currentGroup {
+				focusIndex = next
+				focusCurrent()
+				return
+			}
+		}
+		submitExportSettings()
+	}
+	focusNextField := func() {
 		if focusIndex < len(fields)-1 {
 			focusIndex++
 			focusCurrent()
 			return
 		}
-		submitExportSettings()
+		focusIndex = 0
+		focusCurrent()
 	}
 	focusPrevious := func() {
 		focusIndex--
@@ -4900,7 +4923,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 		{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: true},
 	}, true, page.ConfirmText, "Enter", func() { closeWithNav(NavBack) }, submitExportSettings))
 	contentHeight += 1
-	addHints(modalBody, []string{"Tab switches fields. Enter moves forward; on the last field it starts export. Space toggles file options."})
+	addHints(modalBody, []string{"Tab switches fields. Enter moves to the next module; from the final module it starts export. Space toggles file options."})
 	contentHeight += 1
 
 	height := contentHeight + 2
@@ -4928,8 +4951,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 			paste()
 			return nil
 		case tcell.KeyTab:
-			focusIndex = (focusIndex + 1) % len(fields)
-			focusCurrent()
+			focusNextField()
 			return nil
 		case tcell.KeyBacktab:
 			focusPrevious()
@@ -5923,6 +5945,21 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			setPaneFocus(activePane)
 		}
 	}
+	handleButtonShortcut := func(row *buttonRowPrimitive, event *tcell.EventKey) bool {
+		if row == nil || event == nil {
+			return false
+		}
+		for _, button := range row.buttons {
+			if !button.Visible || button.Action == nil || strings.TrimSpace(button.Shortcut) == "" {
+				continue
+			}
+			if shortcutMatchesEvent(button.Shortcut, event) {
+				button.Action()
+				return true
+			}
+		}
+		return false
+	}
 	showSmallStatusModal := func(title string, messageText string) {
 		body := newButtonFlex()
 		body.SetBorder(true)
@@ -6089,11 +6126,15 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		box.SetTitleAlign(tview.AlignCenter)
 		box.AddItem(input, 1, 0, true)
 		box.AddItem(message, 1, 0, false)
-		addButtonRow(box, modalButtons([]buttonSpec{
+		buttons := modalButtons([]buttonSpec{
 			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
-		}, true, confirmLabel, ShortcutApply, func(NavAction) {}, confirmModal))
+		}, true, confirmLabel, ShortcutApply, func(NavAction) {}, confirmModal)
+		addButtonRow(box, buttons)
 		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
+				return nil
+			}
+			if handleButtonShortcut(buttons, event) {
 				return nil
 			}
 			switch event.Key() {
@@ -6245,11 +6286,15 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		box.SetTitleAlign(tview.AlignCenter)
 		box.AddItem(textBlock("Choose the destination group for the selected ungrouped item."), 2, 0, false)
 		box.AddItem(list, 0, 1, true)
-		addButtonRow(box, modalButtons([]buttonSpec{
+		buttons := modalButtons([]buttonSpec{
 			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
-		}, true, "Add", ShortcutApply, func(NavAction) {}, confirmMove))
+		}, true, "Add", ShortcutApply, func(NavAction) {}, confirmMove)
+		addButtonRow(box, buttons)
 		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
+				return nil
+			}
+			if handleButtonShortcut(buttons, event) {
 				return nil
 			}
 			switch event.Key() {
@@ -6373,13 +6418,17 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		box.SetTitleAlign(tview.AlignCenter)
 		box.AddItem(textBlock("Choose an alias labelname. Copy copies the selected alias; Set as labelname fixes it as this item's labelname."), 3, 0, false)
 		box.AddItem(list, 0, 1, true)
-		addButtonRow(box, buttonRow(
+		buttons := buttonRow(
 			buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeModal, Visible: true},
 			buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyAlias, Visible: true},
 			buttonSpec{Label: "Set as labelname", Shortcut: "F2", Action: setAliasAsLabel, Visible: true, Primary: true},
-		))
+		)
+		addButtonRow(box, buttons)
 		capture := func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
+				return nil
+			}
+			if handleButtonShortcut(buttons, event) {
 				return nil
 			}
 			if isCopyShortcut(event) {
@@ -6610,6 +6659,9 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 			if capture := modalStack[len(modalStack)-1].capture; capture != nil {
 				return capture(event)
 			}
+			return nil
+		}
+		if event.Key() != tcell.KeyEnter && handleButtonShortcut(actionButtons, event) {
 			return nil
 		}
 		switch event.Key() {
@@ -10423,12 +10475,7 @@ func isCtrlEnter(event *tcell.EventKey) bool {
 	if event.Modifiers()&tcell.ModCtrl == 0 {
 		return false
 	}
-	switch event.Key() {
-	case tcell.KeyEnter, tcell.KeyCtrlJ:
-		return true
-	default:
-		return false
-	}
+	return event.Key() == tcell.KeyEnter
 }
 
 func selectionKey(event *tcell.EventKey) bool {
@@ -10684,13 +10731,13 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 	}
 	switch keyName {
 	case "f1":
-		return event.Key() == tcell.KeyF1
+		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF1
 	case "esc", "escape":
-		return event.Key() == tcell.KeyEscape
+		return !wantCtrl && !wantShift && event.Key() == tcell.KeyEscape
 	case "enter":
-		return event.Key() == tcell.KeyEnter
+		return event.Key() == tcell.KeyEnter && ((event.Modifiers()&tcell.ModCtrl) != 0) == wantCtrl && ((event.Modifiers()&tcell.ModShift) != 0) == wantShift
 	case "space":
-		return event.Key() == tcell.KeyRune && event.Rune() == ' '
+		return !wantCtrl && !wantShift && event.Key() == tcell.KeyRune && event.Rune() == ' '
 	case "":
 		return false
 	}

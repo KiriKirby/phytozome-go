@@ -45,9 +45,14 @@ import (
 type BlastWizard struct {
 	httpClient             *http.Client
 	source                 source.DataSource
+	sourceFactory          func(string) source.DataSource
 	prompt                 *prompt.Prompter
 	out                    io.Writer
 	tuiInfo                tui.StartupInfo
+	instanceRunID          string
+	instanceID             string
+	parentInstanceID       string
+	handoffPath            string
 	blastProgramPath       string
 	pendingMode            QueryMode
 	postRunBackTarget      error
@@ -63,6 +68,11 @@ type BlastWizard struct {
 	lastKeywordSpecies     model.SpeciesCandidate
 	rewindKeywordToInput   bool
 	suppressTaskModals     bool
+	transferKind           string
+	transferTargetDatabase string
+	transferKeywordRows    []model.KeywordResultRow
+	transferBlastRows      []model.BlastResultRow
+	transferSourceSpecies  model.SpeciesCandidate
 
 	speciesCandidatesMu    sync.Mutex
 	speciesCandidatesCache map[string][]model.SpeciesCandidate
@@ -104,6 +114,16 @@ type BlastWizard struct {
 	proteinSequenceCache map[string]model.ProteinSequenceData
 	proteinSequenceMiss  map[string]error
 	proteinSequenceGroup singleflight.Group
+}
+
+type InstanceLaunchRequest struct {
+	ParentInstanceID string
+	InstanceID       string
+	RunID            string
+	HandoffPath      string
+	Database         string
+	Mode             QueryMode
+	Handoff          InstanceHandoff
 }
 
 type TUIInfo = tui.StartupInfo
@@ -553,12 +573,94 @@ func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWiz
 		proteinSequenceMiss:       make(map[string]error),
 	}
 	w.prompt.SetDetailLoaders(w.loadKeywordDetailFASTA, w.loadBlastDetailFASTA)
+	w.prompt.SetHomeNavigationEnabled(true)
+	return w
+}
+
+func NewBlastWizardWithLaunch(out io.Writer, tuiInfo tui.StartupInfo, launch InstanceLaunchRequest) *BlastWizard {
+	w := NewBlastWizardWithTUIInfo(out, tuiInfo)
+	w.instanceRunID = strings.TrimSpace(launch.RunID)
+	w.instanceID = strings.TrimSpace(launch.InstanceID)
+	w.parentInstanceID = strings.TrimSpace(launch.ParentInstanceID)
+	w.handoffPath = strings.TrimSpace(launch.HandoffPath)
+	if launch.Handoff.Kind == "blast-session" {
+		w.pendingMode = QueryMode(launch.Handoff.BlastContext.PendingMode)
+		w.transferKind = strings.TrimSpace(launch.Handoff.BlastContext.TransferKind)
+		w.transferTargetDatabase = strings.TrimSpace(launch.Database)
+		w.blastProgramPath = strings.TrimSpace(launch.Handoff.BlastContext.BlastProgramPath)
+		w.reuseLastBlastInput = launch.Handoff.BlastContext.ReuseLastBlastInput
+		w.reuseLastBlastRows = launch.Handoff.BlastContext.ReuseLastBlastRows
+		w.reuseLastKeywordRows = launch.Handoff.BlastContext.ReuseLastKeywordRows
+		w.rewindBlastToInput = launch.Handoff.BlastContext.RewindBlastToInput
+		w.rewindKeywordToInput = launch.Handoff.BlastContext.RewindKeywordToInput
+		w.transferSourceSpecies = launch.Handoff.BlastContext.TransferSourceSpecies
+		w.transferKeywordRows = append([]model.KeywordResultRow(nil), launch.Handoff.BlastContext.TransferKeywordRows...)
+		w.transferBlastRows = append([]model.BlastResultRow(nil), launch.Handoff.BlastContext.TransferBlastRows...)
+		w.lastBlastItems = cloneBlastQueryItems(launch.Handoff.BlastContext.LastBlastItems)
+		w.lastKeywordGroups = cloneKeywordSearchGroups(launch.Handoff.BlastContext.LastKeywordGroups)
+		w.lastKeywordSpecies = launch.Handoff.BlastContext.LastKeywordSpecies
+		if launch.Handoff.BlastContext.LastKeywordReport != nil {
+			reportCopy := *launch.Handoff.BlastContext.LastKeywordReport
+			w.lastKeywordReport = &reportCopy
+		}
+		if launch.Handoff.BlastContext.LastBlastRowContext != nil {
+			rowCopy := *launch.Handoff.BlastContext.LastBlastRowContext
+			rowCopy.Rows = append([]model.BlastResultRow(nil), launch.Handoff.BlastContext.LastBlastRowContext.Rows...)
+			rowCopy.AllRows = append([]model.BlastResultRow(nil), launch.Handoff.BlastContext.LastBlastRowContext.AllRows...)
+			rowCopy.Numbers = append([]int(nil), launch.Handoff.BlastContext.LastBlastRowContext.Numbers...)
+			rowCopy.Flags = append([]bool(nil), launch.Handoff.BlastContext.LastBlastRowContext.Flags...)
+			rowCopy.SelectedRowsMask = append([]bool(nil), launch.Handoff.BlastContext.LastBlastRowContext.SelectedRowsMask...)
+			w.lastBlastRowContext = &rowCopy
+		}
+		if launch.Handoff.BlastContext.LastBlastReviewContext != nil {
+			reviewCopy := *launch.Handoff.BlastContext.LastBlastReviewContext
+			reviewCopy.Prepared = cloneBlastQueryItems(launch.Handoff.BlastContext.LastBlastReviewContext.Prepared)
+			reviewCopy.Runs = cloneBlastQueryRuns(launch.Handoff.BlastContext.LastBlastReviewContext.Runs)
+			w.lastBlastReviewContext = &reviewCopy
+		}
+	}
+	runID, instanceID, parentID, err := ensureLaunchSession(w.instanceRunID, w.instanceID, w.parentInstanceID, "blast")
+	if err == nil {
+		w.instanceRunID = runID
+		w.instanceID = instanceID
+		w.parentInstanceID = parentID
+	}
+	w.prompt.SetHomeNavigationEnabled(isRootInstanceID(w.instanceID))
+	if w.instanceRunID != "" && w.instanceID != "" {
+		_ = w.markInstanceActive()
+		syncInstanceTerminalMetadata(w.tuiInfo.Version, w.instanceRunID, w.instanceID)
+	}
+	appendSessionDebugLog("launch run_id=%q instance_id=%q parent_id=%q handoff=%q transfer_kind=%q database=%q mode=%q", w.instanceRunID, w.instanceID, w.parentInstanceID, w.handoffPath, w.transferKind, strings.TrimSpace(launch.Database), strings.TrimSpace(string(launch.Mode)))
 	return w
 }
 
 func (w *BlastWizard) Run(ctx context.Context) error {
+	if w.instanceRunID != "" && w.instanceID != "" {
+		defer func() {
+			_ = w.markInstanceInactive()
+		}()
+	}
 databaseLoop:
 	for {
+		if strings.TrimSpace(w.transferKind) != "" {
+			appendSessionDebugLog("run transfer_entry run_id=%q instance_id=%q transfer_kind=%q target_db=%q", w.instanceRunID, w.instanceID, w.transferKind, w.transferTargetDatabase)
+			err := w.runTransferEntry(ctx)
+			if errors.Is(err, prompt.ErrExitRequested) {
+				return nil
+			}
+			if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+				w.transferKind = ""
+				w.transferTargetDatabase = ""
+				w.transferKeywordRows = nil
+				w.transferBlastRows = nil
+				continue databaseLoop
+			}
+			return err
+		}
+		if w.instanceRunID != "" && w.instanceID != "" {
+			_ = w.markInstanceActive()
+			syncInstanceTerminalMetadata(w.tuiInfo.Version, w.instanceRunID, w.instanceID)
+		}
 		dataSource, err := w.chooseDataSource()
 		if errors.Is(err, prompt.ErrExitRequested) {
 			return nil
@@ -743,8 +845,166 @@ databaseLoop:
 	}
 }
 
+func (w *BlastWizard) runTransferEntry(ctx context.Context) error {
+	if w.instanceRunID != "" && w.instanceID != "" {
+		_ = w.markInstanceActive()
+		syncInstanceTerminalMetadata(w.tuiInfo.Version, w.instanceRunID, w.instanceID)
+	}
+
+	targetDatabase := strings.ToLower(strings.TrimSpace(w.transferTargetDatabase))
+	if targetDatabase == "" {
+		chosenDatabase, err := w.prompt.ChooseBlastTargetDatabase()
+		if err != nil {
+			return err
+		}
+		targetDatabase = strings.ToLower(strings.TrimSpace(chosenDatabase))
+		w.transferTargetDatabase = targetDatabase
+	}
+
+	dataSource, err := w.dataSourceForDatabase(targetDatabase)
+	if err != nil {
+		return fmt.Errorf("resolve transfer target database: %w", err)
+	}
+	w.source = dataSource
+	w.prompt.SetDatabaseContext(databaseDisplayName(w.source.Name()))
+	w.setBlastProgramContext("")
+
+	candidates, err := w.loadSpeciesCandidates(ctx)
+	if err != nil {
+		return err
+	}
+	selected, err := w.selectSpecies(candidates)
+	if err != nil {
+		return err
+	}
+	return w.runTransferredBlastMode(ctx, selected)
+}
+
+func (w *BlastWizard) shouldSpawnChildTab() bool {
+	ok := strings.TrimSpace(w.instanceRunID) != "" && strings.TrimSpace(w.instanceID) != ""
+	appendSessionDebugLog("should_spawn run_id=%q instance_id=%q parent_id=%q transfer_kind=%q ok=%t", w.instanceRunID, w.instanceID, w.parentInstanceID, w.transferKind, ok)
+	return ok
+}
+
+func (w *BlastWizard) spawnChildTab(ctx context.Context, database string, mode QueryMode, handoff InstanceHandoff) error {
+	if !w.shouldSpawnChildTab() {
+		return fmt.Errorf("instance launch context is missing")
+	}
+	_, err := SpawnNewTab(ctx, SpawnLaunchOptions{
+		RunID:    w.instanceRunID,
+		ParentID: w.instanceID,
+		Database: database,
+		Mode:     mode,
+		Handoff:  handoff,
+	})
+	return err
+}
+
+func (w *BlastWizard) dataSourceForDatabase(database string) (source.DataSource, error) {
+	name := strings.ToLower(strings.TrimSpace(database))
+	if name == "" {
+		return nil, fmt.Errorf("empty database name")
+	}
+	if w.sourceFactory != nil {
+		if src := w.sourceFactory(name); src != nil {
+			return src, nil
+		}
+	}
+	switch name {
+	case "phytozome":
+		return phytozome.NewClient(w.httpClient), nil
+	case "lemna":
+		return lemna.NewClient(w.httpClient), nil
+	default:
+		return nil, fmt.Errorf("unsupported BLAST target database %q", database)
+	}
+}
+
+func (w *BlastWizard) transferSourceForDatabase(database string) (source.DataSource, error) {
+	name := strings.ToLower(strings.TrimSpace(database))
+	if name == "" {
+		return nil, nil
+	}
+	if w.source != nil && strings.EqualFold(strings.TrimSpace(w.source.Name()), name) {
+		return w.source, nil
+	}
+	return w.dataSourceForDatabase(name)
+}
+
+func (w *BlastWizard) withTemporarySource(src source.DataSource, fn func() error) error {
+	if src == nil || fn == nil {
+		if fn == nil {
+			return nil
+		}
+		return fn()
+	}
+	previous := w.source
+	w.source = src
+	defer func() {
+		w.source = previous
+	}()
+	return fn()
+}
+
+func transferredKeywordRowsSourceDatabase(rows []model.KeywordResultRow) string {
+	for _, row := range rows {
+		if database := strings.TrimSpace(row.SourceDatabase); database != "" {
+			return database
+		}
+	}
+	return ""
+}
+
+func blastRowsSourceDatabase(rows []model.BlastResultRow) string {
+	for _, row := range rows {
+		if database := strings.TrimSpace(row.SourceDatabase); database != "" {
+			return database
+		}
+	}
+	return ""
+}
+
+func (w *BlastWizard) resolveTransferredKeywordRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow) ([]blastQueryItem, error) {
+	override, err := w.transferSourceForDatabase(transferredKeywordRowsSourceDatabase(rows))
+	if err != nil {
+		return nil, err
+	}
+	var (
+		items  []blastQueryItem
+		runErr error
+	)
+	if err := w.withTemporarySource(override, func() error {
+		items, runErr = w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
+		return runErr
+	}); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (w *BlastWizard) resolveTransferredBlastRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow) ([]blastQueryItem, error) {
+	override, err := w.transferSourceForDatabase(blastRowsSourceDatabase(rows))
+	if err != nil {
+		return nil, err
+	}
+	var (
+		items  []blastQueryItem
+		runErr error
+	)
+	if err := w.withTemporarySource(override, func() error {
+		items, runErr = w.resolveBlastRowsToBlastItems(ctx, selected, rows)
+		return runErr
+	}); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (w *BlastWizard) chooseMode() (QueryMode, error) {
 	for {
+		if strings.TrimSpace(w.transferKind) != "" {
+			return ModeBlast, nil
+		}
 		if w.pendingMode != "" {
 			mode := w.pendingMode
 			w.pendingMode = ""
@@ -1467,7 +1727,22 @@ func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.Sp
 	if len(rows) == 0 {
 		return nil
 	}
-
+	if w.shouldSpawnChildTab() {
+		w.lastKeywordGroups = cloneKeywordSearchGroups(groups)
+		w.lastKeywordSpecies = selected
+		if reportCtx != nil {
+			copied := *reportCtx
+			w.lastKeywordReport = &copied
+		}
+		handoff := w.SnapshotHandoff("", ModeBlast, "", w.instanceID, w.instanceRunID)
+		handoff.StartupSource = "blast-transfer"
+		handoff.BlastContext.TransferKind = "keyword_rows"
+		handoff.BlastContext.TransferSourceSpecies = selected
+		handoff.BlastContext.TransferKeywordRows = append([]model.KeywordResultRow(nil), rows...)
+		handoff.BlastContext.ReuseLastKeywordRows = true
+		handoff.BlastContext.RewindKeywordToInput = false
+		return w.spawnChildTab(ctx, "", ModeBlast, handoff)
+	}
 	databaseName, err := w.prompt.ChooseBlastTargetDatabase()
 	if err != nil {
 		return err
@@ -1487,15 +1762,9 @@ func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.Sp
 	if len(prepared) == 0 {
 		return w.showInfo("Keyword BLAST", "No selected keyword rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
 	}
-
-	var targetSource source.DataSource
-	switch strings.ToLower(strings.TrimSpace(databaseName)) {
-	case "phytozome":
-		targetSource = phytozome.NewClient(w.httpClient)
-	case "lemna":
-		targetSource = lemna.NewClient(w.httpClient)
-	default:
-		return fmt.Errorf("unsupported BLAST target database %q", databaseName)
+	targetSource, err := w.dataSourceForDatabase(databaseName)
+	if err != nil {
+		return err
 	}
 
 	previousSource := w.source
@@ -1533,7 +1802,15 @@ func (w *BlastWizard) runBlastRowsBlastMode(ctx context.Context, selected model.
 	if len(rows) == 0 {
 		return nil
 	}
-
+	if w.shouldSpawnChildTab() {
+		handoff := w.SnapshotHandoff("", ModeBlast, "", w.instanceID, w.instanceRunID)
+		handoff.StartupSource = "blast-transfer"
+		handoff.BlastContext.TransferKind = "blast_rows"
+		handoff.BlastContext.TransferSourceSpecies = selected
+		handoff.BlastContext.TransferBlastRows = append([]model.BlastResultRow(nil), rows...)
+		handoff.BlastContext.RewindBlastToInput = false
+		return w.spawnChildTab(ctx, "", ModeBlast, handoff)
+	}
 	databaseName, err := w.prompt.ChooseBlastTargetDatabase()
 	if err != nil {
 		return err
@@ -1553,15 +1830,9 @@ func (w *BlastWizard) runBlastRowsBlastMode(ctx context.Context, selected model.
 	if len(prepared) == 0 {
 		return w.showInfo("BLAST", "No selected BLAST result rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
 	}
-
-	var targetSource source.DataSource
-	switch strings.ToLower(strings.TrimSpace(databaseName)) {
-	case "phytozome":
-		targetSource = phytozome.NewClient(w.httpClient)
-	case "lemna":
-		targetSource = lemna.NewClient(w.httpClient)
-	default:
-		return fmt.Errorf("unsupported BLAST target database %q", databaseName)
+	targetSource, err := w.dataSourceForDatabase(databaseName)
+	if err != nil {
+		return err
 	}
 
 	previousSource := w.source
@@ -2020,6 +2291,9 @@ func keywordBlastPreferredSequenceID(row model.KeywordResultRow) string {
 }
 
 func (w *BlastWizard) runBlastMode(ctx context.Context, selected model.SpeciesCandidate, candidates []model.SpeciesCandidate) error {
+	if strings.TrimSpace(w.transferKind) != "" {
+		return w.runTransferredBlastMode(ctx, selected)
+	}
 	if w.reuseLastBlastRows && w.lastBlastRowContext != nil {
 		if w.lastBlastReviewContext != nil {
 			reviewContext := *w.lastBlastReviewContext
@@ -2237,6 +2511,79 @@ blastInputLoop:
 		}
 		return nil
 	}
+}
+
+func (w *BlastWizard) runTransferredBlastMode(ctx context.Context, targetSpecies model.SpeciesCandidate) error {
+	transferKind := strings.TrimSpace(w.transferKind)
+	sourceSpecies := w.transferSourceSpecies
+	w.transferKind = ""
+	w.transferTargetDatabase = ""
+	switch transferKind {
+	case "keyword_rows":
+		rows := append([]model.KeywordResultRow(nil), w.transferKeywordRows...)
+		w.transferKeywordRows = nil
+		if len(rows) == 0 {
+			return w.showInfo("Keyword BLAST", "No transferred keyword rows were available for BLAST.", prompt.ErrBackToDatabaseSelection)
+		}
+		return w.runTransferredKeywordBlastAgainstDatabase(ctx, sourceSpecies, cloneKeywordSearchGroups(w.lastKeywordGroups), rows, w.lastKeywordReport, targetSpecies)
+	case "blast_rows":
+		rows := append([]model.BlastResultRow(nil), w.transferBlastRows...)
+		w.transferBlastRows = nil
+		if len(rows) == 0 {
+			return w.showInfo("BLAST", "No transferred BLAST result rows were available for BLAST.", prompt.ErrBackToDatabaseSelection)
+		}
+		return w.runTransferredBlastRowsAgainstDatabase(ctx, sourceSpecies, rows, targetSpecies)
+	default:
+		return fmt.Errorf("unsupported transferred blast kind %q", transferKind)
+	}
+}
+
+func (w *BlastWizard) runTransferredKeywordBlastAgainstDatabase(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, rows []model.KeywordResultRow, reportCtx *keywordReportRunContext, targetSpecies model.SpeciesCandidate) error {
+	prepared, err := w.resolveTransferredKeywordRowsToBlastItems(ctx, selected, rows)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("Keyword BLAST", "No selected keyword rows could be converted into BLAST queries.", prompt.ErrBackToRowSelection)
+	}
+	prepared, err = w.prepareKeywordBlastItems(ctx, selected, prepared)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("Keyword BLAST", "No selected keyword rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
+	}
+	return w.runPreparedBlastAgainstDatabase(ctx, selected, groups, reportCtx, prepared, targetSpecies)
+}
+
+func (w *BlastWizard) runTransferredBlastRowsAgainstDatabase(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow, targetSpecies model.SpeciesCandidate) error {
+	prepared, err := w.resolveTransferredBlastRowsToBlastItems(ctx, selected, rows)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("BLAST", "No selected BLAST result rows could be converted into BLAST queries.", prompt.ErrBackToRowSelection)
+	}
+	prepared, err = w.prepareKeywordBlastItems(ctx, selected, prepared)
+	if err != nil {
+		return err
+	}
+	if len(prepared) == 0 {
+		return w.showInfo("BLAST", "No selected BLAST result rows remained after BLAST label handling.", prompt.ErrBackToRowSelection)
+	}
+	return w.runPreparedBlastAgainstDatabase(ctx, selected, nil, nil, prepared, targetSpecies)
+}
+
+func (w *BlastWizard) runPreparedBlastAgainstDatabase(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, reportCtx *keywordReportRunContext, prepared []blastQueryItem, targetSpecies model.SpeciesCandidate) error {
+	if len(groups) > 0 {
+		w.lastKeywordGroups = cloneKeywordSearchGroups(groups)
+	}
+	w.lastKeywordSpecies = selected
+	if reportCtx != nil {
+		copied := *reportCtx
+		w.lastKeywordReport = &copied
+	}
+	return w.executePreparedBlast(ctx, targetSpecies, prepared, blastRequestConfig{})
 }
 
 func (w *BlastWizard) executePreparedBlast(ctx context.Context, selected model.SpeciesCandidate, prepared []blastQueryItem, requestConfig blastRequestConfig) error {
@@ -8725,7 +9072,7 @@ func (w *BlastWizard) showInfo(title string, message string, backTarget error) e
 		Title:       title,
 		Message:     message,
 		AllowBack:   backTarget != nil,
-		AllowHome:   true,
+		AllowHome:   isRootInstanceID(w.instanceID),
 		ConfirmText: "OK",
 	})
 	if err != nil {

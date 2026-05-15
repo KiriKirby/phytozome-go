@@ -15,7 +15,6 @@ import (
 	"sync"
 )
 
-var clearRunCacheOnce sync.Once
 var atomicWriteLocks sync.Map
 
 func ApplicationDir() (string, error) {
@@ -85,14 +84,6 @@ func ResetRunCache() error {
 		}
 	}
 	return nil
-}
-
-func ResetRunCacheOnce() error {
-	var resetErr error
-	clearRunCacheOnce.Do(func() {
-		resetErr = ResetRunCache()
-	})
-	return resetErr
 }
 
 func cacheRootPaths() ([]string, error) {

@@ -53,25 +53,25 @@ Important behavior:
 
 ## Install And Run
 
-Download the release asset for your platform from GitHub Releases, extract it, and run the binary in a normal terminal.
+Download the release asset for your platform from GitHub Releases and extract it.
 
 Examples:
 
 ```text
 Windows:
-phytozome-go.exe
+Run `phytozome-go.exe` from the extracted `phytozome-go_windows_amd64_wezterm.zip` bundle
 
 Linux:
-./phytozome-go_linux_amd64
+Run `./phytozome-go` from the extracted `phytozome-go_linux_amd64_wezterm.tar.gz` bundle
 
 macOS Intel:
-./phytozome-go_darwin_amd64
+Open `phytozome GO.app` from `phytozome-go_macos_amd64_wezterm.tar.gz`
 
 macOS Apple Silicon:
-./phytozome-go_darwin_arm64
+Open `phytozome GO.app` from `phytozome-go_macos_arm64_wezterm.tar.gz`
 ```
 
-The wizard starts immediately. You do not need to pass subcommands.
+All release bundles now ship with a bundled `WezTerm` runtime. Opening the packaged app starts a short cache-clean startup CLI in the first tab, then that cleaner opens the wizard in a fresh tab in the same window and exits. New tabs opened from inside `WezTerm` launch the wizard directly without running the cache cleaner again. You do not need to pass subcommands.
 
 ## License
 
@@ -100,7 +100,7 @@ What these scripts do:
 
 - `scripts\prepare-windows-wezterm.ps1` downloads and prepares the selected WezTerm Windows runtime under `bin\tooling\windows-wezterm\`
 - `scripts\package-windows-wezterm.ps1` stages a distributable bundle in `bin\phytozome-go_windows_amd64_wezterm\`
-- `scripts\run-wizard-external.ps1` starts the bundled GUI launcher, which opens `phytozome-go.bin` inside the bundled WezTerm terminal
+- `scripts\run-wizard-external.ps1` starts the bundled GUI launcher, which opens the cache cleaner first; the cleaner then opens `phytozome-go.bin` in a fresh tab and exits
 - `cmd\phytozome-go-winlauncher` builds the Windows GUI launcher used by that bundle
 
 This keeps Windows debugging closer to the real release environment, including the newer terminal client and its bundled configuration.
@@ -616,10 +616,10 @@ Use:
 
 Current release assets are built for:
 
-- Windows `amd64`
-- Linux `amd64`
-- macOS `amd64`
-- macOS `arm64`
+- Windows `amd64` WezTerm bundle zip
+- Linux `amd64` WezTerm bundle tarball
+- macOS `amd64` app bundle tarball
+- macOS `arm64` app bundle tarball
 
 The repository keeps release binaries in `bin/` during packaging. GitHub Releases is the canonical download point for end users.
 

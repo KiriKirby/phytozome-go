@@ -50,6 +50,9 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $binDir = Join-Path $repoRoot "bin"
 $zipPath = Join-Path $binDir "phytozome-go_windows_amd64_wezterm.zip"
+$linuxArchivePath = Join-Path $binDir "phytozome-go_linux_amd64_wezterm.tar.gz"
+$macIntelArchivePath = Join-Path $binDir "phytozome-go_macos_amd64_wezterm.tar.gz"
+$macArmArchivePath = Join-Path $binDir "phytozome-go_macos_arm64_wezterm.tar.gz"
 
 if ([string]::IsNullOrWhiteSpace($BuildVersion)) {
     $BuildVersion = "v" + (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
@@ -77,36 +80,21 @@ try {
         Invoke-Checked "go build ./..." { go build ./... }
     }
 
-    $oldGOOS = $env:GOOS
-    $oldGOARCH = $env:GOARCH
-    $oldCGO = $env:CGO_ENABLED
-    try {
-        $targets = @(
-            @{ GOOS = "linux"; GOARCH = "amd64"; Output = "bin\phytozome-go_linux_amd64" },
-            @{ GOOS = "darwin"; GOARCH = "amd64"; Output = "bin\phytozome-go_darwin_amd64" },
-            @{ GOOS = "darwin"; GOARCH = "arm64"; Output = "bin\phytozome-go_darwin_arm64" }
-        )
-
-        foreach ($target in $targets) {
-            $env:GOOS = $target.GOOS
-            $env:GOARCH = $target.GOARCH
-            $env:CGO_ENABLED = "0"
-            Invoke-Checked "go build $($target.GOOS)/$($target.GOARCH)" {
-                go build -trimpath -ldflags="-X main.version=$BuildVersion" -o $target.Output .\cmd\phytozome-go
-            }
-        }
-    } finally {
-        Restore-EnvValue -Name "GOOS" -Value $oldGOOS
-        Restore-EnvValue -Name "GOARCH" -Value $oldGOARCH
-        Restore-EnvValue -Name "CGO_ENABLED" -Value $oldCGO
-    }
-
     Invoke-Checked "Windows WezTerm package" {
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion
     }
+    Invoke-Checked "Linux WezTerm package" {
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-linux-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion
+    }
+    Invoke-Checked "macOS Intel WezTerm package" {
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-macos-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion -GOARCH amd64
+    }
+    Invoke-Checked "macOS Apple Silicon WezTerm package" {
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-macos-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion -GOARCH arm64
+    }
 
     $entries = @(tar -tf $zipPath)
-    foreach ($required in @("phytozome-go.exe", "phytozome-go.bin", "wezterm.bin", "wezterm.lua")) {
+    foreach ($required in @("phytozome-go.exe", "phytozome-go.bin", "phytozome-go-cleancache.bin", "wezterm.bin", "wezterm-cli.bin", "wezterm.lua")) {
         if (-not ($entries -contains $required)) {
             throw "Windows zip is missing required file: $required"
         }
@@ -114,6 +102,22 @@ try {
     foreach ($forbidden in @("docs/logo.png", "docs/logo2.png", "logo.png", "logo2.png", "phytozome-go-window-icon.png")) {
         if ($entries -contains $forbidden) {
             throw "Windows zip must not package logo image file: $forbidden"
+        }
+    }
+
+    $linuxEntries = @(tar -tf $linuxArchivePath)
+    foreach ($required in @("phytozome-go_linux_amd64_wezterm/phytozome-go", "phytozome-go_linux_amd64_wezterm/phytozome-go.bin", "phytozome-go_linux_amd64_wezterm/phytozome-go-cleancache.bin", "phytozome-go_linux_amd64_wezterm/wezterm", "phytozome-go_linux_amd64_wezterm/wezterm.AppImage", "phytozome-go_linux_amd64_wezterm/wezterm.lua")) {
+        if (-not ($linuxEntries -contains $required)) {
+            throw "Linux archive is missing required file: $required"
+        }
+    }
+
+    foreach ($macArchive in @($macIntelArchivePath, $macArmArchivePath)) {
+        $macEntries = @(tar -tf $macArchive)
+        foreach ($required in @("phytozome GO.app/Contents/Info.plist", "phytozome GO.app/Contents/MacOS/phytozome-go", "phytozome GO.app/Contents/MacOS/phytozome-go.bin", "phytozome GO.app/Contents/MacOS/phytozome-go-cleancache.bin", "phytozome GO.app/Contents/MacOS/wezterm", "phytozome GO.app/Contents/Resources/wezterm.lua")) {
+            if (-not ($macEntries -contains $required)) {
+                throw "macOS archive '$macArchive' is missing required file: $required"
+            }
         }
     }
 
@@ -154,11 +158,17 @@ try {
         }
     }
 
+    foreach ($required in @($linuxArchivePath, $macIntelArchivePath, $macArmArchivePath)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Expected release archive is missing: $required"
+        }
+    }
+
     $assets = @(
         "bin\phytozome-go_windows_amd64_wezterm.zip",
-        "bin\phytozome-go_linux_amd64",
-        "bin\phytozome-go_darwin_amd64",
-        "bin\phytozome-go_darwin_arm64"
+        "bin\phytozome-go_linux_amd64_wezterm.tar.gz",
+        "bin\phytozome-go_macos_amd64_wezterm.tar.gz",
+        "bin\phytozome-go_macos_arm64_wezterm.tar.gz"
     )
     $hashLines = foreach ($asset in $assets) {
         $item = Get-Item -LiteralPath $asset
@@ -206,9 +216,9 @@ Validation:
 
 Assets:
 - phytozome-go_windows_amd64_wezterm.zip
-- phytozome-go_linux_amd64
-- phytozome-go_darwin_amd64
-- phytozome-go_darwin_arm64
+- phytozome-go_linux_amd64_wezterm.tar.gz
+- phytozome-go_macos_amd64_wezterm.tar.gz
+- phytozome-go_macos_arm64_wezterm.tar.gz
 - SHA256SUMS.txt
 "@
         }
@@ -216,9 +226,9 @@ Assets:
         Invoke-Checked "GitHub release $BuildVersion" {
             gh release create $BuildVersion `
                 bin\phytozome-go_windows_amd64_wezterm.zip `
-                bin\phytozome-go_linux_amd64 `
-                bin\phytozome-go_darwin_amd64 `
-                bin\phytozome-go_darwin_arm64 `
+                bin\phytozome-go_linux_amd64_wezterm.tar.gz `
+                bin\phytozome-go_macos_amd64_wezterm.tar.gz `
+                bin\phytozome-go_macos_arm64_wezterm.tar.gz `
                 bin\SHA256SUMS.txt `
                 --title $ReleaseTitle `
                 --notes $ReleaseNotes

@@ -3324,6 +3324,112 @@ func TestResolveKeywordRowsToBlastItemsSkipsModalWrapperWhenSuppressed(t *testin
 	}
 }
 
+func TestResolveTransferredKeywordRowsToBlastItemsUsesRowSourceDatabase(t *testing.T) {
+	sourceFetchCount := make(map[string]int)
+	targetFetchCount := make(map[string]int)
+	w := &BlastWizard{
+		source: fakeSource{name: "lemna", sequences: map[string]string{}, fetchCount: targetFetchCount},
+		sourceFactory: func(name string) source.DataSource {
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "phytozome":
+				return fakeSource{
+					name:       "phytozome",
+					sequences:  map[string]string{"seq1": "MPEPTIDE"},
+					fetchCount: sourceFetchCount,
+				}
+			case "lemna":
+				return fakeSource{
+					name:       "lemna",
+					sequences:  map[string]string{},
+					fetchCount: targetFetchCount,
+				}
+			default:
+				return nil
+			}
+		},
+		suppressTaskModals:    true,
+		proteinSequenceCache:  make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:   make(map[string]error),
+		keywordBlastItemCache: make(map[string]blastQueryItem),
+	}
+	rows := []model.KeywordResultRow{{
+		SourceDatabase: "phytozome",
+		SequenceID:     "seq1",
+		TranscriptID:   "AT1G01010.1",
+		GeneIdentifier: "AT1G01010",
+		LabelName:      "PAL1",
+	}}
+	items, err := w.resolveTransferredKeywordRowsToBlastItems(context.Background(), model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"}, rows)
+	if err != nil {
+		t.Fatalf("resolveTransferredKeywordRowsToBlastItems returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("resolved items = %d, want 1", len(items))
+	}
+	if sourceFetchCount["seq1"] != 1 {
+		t.Fatalf("source fetch count = %d, want 1", sourceFetchCount["seq1"])
+	}
+	if targetFetchCount["seq1"] != 0 {
+		t.Fatalf("target fetch count = %d, want 0", targetFetchCount["seq1"])
+	}
+	if w.source == nil || !strings.EqualFold(w.source.Name(), "lemna") {
+		t.Fatalf("wizard source restored to %v, want lemna", w.source)
+	}
+}
+
+func TestResolveTransferredBlastRowsToBlastItemsUsesRowSourceDatabase(t *testing.T) {
+	sourceFetchCount := make(map[string]int)
+	targetFetchCount := make(map[string]int)
+	w := &BlastWizard{
+		source: fakeSource{name: "lemna", sequences: map[string]string{}, fetchCount: targetFetchCount},
+		sourceFactory: func(name string) source.DataSource {
+			switch strings.ToLower(strings.TrimSpace(name)) {
+			case "phytozome":
+				return fakeSource{
+					name:       "phytozome",
+					sequences:  map[string]string{"seq1": "MPEPTIDE"},
+					fetchCount: sourceFetchCount,
+				}
+			case "lemna":
+				return fakeSource{
+					name:       "lemna",
+					sequences:  map[string]string{},
+					fetchCount: targetFetchCount,
+				}
+			default:
+				return nil
+			}
+		},
+		suppressTaskModals:   true,
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	rows := []model.BlastResultRow{{
+		SourceDatabase: "phytozome",
+		SequenceID:     "seq1",
+		TranscriptID:   "AT1G01010.1",
+		Protein:        "AT1G01010.1",
+		TargetID:       167,
+		LabelName:      "PAL1",
+	}}
+	items, err := w.resolveTransferredBlastRowsToBlastItems(context.Background(), model.SpeciesCandidate{ProteomeID: 167, JBrowseName: "Athaliana_TAIR10"}, rows)
+	if err != nil {
+		t.Fatalf("resolveTransferredBlastRowsToBlastItems returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("resolved items = %d, want 1", len(items))
+	}
+	if sourceFetchCount["seq1"] != 1 {
+		t.Fatalf("source fetch count = %d, want 1", sourceFetchCount["seq1"])
+	}
+	if targetFetchCount["seq1"] != 0 {
+		t.Fatalf("target fetch count = %d, want 0", targetFetchCount["seq1"])
+	}
+	if w.source == nil || !strings.EqualFold(w.source.Name(), "lemna") {
+		t.Fatalf("wizard source restored to %v, want lemna", w.source)
+	}
+}
+
 func TestUniProtAccessionsForBlastRowUsesSingleflightForConcurrentSameRow(t *testing.T) {
 	src := &countingUniProtResolverSource{
 		fakeSource: fakeSource{},

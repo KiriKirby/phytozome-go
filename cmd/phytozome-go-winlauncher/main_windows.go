@@ -31,14 +31,14 @@ func main() {
 	}
 	bundleDir := filepath.Dir(exePath)
 	terminalPath := filepath.Join(bundleDir, "wezterm.bin")
-	appPath := filepath.Join(bundleDir, "phytozome-go.bin")
+	cleanCachePath := filepath.Join(bundleDir, "phytozome-go-cleancache.bin")
 	configPath := filepath.Join(bundleDir, "wezterm.lua")
 
 	if err := requireFile(terminalPath, "GPU terminal runtime"); err != nil {
 		showError(err.Error())
 		os.Exit(1)
 	}
-	if err := requireFile(appPath, "phytozome GO runtime"); err != nil {
+	if err := requireFile(cleanCachePath, "phytozome GO cache cleaner"); err != nil {
 		showError(err.Error())
 		os.Exit(1)
 	}
@@ -59,7 +59,7 @@ func main() {
 		"--always-new-process",
 		"--cwd", bundleDir,
 		"--",
-		appPath,
+		".\\phytozome-go-cleancache.bin",
 	}
 	args = append(args, os.Args[1:]...)
 
@@ -177,16 +177,16 @@ func requireFile(path string, label string) error {
 }
 
 func showError(message string) {
+	showMessageBox(displayName, message, 0x00000000|0x00000010|0x00010000|0x00040000)
+}
+
+func showMessageBox(titleText string, message string, flags uintptr) {
 	title, _ := syscall.UTF16PtrFromString(displayName)
 	text, _ := syscall.UTF16PtrFromString(message)
 	user32 := syscall.NewLazyDLL("user32.dll")
 	messageBox := user32.NewProc("MessageBoxW")
-	const (
-		mbOK        = 0x00000000
-		mbIconStop  = 0x00000010
-		mbSetFocus  = 0x00010000
-		mbTopmost   = 0x00040000
-		messageFlag = mbOK | mbIconStop | mbSetFocus | mbTopmost
-	)
-	_, _, _ = messageBox.Call(0, uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(title)), messageFlag)
+	if titleText != "" {
+		title, _ = syscall.UTF16PtrFromString(titleText)
+	}
+	_, _, _ = messageBox.Call(0, uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(title)), flags)
 }

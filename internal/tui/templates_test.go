@@ -308,6 +308,35 @@ func TestDetailListManualScrollDisablesAutoFollowUntilSelectionChanges(t *testin
 	}
 }
 
+func TestRowSelectionTableShiftWheelScrollsColumnsHorizontally(t *testing.T) {
+	table := &rowSelectionTable{Table: tview.NewTable(), dividerRow: 1}
+	table.SetSelectable(true, true)
+	table.SetCell(0, 0, paddedTableCell("[x]"))
+	table.SetCell(0, 1, paddedTableCell("row"))
+	table.SetCell(0, 2, paddedTableCell("AAAAAA"))
+	table.SetCell(0, 3, paddedTableCell("BBBBBB"))
+	table.SetRect(0, 0, 40, 8)
+	table.SetOffset(0, 0)
+
+	consumed, _ := table.MouseHandler()(tview.MouseScrollDown, tcell.NewEventMouse(2, 2, tcell.WheelDown, tcell.ModShift), nil)
+	if !consumed {
+		t.Fatal("shift+wheel down should be consumed for horizontal scrolling")
+	}
+	_, columnOffset := table.GetOffset()
+	if columnOffset != 1 {
+		t.Fatalf("column offset = %d, want 1", columnOffset)
+	}
+
+	consumed, _ = table.MouseHandler()(tview.MouseScrollUp, tcell.NewEventMouse(2, 2, tcell.WheelUp, tcell.ModShift), nil)
+	if !consumed {
+		t.Fatal("shift+wheel up should be consumed for horizontal scrolling")
+	}
+	_, columnOffset = table.GetOffset()
+	if columnOffset != 0 {
+		t.Fatalf("column offset after reverse scroll = %d, want 0", columnOffset)
+	}
+}
+
 func TestWrapDetailValueLinesPreservesLongSequenceChunks(t *testing.T) {
 	lines := wrapDetailValueLines("ABCDEFGHIJKL", 5)
 	want := []string{"ABCDE", "FGHIJ", "KL"}
@@ -1177,6 +1206,33 @@ func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T
 	}
 }
 
+func TestFamilyBlastCustomizeModalCtrlEnterAppliesFromListFocus(t *testing.T) {
+	app := newApp()
+	var result FamilyBlastResult
+	modal := buildFamilyBlastCustomizeModal(FamilyBlastCustomizePage{
+		Title: "Customize Family BLAST groups",
+		Groups: []FamilyBlastCustomGroup{
+			{Name: "PAL", Labels: []string{"PAL1", "PAL2"}},
+		},
+		Ungrouped: []string{"X1"},
+		AllowBack: true,
+	}, app, &result)
+
+	capture := app.GetInputCapture()
+	capture(tcell.NewEventKey(tcell.KeyTab, 0, 0))
+	if app.GetFocus() != modal.rightList {
+		t.Fatalf("focus before apply = %T, want right list", app.GetFocus())
+	}
+	capture(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl))
+
+	if len(result.CustomGroups) != 1 || result.CustomGroups[0].Name != "PAL" {
+		t.Fatalf("Ctrl+Enter should apply custom groups, got %#v", result.CustomGroups)
+	}
+	if result.Nav != "" {
+		t.Fatalf("Ctrl+Enter should apply without navigation, got nav %q", result.Nav)
+	}
+}
+
 func TestFamilyBlastCustomizeModalShowsOnlyActiveListSelection(t *testing.T) {
 	app := newApp()
 	var result FamilyBlastResult
@@ -1239,6 +1295,18 @@ func TestFamilyBlastCustomizeSubModalRestoresParentSelection(t *testing.T) {
 	}
 	if !listSelectedFocusOnly(modal.groupedList) {
 		t.Fatal("grouped list should remain visually inactive after closing submodal")
+	}
+}
+
+func TestCtrlEnterShortcutRequiresCtrlModifiedEnter(t *testing.T) {
+	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)) {
+		t.Fatal("Ctrl+Enter should match KeyEnter with Ctrl modifier")
+	}
+	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, 0)) {
+		t.Fatal("Ctrl+Enter should not match plain Enter")
+	}
+	if isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
+		t.Fatal("KeyCtrlJ should not be treated as Ctrl+Enter")
 	}
 }
 

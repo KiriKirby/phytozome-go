@@ -30,6 +30,7 @@ type Prompter struct {
 	out                 io.Writer
 	sessionPath         []string
 	blastProgramPath    string
+	homeNavigationEnabled bool
 	rowStates           map[string]tui.RowSelectionState
 	blastRunStates      map[string]tui.BlastRunSelectionState
 	keywordSelections   map[string][]bool
@@ -662,17 +663,26 @@ type tableColumnValue[T any] struct {
 
 func New(in io.Reader, out io.Writer) *Prompter {
 	return &Prompter{
-		out:                 out,
-		rowStates:           make(map[string]tui.RowSelectionState),
-		blastRunStates:      make(map[string]tui.BlastRunSelectionState),
-		keywordSelections:   make(map[string][]bool),
-		blastSelections:     make(map[string][]bool),
-		blastRunSelected:    make(map[string][][]bool),
-		blastFilterSettings: model.DefaultBlastFilterSettings(),
-		blastFilterFlags:    make(map[string][]bool),
-		blastRunFilterFlags: make(map[string][][]bool),
-		detailFASTACache:    make(map[string]string),
+		out:                   out,
+		homeNavigationEnabled: true,
+		rowStates:             make(map[string]tui.RowSelectionState),
+		blastRunStates:        make(map[string]tui.BlastRunSelectionState),
+		keywordSelections:     make(map[string][]bool),
+		blastSelections:       make(map[string][]bool),
+		blastRunSelected:      make(map[string][][]bool),
+		blastFilterSettings:   model.DefaultBlastFilterSettings(),
+		blastFilterFlags:      make(map[string][]bool),
+		blastRunFilterFlags:   make(map[string][][]bool),
+		detailFASTACache:      make(map[string]string),
 	}
+}
+
+func (p *Prompter) SetHomeNavigationEnabled(enabled bool) {
+	p.homeNavigationEnabled = enabled
+}
+
+func (p *Prompter) allowHome(enabled bool) bool {
+	return enabled && p.homeNavigationEnabled
 }
 
 func (p *Prompter) SetDatabaseContext(database string) {
@@ -781,7 +791,7 @@ func (p *Prompter) ChooseMode() (string, error) {
 			{Value: "keyword", Label: "keyword", Description: p.t("keyword gene search within one species")},
 		},
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSelect,
 	})
 	if err != nil {
@@ -806,7 +816,7 @@ func (p *Prompter) ChooseBlastTargetDatabase() (string, error) {
 			{Value: "lemna", Label: "lemna", Description: p.t("lemna.org download-backed workflow")},
 		},
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSelect,
 	})
 	if err != nil {
@@ -906,7 +916,7 @@ func (p *Prompter) ChooseBlastProgram(programs []string) (string, error) {
 		Groups:      groups,
 		Initial:     defaultProgram,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSelect,
 		Hints:       []string{p.t("Up/Down choose item | Number keys select item"), p.t("Enter confirms the highlighted option.")},
 	})
@@ -950,7 +960,7 @@ func (p *Prompter) ChooseBlastExecution() (string, error) {
 			{Value: "local", Label: "local", Description: p.t("download FASTA files automatically and run BLAST on this computer")},
 		},
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSelect,
 		Hints:       []string{p.t("Local mode does not require you to prepare the FASTA files yourself."), p.t("It does require NCBI BLAST+ on PATH, including makeblastdb.")},
 	})
@@ -975,7 +985,7 @@ func (p *Prompter) SpeciesKeyword() (string, error) {
 		Label:       p.t("Keyword"),
 		AllowEmpty:  true,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSearch,
 		Hints:       []string{p.t("You can search by abbreviated name, full scientific name, or common name.")},
 	})
@@ -1004,7 +1014,7 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 		Description: p.t("Select one species from the loaded candidates."),
 		Choices:     choices,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSelect,
 		Hints:       []string{p.t("Up/Down choose item | Number keys select item")},
 	})
@@ -1031,7 +1041,7 @@ func (p *Prompter) KeywordLabelNames(termCount int, backTarget error) ([]string,
 			AllowEmpty:    true,
 			SkipWhenEmpty: true,
 			AllowBack:     true,
-			AllowHome:     true,
+			AllowHome:     p.allowHome(true),
 			ConfirmText:   tui.ButtonApply,
 			EmptyText:     tui.ButtonAuto,
 			EmptyAction:   "auto",
@@ -1081,7 +1091,7 @@ func (p *Prompter) BlastLabelNames(itemCount int, required bool, backTarget erro
 			AllowEmpty:    true,
 			SkipWhenEmpty: true,
 			AllowBack:     true,
-			AllowHome:     true,
+			AllowHome:     p.allowHome(true),
 			ConfirmText:   tui.ButtonApply,
 			EmptyText:     tui.ButtonAuto,
 			EmptyAction:   "auto",
@@ -1127,7 +1137,7 @@ func (p *Prompter) OutputFolderName(backTarget error) (string, error) {
 		AllowEmpty:    true,
 		SkipWhenEmpty: true,
 		AllowBack:     true,
-		AllowHome:     true,
+		AllowHome:     p.allowHome(true),
 		ConfirmText:   tui.ButtonApply,
 	})
 	if err != nil {
@@ -1194,7 +1204,7 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 			PartialMinMatchedItems: strconv.Itoa(defaultInterPro.PartialMinMatchedItems),
 		},
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonApply,
 	})
 	if err != nil {
@@ -1244,7 +1254,7 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 			PreviewUngroupedMembers: tuiFamilyBlastMembers(preview.UngroupedMembers),
 			Settings:                tuiSettings,
 			AllowBack:               true,
-			AllowHome:               true,
+			AllowHome:               p.allowHome(true),
 			ConfirmText:             tui.ButtonApply,
 		})
 		if err != nil {
@@ -1306,7 +1316,7 @@ func (p *Prompter) FamilyBlastSettings(preview FamilyBlastPreview, references mo
 				Ungrouped:        append([]string(nil), preview.Ungrouped...),
 				UngroupedMembers: tuiFamilyBlastMembers(preview.UngroupedMembers),
 				AllowBack:        true,
-				AllowHome:        true,
+				AllowHome:        p.allowHome(true),
 				ConfirmText:      tui.ButtonApply,
 			})
 			if err != nil {
@@ -1488,7 +1498,7 @@ func (p *Prompter) BlastFilterSettings(backTarget error) (BlastFilterSettingsRes
 		Message:     p.t("Set the rules for automatic row-selection suggestions. Applying the filter only checks or unchecks rows and marks suggested removals; you can still change the table manually afterward."),
 		Settings:    tuiBlastFilterSettings(p.blastFilterSettings),
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonFilter,
 	})
 	if err != nil {
@@ -2702,7 +2712,7 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 		Label:       p.t("Keyword"),
 		Choices:     choices,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		Hints:       []string{p.t("You can search by abbreviated name, full scientific name, or common name.")},
 		Filter: func(query string, _ []tui.Choice) []tui.Choice {
 			matches := searchFn(query)
@@ -2746,7 +2756,7 @@ func (p *Prompter) SequenceInput() (string, error) {
 		Description: p.t("Paste one or more BLAST queries, one per line, or paste a FASTA entry / Phytozome gene or transcript report URL.") + "\n" + p.t("You can also type load \"file.fasta\" to read from the program directory."),
 		AllowEmpty:  true,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonRunBLAST,
 		Hints:       []string{p.t("Finish sequence input with an empty line.")},
 	})
@@ -2787,7 +2797,7 @@ func (p *Prompter) KeywordInput() (KeywordInputResult, error) {
 		Description:       p.t("Paste one or more keywords for the selected species.") + "\n" + p.t("Separate them by spaces or new lines, then finish with an empty line."),
 		AllowEmpty:        true,
 		AllowBack:         true,
-		AllowHome:         true,
+		AllowHome:         p.allowHome(true),
 		ConfirmText:       tui.ButtonSearch,
 		SecondaryText:     secondaryText,
 		SecondaryShortcut: secondaryShortcut,
@@ -2869,7 +2879,7 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 			GroupSort:     true,
 			GroupLabels:   groupLabels,
 			AllowBack:     true,
-			AllowHome:     true,
+			AllowHome:     p.allowHome(true),
 			ConfirmText:   tui.ButtonView,
 			GenerateText:  tui.ButtonExport,
 			ExtraText:     tui.ButtonRunBLAST,
@@ -3032,7 +3042,7 @@ func (p *Prompter) SelectBlastRuns(runs []BlastRunView, backTarget error) (Blast
 			AllowFilter:   blastRunsHaveAllExternalReferences(runs),
 			FilterText:    tui.ButtonFilter,
 			AllowBack:     true,
-			AllowHome:     true,
+			AllowHome:     p.allowHome(true),
 			ConfirmText:   tui.ButtonView,
 			GenerateText:  tui.ButtonExport,
 			DetailAction:  "blast",
@@ -3416,7 +3426,7 @@ func (p *Prompter) selectBlastRows(rows []model.BlastResultRow, allowDoneAll boo
 			FilterText:    tui.ButtonFilter,
 			AllowDoneAll:  allowDoneAll,
 			AllowBack:     true,
-			AllowHome:     true,
+			AllowHome:     p.allowHome(true),
 			ConfirmText:   tui.ButtonView,
 			GenerateText:  tui.ButtonExport,
 			DetailAction:  "blast",
@@ -4345,7 +4355,7 @@ func (p *Prompter) ExportBaseName(label string, backTarget error) (string, error
 		Label:       p.t("File name"),
 		AllowEmpty:  false,
 		AllowBack:   true,
-		AllowHome:   true,
+		AllowHome:   p.allowHome(true),
 		ConfirmText: tui.ButtonSave,
 	})
 	if err != nil {
@@ -4381,7 +4391,7 @@ func (p *Prompter) ExportSettings(label string, allowFolder bool, allowEmptyFile
 		AllowEmptyFile: allowEmptyFileName,
 		ReportLabel:    p.t("Data analysis report (PDF)"),
 		AllowBack:      true,
-		AllowHome:      true,
+		AllowHome:      p.allowHome(true),
 		ConfirmText:    tui.ButtonExport,
 		WriteText:      true,
 		WriteExcel:     true,
@@ -5062,3 +5072,4 @@ func looksLikeURL(value string) bool {
 	}
 	return false
 }
+
