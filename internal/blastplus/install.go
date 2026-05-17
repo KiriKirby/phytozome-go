@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/progressctx"
 )
 
@@ -216,49 +218,75 @@ func downloadArchive(ctx context.Context, httpClient *http.Client, url string, a
 	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
 		return fmt.Errorf("create BLAST+ archive dir: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	var fetchedURL string
+	if err := phygoboost.RunTaskSpec(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      domainForDownloadURL(url),
+		Description: "fetch blastplus text",
+	}, func(runCtx context.Context) error {
+		fetchedURL = url
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Level: phygoboost.ExecManaged
+	return phygoboost.RunTaskSpec(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      domainForDownloadURL(fetchedURL),
+		Description: "download blastplus archive",
+	}, func(runCtx context.Context) error {
+		req, err := http.NewRequestWithContext(runCtx, http.MethodGet, url, nil)
+		if err != nil {
+			return fmt.Errorf("create BLAST+ download request: %w", err)
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("download %s: %w", url, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("download %s: unexpected status %s", url, resp.Status)
+		}
+		tmpPath := archivePath + ".part"
+		out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			return fmt.Errorf("create BLAST+ archive file: %w", err)
+		}
+		total := resp.ContentLength
+		progressctx.Report(runCtx, 1, "Starting BLAST+ download...")
+		counter := &progressWriter{
+			ctx:     runCtx,
+			total:   total,
+			base:    1,
+			span:    39,
+			prefix:  "Downloading BLAST+",
+			sink:    out,
+			lastPct: -1,
+		}
+		if _, err := io.CopyBuffer(counter, resp.Body, make([]byte, 1024*1024)); err != nil {
+			_ = out.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("write BLAST+ archive: %w", err)
+		}
+		if err := out.Close(); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("close BLAST+ archive: %w", err)
+		}
+		if err := os.Rename(tmpPath, archivePath); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("finalize BLAST+ archive: %w", err)
+		}
+		progressctx.Report(runCtx, 40, fmt.Sprintf("Downloaded BLAST+ archive: %s", filepath.Base(archivePath)))
+		return nil
+	})
+}
+
+func domainForDownloadURL(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return fmt.Errorf("create BLAST+ download request: %w", err)
+		return ""
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: unexpected status %s", url, resp.Status)
-	}
-	tmpPath := archivePath + ".part"
-	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("create BLAST+ archive file: %w", err)
-	}
-	total := resp.ContentLength
-	progressctx.Report(ctx, 1, "Starting BLAST+ download...")
-	counter := &progressWriter{
-		ctx:     ctx,
-		total:   total,
-		base:    1,
-		span:    39,
-		prefix:  "Downloading BLAST+",
-		sink:    out,
-		lastPct: -1,
-	}
-	if _, err := io.CopyBuffer(counter, resp.Body, make([]byte, 1024*1024)); err != nil {
-		_ = out.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write BLAST+ archive: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close BLAST+ archive: %w", err)
-	}
-	if err := os.Rename(tmpPath, archivePath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("finalize BLAST+ archive: %w", err)
-	}
-	progressctx.Report(ctx, 40, fmt.Sprintf("Downloaded BLAST+ archive: %s", filepath.Base(archivePath)))
-	return nil
+	return parsed.Host
 }
 
 func extractTarGz(ctx context.Context, archivePath string, targetDir string) error {

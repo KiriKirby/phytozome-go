@@ -28,10 +28,35 @@ type UniProtResolver interface {
 	FetchUniProtAccessions(ctx context.Context, targetID int, proteinID string) ([]string, error)
 }
 
+type WideKeywordSearcher interface {
+	SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
+}
+
+type BroadKeywordSearcher interface {
+	SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error)
+}
+
+type FamilyCandidateFetcher interface {
+	FetchFamilyCandidates(ctx context.Context, species model.SpeciesCandidate) ([]model.SpeciesCandidate, error)
+}
+
+type FamilyCandidateFilter interface {
+	FilterFamilyCandidates(candidates []model.SpeciesCandidate, keyword string) []model.SpeciesCandidate
+}
+
+type FamilyKeywordSearcher interface {
+	SearchFamilyKeywordRows(ctx context.Context, species model.SpeciesCandidate, family string) ([]model.KeywordResultRow, error)
+}
+
 type ProteinReportResolver interface {
 	FetchProteinQuerySequence(ctx context.Context, species model.SpeciesCandidate, proteinID string) (*model.QuerySequenceSource, error)
 }
 
 type QueryResolver interface {
 	ResolveQuerySequence(ctx context.Context, species model.SpeciesCandidate, input string) (*model.QuerySequenceSource, bool, error)
+}
+
+type TAIRLabelNameResolver interface {
+	ResolveTAIRKeywordRowLabelCandidates(ctx context.Context, row model.KeywordResultRow) ([]string, string)
+	ResolveTAIRFamilyCandidateLabelCandidates(ctx context.Context, version model.SpeciesCandidate, candidate model.SpeciesCandidate) ([]string, string)
 }

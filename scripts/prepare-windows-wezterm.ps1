@@ -46,7 +46,6 @@ Write-PhytozomeWezTermConfig -Path (Join-Path $preparedDir "wezterm.lua") -Versi
 
 & (Join-Path $PSScriptRoot "update-windows-icon.ps1") -Source "docs\logo2.png"
 & (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $preparedDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
-Copy-Item -LiteralPath (Join-Path $preparedDir "wezterm.bin") -Destination (Join-Path $preparedDir "wezterm-cli.bin") -Force
 
 Push-Location $repoRoot
 try {

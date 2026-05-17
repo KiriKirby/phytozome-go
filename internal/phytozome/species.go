@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/searchengine/phytozomekeyword"
 	"golang.org/x/sync/singleflight"
 )
@@ -72,15 +73,11 @@ func (c *Client) Name() string {
 }
 
 func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
-	c.mu.RLock()
-	if len(c.speciesCandidatesCache) > 0 {
-		cached := append([]model.SpeciesCandidate(nil), c.speciesCandidatesCache...)
-		c.mu.RUnlock()
-		return cached, nil
-	}
-	c.mu.RUnlock()
-
-	value, err, _ := c.sf.Do("species-candidates", func() (any, error) {
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "phytozome-next.jgi.doe.gov",
+		Description: "fetch phytozome species candidates",
+	}, func(runCtx context.Context) ([]model.SpeciesCandidate, error) {
 		c.mu.RLock()
 		if len(c.speciesCandidatesCache) > 0 {
 			cached := append([]model.SpeciesCandidate(nil), c.speciesCandidatesCache...)
@@ -89,51 +86,52 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 		}
 		c.mu.RUnlock()
 
-		type targetResult struct {
-			targets map[string]targetRecord
-			err     error
+		value, err, _ := c.sf.Do("species-candidates", func() (any, error) {
+			c.mu.RLock()
+			if len(c.speciesCandidatesCache) > 0 {
+				cached := append([]model.SpeciesCandidate(nil), c.speciesCandidatesCache...)
+				c.mu.RUnlock()
+				return cached, nil
+			}
+			c.mu.RUnlock()
+
+			type speciesFetchResult struct {
+				targets      map[string]targetRecord
+				releaseDates map[string]string
+			}
+			results := make([]speciesFetchResult, 2)
+			spec := phygoboost.ParallelSpec{Level: phygoboost.ExecManaged, Domain: "phytozome-next.jgi.doe.gov", Description: "load phytozome species metadata"}
+			if err := phygoboost.ParallelForSpec(runCtx, spec, len(results), func(parallelCtx context.Context, index int) error {
+				switch index {
+				case 0:
+					targets, err := c.fetchTargetRecords(parallelCtx)
+					results[index].targets = targets
+					return err
+				default:
+					releaseDates, err := c.fetchReleaseDates(parallelCtx)
+					results[index].releaseDates = releaseDates
+					return err
+				}
+			}); err != nil {
+				return nil, err
+			}
+
+			candidates := candidatesFromTargets(results[0].targets, results[1].releaseDates)
+			if len(candidates) == 0 {
+				return nil, fmt.Errorf("no species candidates found in target records")
+			}
+
+			c.mu.Lock()
+			c.speciesCandidatesCache = append([]model.SpeciesCandidate(nil), candidates...)
+			c.mu.Unlock()
+
+			return append([]model.SpeciesCandidate(nil), candidates...), nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		type releaseResult struct {
-			releaseDates map[string]string
-			err          error
-		}
-
-		targetCh := make(chan targetResult, 1)
-		releaseCh := make(chan releaseResult, 1)
-
-		go func() {
-			targets, err := c.fetchTargetRecords(ctx)
-			targetCh <- targetResult{targets: targets, err: err}
-		}()
-		go func() {
-			releaseDates, err := c.fetchReleaseDates(ctx)
-			releaseCh <- releaseResult{releaseDates: releaseDates, err: err}
-		}()
-
-		targetsResult := <-targetCh
-		if targetsResult.err != nil {
-			return nil, targetsResult.err
-		}
-		releaseResultValue := <-releaseCh
-		if releaseResultValue.err != nil {
-			return nil, releaseResultValue.err
-		}
-
-		candidates := candidatesFromTargets(targetsResult.targets, releaseResultValue.releaseDates)
-		if len(candidates) == 0 {
-			return nil, fmt.Errorf("no species candidates found in target records")
-		}
-
-		c.mu.Lock()
-		c.speciesCandidatesCache = append([]model.SpeciesCandidate(nil), candidates...)
-		c.mu.Unlock()
-
-		return append([]model.SpeciesCandidate(nil), candidates...), nil
+		return value.([]model.SpeciesCandidate), nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return value.([]model.SpeciesCandidate), nil
 }
 
 func (c *Client) fetchReleaseDates(ctx context.Context) (map[string]string, error) {
@@ -378,68 +376,51 @@ func (c *Client) fetchTargetRecordsFromBundles(ctx context.Context, scriptURLs [
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type bundleResult struct {
-		targets map[string]targetRecord
-		err     error
-	}
-	jobs := make(chan string)
-	results := make(chan bundleResult, len(scriptURLs))
-	workerCount := networkWorkerCount(len(scriptURLs))
-
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for scriptURL := range jobs {
-				bundle, err := c.fetchBundle(ctx, scriptURL)
-				if err != nil {
-					results <- bundleResult{err: err}
-					continue
-				}
-				targets, err := extractTargetRecords(bundle)
-				if err != nil {
-					results <- bundleResult{err: fmt.Errorf("%s: %w", scriptURL, err)}
-					continue
-				}
-				if len(targets) == 0 {
-					results <- bundleResult{err: fmt.Errorf("%s: no target records", scriptURL)}
-					continue
-				}
-				results <- bundleResult{targets: targets}
-				cancel()
-			}
-		}()
-	}
-
-	go func() {
-		defer close(jobs)
-		for _, scriptURL := range scriptURLs {
-			select {
-			case <-ctx.Done():
-				return
-			case jobs <- scriptURL:
-			}
-		}
-	}()
-	go func() {
-		workers.Wait()
-		close(results)
-	}()
-
 	failures := make([]string, 0)
-	for result := range results {
-		if len(result.targets) > 0 {
-			return result.targets, nil
+	var failuresMu sync.Mutex
+	var foundMu sync.Mutex
+	var found map[string]targetRecord
+	spec := phygoboost.ParallelSpec{Level: phygoboost.ExecManaged, Domain: "phytozome-next.jgi.doe.gov", Description: "scan phytozome homepage bundles"}
+	_ = phygoboost.ParallelForSpec(ctx, spec, len(scriptURLs), func(parallelCtx context.Context, index int) error {
+		scriptURL := scriptURLs[index]
+		bundle, err := c.fetchBundle(parallelCtx, scriptURL)
+		if err != nil {
+			recordBundleFailure(&failuresMu, &failures, err)
+			return nil
 		}
-		if result.err != nil && !strings.Contains(result.err.Error(), context.Canceled.Error()) {
-			failures = append(failures, result.err.Error())
+		targets, err := extractTargetRecords(bundle)
+		if err != nil {
+			recordBundleFailure(&failuresMu, &failures, fmt.Errorf("%s: %w", scriptURL, err))
+			return nil
 		}
+		if len(targets) == 0 {
+			recordBundleFailure(&failuresMu, &failures, fmt.Errorf("%s: no target records", scriptURL))
+			return nil
+		}
+		foundMu.Lock()
+		if found == nil {
+			found = targets
+			cancel()
+		}
+		foundMu.Unlock()
+		return nil
+	})
+	if len(found) > 0 {
+		return found, nil
 	}
 	if len(failures) == 0 {
 		return nil, fmt.Errorf("did not find target records in any homepage bundle")
 	}
 	return nil, fmt.Errorf("did not find target records in homepage bundles: %s", strings.Join(failures, "; "))
+}
+
+func recordBundleFailure(mu *sync.Mutex, failures *[]string, err error) {
+	if err == nil || strings.Contains(err.Error(), context.Canceled.Error()) {
+		return
+	}
+	mu.Lock()
+	*failures = append(*failures, err.Error())
+	mu.Unlock()
 }
 
 func (c *Client) fetchHomePage(ctx context.Context) ([]byte, error) {

@@ -9,6 +9,7 @@ package prompt
 
 import (
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -236,6 +237,19 @@ func TestSelectKeywordRowsDefaultSelectionPicksFirstRowPerGroup(t *testing.T) {
 	want := []bool{true, false, true, false}
 	if !slices.Equal(selected, want) {
 		t.Fatalf("default keyword selection = %v, want %v", selected, want)
+	}
+}
+
+func TestFamilyContextDefaultSelectionStartsEmpty(t *testing.T) {
+	p := New(strings.NewReader(""), io.Discard)
+	p.SetDatabaseContext("TAIR")
+	restore := p.PushSessionContext("Family", "TAIR family")
+	defer restore()
+	if !p.familyContext() {
+		t.Fatal("expected family context")
+	}
+	if got := p.keywordRowSelectionDescription(); !strings.Contains(strings.ToLower(got), "no rows are selected by default") {
+		t.Fatalf("unexpected family selection description: %q", got)
 	}
 }
 

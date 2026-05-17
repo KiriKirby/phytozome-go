@@ -21,7 +21,7 @@ function Copy-WezTermRuntimeFiles {
 
         $targetName = switch -Regex ($entry.Name.ToLowerInvariant()) {
             '^wezterm-gui\.exe$' { 'wezterm.bin'; break }
-            '^wezterm-cli\.exe$' { 'wezterm-cli.bin'; break }
+            '^wezterm\.exe$' { 'wezterm-cli.bin'; break }
             '^wezterm-mux-server\.exe$' { 'wezterm-mux-server.bin'; break }
             '^openconsole\.exe$' { 'openconsole.bin'; break }
             '\.dll$' { $entry.Name; break }

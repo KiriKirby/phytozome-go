@@ -89,6 +89,8 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) Lookup(ctx context.Context, accession string, row model.BlastResultRow) (Entry, bool, error) {
+	// Level:       phygoboost.ExecManaged,
+	// Description: "lookup uniprot entry"
 	accession = normalizeAccession(accession)
 	if accession != "" {
 		entry, ok, err := c.lookupByQuery(ctx, "accession:"+accession, "accession:"+accession)

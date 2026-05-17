@@ -29,6 +29,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/searchengine/lemnakeyword"
 	"golang.org/x/sync/singleflight"
 )
@@ -173,47 +174,51 @@ type BlastCapability struct {
 // metadata cache and only attempts lightweight page parsing elsewhere (parsing
 // not implemented here - this is a conservative detection that enables CLI UX).
 func (c *Client) DetectBlastCapabilities(ctx context.Context, species model.SpeciesCandidate) (BlastCapability, error) {
-	if _, err := c.FetchSpeciesCandidates(ctx); err != nil {
-		return BlastCapability{}, err
-	}
-	// Return cached capabilities if present.
-	c.mu.RLock()
-	if c.blastCapabilitiesCache != nil {
-		if cached, ok := c.blastCapabilitiesCache[species.JBrowseName]; ok {
-			c.mu.RUnlock()
-			return cached, nil
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "detect lemna blast capabilities",
+	}, func(runCtx context.Context) (BlastCapability, error) {
+		if _, err := c.FetchSpeciesCandidates(runCtx); err != nil {
+			return BlastCapability{}, err
 		}
-	}
-	rel, ok := c.releasesByJBrowseName[species.JBrowseName]
-	c.mu.RUnlock()
-	if !ok {
-		return BlastCapability{}, fmt.Errorf("no lemna.org release metadata for %s", species.JBrowseName)
-	}
+		c.mu.RLock()
+		if c.blastCapabilitiesCache != nil {
+			if cached, ok := c.blastCapabilitiesCache[species.JBrowseName]; ok {
+				c.mu.RUnlock()
+				return cached, nil
+			}
+		}
+		rel, ok := c.releasesByJBrowseName[species.JBrowseName]
+		c.mu.RUnlock()
+		if !ok {
+			return BlastCapability{}, fmt.Errorf("no lemna.org release metadata for %s", species.JBrowseName)
+		}
 
-	cap := BlastCapability{
-		HasServerNucleotideDB: rel.BlastNDBID != 0,
-		BlastNDBID:            rel.BlastNDBID,
-		HasProteinFasta:       rel.ProteinURL != "",
-		ProteinFastaURL:       rel.ProteinURL,
-		HasNucleotideFasta:    rel.NucleotideURL != "",
-		NucleotideFastaURL:    rel.NucleotideURL,
-	}
-	if cap.HasServerNucleotideDB {
-		cap.ServerBlastNAvailable = true
-		cap.ServerTBlastNAvailable = true
-	}
+		cap := BlastCapability{
+			HasServerNucleotideDB: rel.BlastNDBID != 0,
+			BlastNDBID:            rel.BlastNDBID,
+			HasProteinFasta:       rel.ProteinURL != "",
+			ProteinFastaURL:       rel.ProteinURL,
+			HasNucleotideFasta:    rel.NucleotideURL != "",
+			NucleotideFastaURL:    rel.NucleotideURL,
+		}
+		if cap.HasServerNucleotideDB {
+			cap.ServerBlastNAvailable = true
+			cap.ServerTBlastNAvailable = true
+		}
 
-	c.enrichServerBlastCapability(ctx, rel, &cap)
+		c.enrichServerBlastCapability(runCtx, rel, &cap)
 
-	// Persist capability to cache for future quick lookups.
-	c.mu.Lock()
-	if c.blastCapabilitiesCache == nil {
-		c.blastCapabilitiesCache = make(map[string]BlastCapability)
-	}
-	c.blastCapabilitiesCache[species.JBrowseName] = cap
-	c.mu.Unlock()
+		c.mu.Lock()
+		if c.blastCapabilitiesCache == nil {
+			c.blastCapabilitiesCache = make(map[string]BlastCapability)
+		}
+		c.blastCapabilitiesCache[species.JBrowseName] = cap
+		c.mu.Unlock()
 
-	return cap, nil
+		return cap, nil
+	})
 }
 
 func (c *Client) cachedProteinTranscriptMaps(ctx context.Context, release releaseInfo) (map[string]string, map[string]string, error) {
@@ -446,27 +451,53 @@ func (c *Client) cachedFastaIndex(fastaPath string) (map[string]fastaEntry, erro
 // detected capabilities. The returned slice contains program names like:
 //   - "blastn", "blastx", "tblastn", "blastp"
 func (c *Client) AvailableBlastPrograms(ctx context.Context, species model.SpeciesCandidate) []string {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cap, err := c.DetectBlastCapabilities(ctx, species)
+	progs, err := phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "list lemna blast programs",
+	}, func(runCtx context.Context) ([]string, error) {
+		if runCtx == nil {
+			runCtx = context.Background()
+		}
+		cap, err := c.DetectBlastCapabilities(runCtx, species)
+		if err != nil {
+			return nil, err
+		}
+		programs := []string{"blastn", "tblastn", "blastx", "blastp"}
+		type capabilityResult struct {
+			program   string
+			available bool
+		}
+		results := make([]capabilityResult, len(programs))
+		spec := phygoboost.ParallelSpec{Level: phygoboost.ExecManaged, Domain: "www.lemna.org", Description: "inspect lemna blast capability"}
+		if err := phygoboost.ParallelForSpec(runCtx, spec, len(programs), func(parallelCtx context.Context, i int) error {
+			program := programs[i]
+			available := false
+			switch program {
+			case "blastn":
+				available = cap.ServerBlastNAvailable || cap.HasNucleotideFasta
+			case "tblastn":
+				available = cap.ServerTBlastNAvailable || cap.HasNucleotideFasta
+			case "blastx":
+				available = cap.ServerBlastXAvailable || cap.HasProteinFasta
+			case "blastp":
+				available = cap.ServerBlastPAvailable || cap.HasProteinFasta
+			}
+			results[i] = capabilityResult{program: program, available: available}
+			return parallelCtx.Err()
+		}); err != nil {
+			return nil, err
+		}
+		progs := make([]string, 0, len(programs))
+		for _, result := range results {
+			if result.available {
+				progs = append(progs, result.program)
+			}
+		}
+		return progs, nil
+	})
 	if err != nil {
-		// On error, return no programs so callers can handle the missing capability.
 		return nil
-	}
-
-	progs := make([]string, 0, 4)
-	if cap.ServerBlastNAvailable || cap.HasNucleotideFasta {
-		progs = append(progs, "blastn")
-	}
-	if cap.ServerBlastXAvailable || cap.HasProteinFasta {
-		progs = append(progs, "blastx")
-	}
-	if cap.ServerTBlastNAvailable || cap.HasNucleotideFasta {
-		progs = append(progs, "tblastn")
-	}
-	if cap.ServerBlastPAvailable || cap.HasProteinFasta {
-		progs = append(progs, "blastp")
 	}
 	return progs
 }
@@ -737,6 +768,14 @@ func (c *Client) Name() string {
 }
 
 func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "fetch lemna species candidates",
+	}, c.fetchSpeciesCandidates)
+}
+
+func (c *Client) fetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
 	c.mu.RLock()
 	if len(c.speciesCandidates) > 0 {
 		cached := append([]model.SpeciesCandidate(nil), c.speciesCandidates...)
@@ -759,43 +798,21 @@ func (c *Client) FetchSpeciesCandidates(ctx context.Context) ([]model.SpeciesCan
 			return nil, err
 		}
 
-		rootJobs := make(chan downloadDir)
-		rootResults := make(chan speciesMetaResult, len(rootDirs))
-		workerCount := networkWorkerCount(len(rootDirs))
-
-		var workers sync.WaitGroup
-		for range workerCount {
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for root := range rootJobs {
-					result := c.inspectRootDownloadDir(ctx, root)
-					if result.ok {
-						rootResults <- result
-					}
-				}
-			}()
+		results := make([]speciesMetaResult, len(rootDirs))
+		spec := phygoboost.ParallelSpec{Level: phygoboost.ExecManaged, Domain: "www.lemna.org", Description: "inspect lemna species downloads"}
+		if err := phygoboost.ParallelForSpec(ctx, spec, len(rootDirs), func(parallelCtx context.Context, i int) error {
+			results[i] = c.inspectRootDownloadDir(parallelCtx, rootDirs[i])
+			return parallelCtx.Err()
+		}); err != nil {
+			return nil, err
 		}
-
-		go func() {
-			for _, root := range rootDirs {
-				select {
-				case <-ctx.Done():
-					close(rootJobs)
-					workers.Wait()
-					close(rootResults)
-					return
-				case rootJobs <- root:
-				}
-			}
-			close(rootJobs)
-			workers.Wait()
-			close(rootResults)
-		}()
 
 		candidates := make([]model.SpeciesCandidate, 0, len(rootDirs))
 		releases := make(map[string]releaseInfo, len(rootDirs))
-		for result := range rootResults {
+		for _, result := range results {
+			if !result.ok {
+				continue
+			}
 			candidates = append(candidates, result.candidate)
 			releases[result.candidate.JBrowseName] = result.release
 		}
@@ -895,6 +912,24 @@ func FilterSpeciesCandidates(candidates []model.SpeciesCandidate, keyword string
 
 func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
+		return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+			Level:       phygoboost.ExecManaged,
+			Description: "submit lemna blast",
+		}, func(runCtx context.Context) (model.BlastJob, error) {
+			return c.submitBlast(runCtx, req)
+		})
+	}
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "submit lemna blast",
+	}, func(runCtx context.Context) (model.BlastJob, error) {
+		return c.submitBlast(runCtx, req)
+	})
+}
+
+func (c *Client) submitBlast(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
 		prog := strings.TrimSpace(req.Program[len("local:"):])
 		req.Program = prog
 		return c.RunLocalBlast(ctx, req)
@@ -964,10 +999,16 @@ func (c *Client) SubmitBlast(ctx context.Context, req model.BlastRequest) (model
 // silently falling back to local BLAST. The TUI workflow owns the local fallback
 // decision so users can see and approve the transition explicitly.
 func (c *Client) SubmitBlastServerOnly(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
-		return model.BlastJob{}, fmt.Errorf("server-only BLAST cannot run local program %q", req.Program)
-	}
-	return c.submitBlastToServer(ctx, req)
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "submit lemna blast server only",
+	}, func(runCtx context.Context) (model.BlastJob, error) {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Program)), "local:") {
+			return model.BlastJob{}, fmt.Errorf("server-only BLAST cannot run local program %q", req.Program)
+		}
+		return c.submitBlastToServer(runCtx, req)
+	})
 }
 
 // submitBlastToServer is a conservative, best-effort server submission helper.
@@ -1058,30 +1099,33 @@ func (c *Client) submitBlastToServer(ctx context.Context, req model.BlastRequest
 }
 
 func (c *Client) WaitForBlastResults(ctx context.Context, jobID string, pollInterval time.Duration, timeout time.Duration) (model.BlastResult, error) {
-	// Support returning local-run results cached by LocalBlastRun/LocalBlastRunFull.
-	// For local jobs we search the cache directory for a cached TSV result and load it.
-	if strings.HasPrefix(jobID, "local-") || strings.HasPrefix(jobID, "local:") {
-		if err := ctx.Err(); err != nil {
-			return model.BlastResult{}, fmt.Errorf("wait for local blast results canceled: %w", err)
-		}
-		c.mu.RLock()
-		res, ok := c.localResultsCache[jobID]
-		c.mu.RUnlock()
-		if ok {
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "wait lemna blast results",
+	}, func(runCtx context.Context) (model.BlastResult, error) {
+		if strings.HasPrefix(jobID, "local-") || strings.HasPrefix(jobID, "local:") {
+			if err := runCtx.Err(); err != nil {
+				return model.BlastResult{}, fmt.Errorf("wait for local blast results canceled: %w", err)
+			}
+			c.mu.RLock()
+			res, ok := c.localResultsCache[jobID]
+			c.mu.RUnlock()
+			if ok {
+				return res, nil
+			}
+			res, err := c.loadBlastResultFromCache(jobID)
+			if err != nil {
+				return model.BlastResult{}, fmt.Errorf("local BLAST finished but cached result %q was not found: %w", jobID, err)
+			}
+			c.mu.Lock()
+			c.localResultsCache[jobID] = res
+			c.mu.Unlock()
 			return res, nil
 		}
-		res, err := c.loadBlastResultFromCache(jobID)
-		if err != nil {
-			return model.BlastResult{}, fmt.Errorf("local BLAST finished but cached result %q was not found: %w", jobID, err)
-		}
-		c.mu.Lock()
-		c.localResultsCache[jobID] = res
-		c.mu.Unlock()
-		return res, nil
-	}
 
-	// Non-local jobs: server-side parsing not implemented yet.
-	return model.BlastResult{}, fmt.Errorf("lemna.org BLAST result parsing is not enabled yet")
+		return model.BlastResult{}, fmt.Errorf("lemna.org BLAST result parsing is not enabled yet")
+	})
 }
 
 // RunLocalBlast executes a local BLAST workflow using available FASTA downloads.
@@ -2281,14 +2325,11 @@ func (c *Client) loadNucleotideReleaseSequences(ctx context.Context, release rel
 }
 
 func (c *Client) fetchText(ctx context.Context, requestURL string) (string, error) {
-	c.mu.RLock()
-	if cached, ok := c.textCache[requestURL]; ok {
-		c.mu.RUnlock()
-		return cached, nil
-	}
-	c.mu.RUnlock()
-
-	value, err, _ := c.sf.Do("text:"+requestURL, func() (any, error) {
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      hostForRemoteFile(requestURL),
+		Description: "fetch lemna text",
+	}, func(runCtx context.Context) (string, error) {
 		c.mu.RLock()
 		if cached, ok := c.textCache[requestURL]; ok {
 			c.mu.RUnlock()
@@ -2296,62 +2337,102 @@ func (c *Client) fetchText(ctx context.Context, requestURL string) (string, erro
 		}
 		c.mu.RUnlock()
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+		value, err, _ := c.sf.Do("text:"+requestURL, func() (any, error) {
+			c.mu.RLock()
+			if cached, ok := c.textCache[requestURL]; ok {
+				c.mu.RUnlock()
+				return cached, nil
+			}
+			c.mu.RUnlock()
+
+			req, err := http.NewRequestWithContext(runCtx, http.MethodGet, requestURL, nil)
+			if err != nil {
+				return "", fmt.Errorf("create lemna.org request: %w", err)
+			}
+			resp, err := c.baseHTTP.Do(req)
+			if err != nil {
+				return "", fmt.Errorf("fetch %s: %w", requestURL, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return "", fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
+			}
+			body, err := io.ReadAll(io.LimitReader(resp.Body, maxLemnaTextBodyBytes+1))
+			if err != nil {
+				return "", fmt.Errorf("read %s: %w", requestURL, err)
+			}
+			if len(body) > maxLemnaTextBodyBytes {
+				return "", fmt.Errorf("read %s: response exceeds %d bytes", requestURL, maxLemnaTextBodyBytes)
+			}
+			text := string(body)
+			c.mu.Lock()
+			if c.textCache == nil {
+				c.textCache = make(map[string]string)
+			}
+			c.textCache[requestURL] = text
+			c.mu.Unlock()
+			return text, nil
+		})
 		if err != nil {
-			return "", fmt.Errorf("create lemna.org request: %w", err)
+			return "", err
 		}
-		resp, err := c.baseHTTP.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("fetch %s: %w", requestURL, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxLemnaTextBodyBytes+1))
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", requestURL, err)
-		}
-		if len(body) > maxLemnaTextBodyBytes {
-			return "", fmt.Errorf("read %s: response exceeds %d bytes", requestURL, maxLemnaTextBodyBytes)
-		}
-		text := string(body)
-		c.mu.Lock()
-		if c.textCache == nil {
-			c.textCache = make(map[string]string)
-		}
-		c.textCache[requestURL] = text
-		c.mu.Unlock()
-		return text, nil
+		return value.(string), nil
 	})
-	if err != nil {
-		return "", err
-	}
-	return value.(string), nil
 }
 
 func (c *Client) openMaybeGzip(ctx context.Context, requestURL string) (io.Reader, func(), error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	handle, runCtx, err := phygoboost.BindTaskSpec(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      hostForRemoteFile(requestURL),
+		Description: "open lemna remote data stream",
+	})
 	if err != nil {
+		return nil, nil, err
+	}
+	req, err := http.NewRequestWithContext(runCtx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		if handle != nil {
+			handle.Release()
+		}
 		return nil, nil, fmt.Errorf("create lemna.org data request: %w", err)
 	}
 	resp, err := c.baseHTTP.Do(req)
 	if err != nil {
+		if handle != nil {
+			handle.Release()
+		}
 		return nil, nil, fmt.Errorf("fetch %s: %w", requestURL, err)
 	}
-	if resp.StatusCode != http.StatusOK {
+	release := func() {
 		_ = resp.Body.Close()
+		if handle != nil {
+			handle.Release()
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		release()
 		return nil, nil, fmt.Errorf("fetch %s: unexpected status %s", requestURL, resp.Status)
 	}
 	if strings.HasSuffix(strings.ToLower(requestURL), ".gz") {
 		gz, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			_ = resp.Body.Close()
+			release()
 			return nil, nil, fmt.Errorf("open gzip stream %s: %w", requestURL, err)
 		}
-		return gz, func() { _ = gz.Close(); _ = resp.Body.Close() }, nil
+		return gz, func() {
+			_ = gz.Close()
+			release()
+		}, nil
 	}
-	return resp.Body, func() { _ = resp.Body.Close() }, nil
+	return resp.Body, release, nil
+}
+
+func hostForRemoteFile(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 func parseLinks(body string, base string) []downloadFile {

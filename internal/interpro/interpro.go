@@ -86,6 +86,8 @@ func NewClient(httpClient *http.Client) *Client {
 }
 
 func (c *Client) Lookup(ctx context.Context, accession string) (Entry, bool, error) {
+	// Level:       phygoboost.ExecManaged,
+	// Description: "lookup interpro entry"
 	accession = normalizeAccession(accession)
 	if accession == "" {
 		return Entry{}, false, nil

@@ -36,6 +36,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 	"github.com/KiriKirby/phytozome-go/internal/report"
 	"github.com/KiriKirby/phytozome-go/internal/source"
+	"github.com/KiriKirby/phytozome-go/internal/tair"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
 	"github.com/KiriKirby/phytozome-go/internal/uniprot"
 
@@ -114,6 +115,10 @@ type BlastWizard struct {
 	proteinSequenceCache map[string]model.ProteinSequenceData
 	proteinSequenceMiss  map[string]error
 	proteinSequenceGroup singleflight.Group
+
+	tairFamilyLabelMu    sync.RWMutex
+	tairFamilyLabelCache map[string]keywordLabelIdentification
+	tairFamilyLabelGroup singleflight.Group
 }
 
 type InstanceLaunchRequest struct {
@@ -224,6 +229,7 @@ type QueryMode string
 const (
 	ModeBlast   QueryMode = "blast"
 	ModeKeyword QueryMode = "keyword"
+	ModeFamily  QueryMode = "family"
 )
 
 type blastQueryItem struct {
@@ -571,6 +577,7 @@ func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWiz
 		keywordTermRowsCache:      make(map[string][]model.KeywordResultRow),
 		proteinSequenceCache:      make(map[string]model.ProteinSequenceData),
 		proteinSequenceMiss:       make(map[string]error),
+		tairFamilyLabelCache:      make(map[string]keywordLabelIdentification),
 	}
 	w.prompt.SetDetailLoaders(w.loadKeywordDetailFASTA, w.loadBlastDetailFASTA)
 	w.prompt.SetHomeNavigationEnabled(true)
@@ -675,17 +682,6 @@ databaseLoop:
 		w.prompt.SetDatabaseContext(databaseDisplayName(w.source.Name()))
 		w.setBlastProgramContext("")
 
-		candidates, err := w.loadSpeciesCandidates(ctx)
-		if errors.Is(err, prompt.ErrExitRequested) {
-			return nil
-		}
-		if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
-			continue databaseLoop
-		}
-		if err != nil {
-			return err
-		}
-
 	modeLoop:
 		for {
 			mode, err := w.chooseMode()
@@ -702,6 +698,17 @@ databaseLoop:
 				w.setBlastProgramContext("")
 			}
 
+			candidates, err := w.loadSpeciesCandidatesForMode(ctx, mode)
+			if errors.Is(err, prompt.ErrExitRequested) {
+				return nil
+			}
+			if errors.Is(err, prompt.ErrBackToDatabaseSelection) {
+				continue databaseLoop
+			}
+			if err != nil {
+				return err
+			}
+
 			selected := model.SpeciesCandidate{}
 			needSelect := true
 
@@ -709,6 +716,11 @@ databaseLoop:
 			for {
 				if needSelect || selected.JBrowseName == "" {
 					selected, err = w.selectSpecies(candidates)
+					if mode == ModeFamily {
+						if _, familyErr := w.familySource(w.source); familyErr != nil {
+							return familyErr
+						}
+					}
 					if errors.Is(err, prompt.ErrExitRequested) {
 						return nil
 					}
@@ -755,6 +767,30 @@ databaseLoop:
 					}
 				case ModeKeyword:
 					if err := w.runKeywordMode(ctx, selected); err != nil {
+						switch classifyWizardBack(err) {
+						case wizardBackExit:
+							return nil
+						case wizardBackDatabase:
+							continue databaseLoop
+						case wizardBackMode:
+							continue modeLoop
+						case wizardBackSpecies:
+							selected = model.SpeciesCandidate{}
+							needSelect = true
+							continue speciesLoop
+						case wizardBackQuery:
+							w.rewindKeywordToInput = true
+							needSelect = false
+							continue speciesLoop
+						case wizardBackRows:
+							w.reuseLastKeywordRows = len(w.lastKeywordGroups) > 0
+							needSelect = false
+							continue speciesLoop
+						}
+						return err
+					}
+				case ModeFamily:
+					if err := w.runFamilyMode(ctx, selected); err != nil {
 						switch classifyWizardBack(err) {
 						case wizardBackExit:
 							return nil
@@ -915,6 +951,8 @@ func (w *BlastWizard) dataSourceForDatabase(database string) (source.DataSource,
 		return phytozome.NewClient(w.httpClient), nil
 	case "lemna":
 		return lemna.NewClient(w.httpClient), nil
+	case "tair":
+		return tair.NewClient(w.httpClient), nil
 	default:
 		return nil, fmt.Errorf("unsupported BLAST target database %q", database)
 	}
@@ -1036,10 +1074,22 @@ func (w *BlastWizard) chooseDataSource() (source.DataSource, error) {
 			return phytozome.NewClient(w.httpClient), nil
 		case "lemna":
 			return lemna.NewClient(w.httpClient), nil
+		case "tair":
+			return tair.NewClient(w.httpClient), nil
 		default:
 			return nil, fmt.Errorf("unsupported database %q", choice.Database)
 		}
 	}
+}
+
+func (w *BlastWizard) familySource(src source.DataSource) (source.DataSource, error) {
+	if src == nil {
+		return nil, fmt.Errorf("empty source")
+	}
+	if _, ok := src.(source.FamilyCandidateFetcher); !ok {
+		return nil, fmt.Errorf("%s does not support family search", src.Name())
+	}
+	return src, nil
 }
 
 func (w *BlastWizard) runStartupTool(tool string) error {
@@ -1149,43 +1199,57 @@ func (w *BlastWizard) rewindModeToInput(mode QueryMode) {
 		w.rewindBlastToInput = true
 	case ModeKeyword:
 		w.rewindKeywordToInput = true
+	case ModeFamily:
+		w.rewindKeywordToInput = true
 	}
 }
 
 func (w *BlastWizard) configureBlastRequest(ctx context.Context, selected model.SpeciesCandidate, baseRequest model.BlastRequest) (model.BlastRequest, error) {
 	request := baseRequest
-	lc, ok := w.source.(*lemna.Client)
-	if !ok {
+	switch src := w.source.(type) {
+	case *lemna.Client:
+		cap, err := w.detectLemnaBlastCapabilities(ctx, src, selected, "Preparing BLAST program selection")
+		if err != nil {
+			return model.BlastRequest{}, err
+		}
+		progs := availableBlastProgramsFromCapability(cap)
+		if len(progs) == 0 {
+			return model.BlastRequest{}, fmt.Errorf("no BLAST programs are available for %s based on detected lemna.org capabilities", selected.DisplayLabel())
+		}
+		chosenProg, err := w.prompt.ChooseBlastProgram(progs)
+		if err != nil {
+			return model.BlastRequest{}, err
+		}
+
+		applyBlastProgram(&request, chosenProg)
+		execChoice, err := w.chooseLemnaBlastExecution(cap, selected, chosenProg)
+		if err != nil {
+			return model.BlastRequest{}, err
+		}
+		if execChoice == "local" {
+			request.Program = "local:" + request.Program
+		}
+		w.setBlastProgramContext(blastProgramPathLabel(request.Program))
+		return request, nil
+	case *tair.Client:
+		progs := []string{"blastn", "blastx", "tblastn", "blastp"}
+		chosenProg, err := w.prompt.ChooseBlastProgram(progs)
+		if err != nil {
+			return model.BlastRequest{}, err
+		}
+		applyBlastProgram(&request, chosenProg)
+		request.Program = "local:" + request.Program
+		w.setBlastProgramContext(blastProgramPathLabel(request.Program))
+		return request, nil
+	default:
 		return request, nil
 	}
-
-	cap, err := w.detectLemnaBlastCapabilities(ctx, lc, selected, "Preparing BLAST program selection")
-	if err != nil {
-		return model.BlastRequest{}, err
-	}
-	progs := availableBlastProgramsFromCapability(cap)
-	if len(progs) == 0 {
-		return model.BlastRequest{}, fmt.Errorf("no BLAST programs are available for %s based on detected lemna.org capabilities", selected.DisplayLabel())
-	}
-	chosenProg, err := w.prompt.ChooseBlastProgram(progs)
-	if err != nil {
-		return model.BlastRequest{}, err
-	}
-
-	applyBlastProgram(&request, chosenProg)
-	execChoice, err := w.chooseLemnaBlastExecution(cap, selected, chosenProg)
-	if err != nil {
-		return model.BlastRequest{}, err
-	}
-	if execChoice == "local" {
-		request.Program = "local:" + request.Program
-	}
-	w.setBlastProgramContext(blastProgramPathLabel(request.Program))
-	return request, nil
 }
 
 func (w *BlastWizard) configureBlastRequestBeforeInput(ctx context.Context, selected model.SpeciesCandidate) (blastRequestConfig, error) {
-	if _, ok := w.source.(*lemna.Client); !ok {
+	switch w.source.(type) {
+	case *lemna.Client, *tair.Client:
+	default:
 		w.setBlastProgramContext("")
 		return blastRequestConfig{}, nil
 	}
@@ -1328,6 +1392,25 @@ func (w *BlastWizard) loadSpeciesCandidates(ctx context.Context) ([]model.Specie
 			return nil, err
 		}
 	}
+}
+
+func (w *BlastWizard) loadSpeciesCandidatesForMode(ctx context.Context, mode QueryMode) ([]model.SpeciesCandidate, error) {
+	candidates, err := w.loadSpeciesCandidates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := candidates
+	switch src := w.source.(type) {
+	case *tair.Client:
+		filtered = src.FilterCandidatesForMode(candidates, string(mode))
+	}
+	if len(filtered) > 0 {
+		return filtered, nil
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no species candidates were returned for %s", w.source.Name())
+	}
+	return nil, fmt.Errorf("no %s candidates are currently usable in %s mode", strings.ToUpper(strings.TrimSpace(w.source.Name())), strings.ToUpper(string(mode)))
 }
 
 func (w *BlastWizard) cacheSpeciesCandidates(sourceName string, candidates []model.SpeciesCandidate) {
@@ -1489,6 +1572,24 @@ func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.
 	const smallListThreshold = 16
 
 	for {
+		if _, ok := w.source.(*tair.Client); ok && len(candidates) <= smallListThreshold {
+			selected, err := w.prompt.SelectTAIRVersion(candidates)
+			if err == nil {
+				return selected, nil
+			}
+			if errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return model.SpeciesCandidate{}, err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select TAIR version: %v", err), prompt.ErrBackToModeSelection)
+			if navErr != nil {
+				return model.SpeciesCandidate{}, navErr
+			}
+			if !retry {
+				return model.SpeciesCandidate{}, err
+			}
+			continue
+		}
+
 		// If running against lemna and the candidate list is small, avoid the search flow
 		// and present the full numbered list for direct selection.
 		if _, ok := w.source.(*lemna.Client); ok && len(candidates) <= smallListThreshold {
@@ -1515,6 +1616,9 @@ func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.
 			if _, ok := w.source.(*lemna.Client); ok {
 				return lemna.FilterSpeciesCandidates(candidates, keyword)
 			}
+			if _, ok := w.source.(*tair.Client); ok {
+				return tair.FilterSpeciesCandidates(candidates, keyword)
+			}
 			return phytozome.FilterSpeciesCandidates(candidates, keyword)
 		})
 		if err == nil {
@@ -1531,6 +1635,99 @@ func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.
 			return model.SpeciesCandidate{}, err
 		}
 	}
+}
+
+func (w *BlastWizard) selectFamily(version model.SpeciesCandidate, candidates []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
+	searchProvider := func(keyword string, scope []model.SpeciesCandidate) []model.SpeciesCandidate {
+		base := candidates
+		if len(scope) > 0 {
+			base = scope
+		}
+		if familyFilter, ok := w.source.(source.FamilyCandidateFilter); ok {
+			return familyFilter.FilterFamilyCandidates(base, keyword)
+		}
+		return base
+	}
+	labelLoader := func(query string, visible []model.SpeciesCandidate, refresh func([]model.SpeciesCandidate)) {
+		resolver, ok := w.source.(source.TAIRLabelNameResolver)
+		if !ok || len(visible) == 0 {
+			return
+		}
+		go func(querySnapshot string, pageCandidates []model.SpeciesCandidate) {
+			if strings.TrimSpace(querySnapshot) != "" {
+				time.Sleep(250 * time.Millisecond)
+			}
+			out := make([]model.SpeciesCandidate, 0, len(pageCandidates))
+			for _, candidate := range pageCandidates {
+				updated := candidate
+				identification := w.resolveTAIRFamilyCandidateLabelIdentification(context.Background(), resolver, version, candidate)
+				if len(identification.Aliases) > 0 {
+					updated.LabelName = strings.TrimSpace(identification.Aliases[0])
+					updated.PhgoAliases = strings.Join(uniqueStrings(identification.Aliases), "; ")
+				}
+				out = append(out, updated)
+			}
+			refresh(out)
+		}(query, append([]model.SpeciesCandidate(nil), visible...))
+	}
+	for {
+		restore := w.prompt.PushSessionContext("Family", "TAIR family")
+		selected, err := w.prompt.SearchAndSelectFamilyWithProvider(candidates, searchProvider, labelLoader)
+		restore()
+		if err == nil {
+			return selected, nil
+		}
+		if errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+			return model.SpeciesCandidate{}, err
+		}
+		retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select family: %v", err), prompt.ErrBackToModeSelection)
+		if navErr != nil {
+			return model.SpeciesCandidate{}, navErr
+		}
+		if !retry {
+			return model.SpeciesCandidate{}, err
+		}
+	}
+}
+
+func (w *BlastWizard) resolveTAIRFamilyCandidateLabelIdentification(ctx context.Context, resolver source.TAIRLabelNameResolver, version model.SpeciesCandidate, candidate model.SpeciesCandidate) keywordLabelIdentification {
+	cacheKey := strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		firstNonEmpty(version.JBrowseName, version.GenomeLabel),
+		firstNonEmpty(candidate.GroupKey, candidate.JBrowseName, candidate.GenomeLabel),
+	}, "|")))
+	if strings.TrimSpace(cacheKey) == "" {
+		return keywordLabelIdentification{}
+	}
+	w.tairFamilyLabelMu.RLock()
+	if cached, ok := w.tairFamilyLabelCache[cacheKey]; ok {
+		w.tairFamilyLabelMu.RUnlock()
+		return cached
+	}
+	w.tairFamilyLabelMu.RUnlock()
+	value, err, _ := w.tairFamilyLabelGroup.Do(cacheKey, func() (any, error) {
+		aliases, sourceType := resolver.ResolveTAIRFamilyCandidateLabelCandidates(ctx, version, candidate)
+		ranked := labelname.RankAliases(labelname.AliasRankRequest{
+			TaskTimestamp: "",
+			ItemIndex:     0,
+			SearchTerm:    firstNonEmpty(candidate.GenomeLabel, candidate.JBrowseName, candidate.GroupKey),
+			Aliases:       uniqueStrings(aliases),
+		})
+		identification := keywordLabelIdentification{
+			Aliases:    uniqueStrings(ranked.RankedAliases),
+			SourceType: strings.TrimSpace(sourceType),
+		}
+		w.tairFamilyLabelMu.Lock()
+		if w.tairFamilyLabelCache == nil {
+			w.tairFamilyLabelCache = make(map[string]keywordLabelIdentification)
+		}
+		w.tairFamilyLabelCache[cacheKey] = identification
+		w.tairFamilyLabelMu.Unlock()
+		return identification, nil
+	})
+	if err != nil {
+		return keywordLabelIdentification{}
+	}
+	return value.(keywordLabelIdentification)
 }
 
 func (w *BlastWizard) runKeywordMode(ctx context.Context, selected model.SpeciesCandidate) error {
@@ -1720,6 +1917,149 @@ keywordInputLoop:
 			}
 			continue keywordRowLoop
 		}
+	}
+}
+
+func (w *BlastWizard) runFamilyMode(ctx context.Context, selected model.SpeciesCandidate) error {
+	familySource, ok := w.source.(source.FamilyCandidateFetcher)
+	if !ok {
+		return fmt.Errorf("%s does not support family search", w.source.Name())
+	}
+	family, familyRows, err := w.searchFamilyRows(ctx, selected, familySource)
+	if err != nil {
+		return err
+	}
+	if len(familyRows) == 0 {
+		w.postRunBackTarget = prompt.ErrBackToQueryInput
+		return w.showInfo("TAIR family results", fmt.Sprintf("No family results were found in %s.", selected.DisplayLabel()), prompt.ErrBackToQueryInput)
+	}
+	groups := []model.KeywordSearchGroup{{
+		SearchTerm:       strings.TrimSpace(firstNonEmpty(family.GenomeLabel, family.JBrowseName, selected.DisplayLabel())),
+		SearchType:       "TAIR family",
+		LabelName:        strings.TrimSpace(firstNonEmpty(family.LabelName, family.GenomeLabel, family.JBrowseName)),
+		LabelSourceField: "family candidate aliases",
+		LabelSourceValue: strings.TrimSpace(firstNonEmpty(family.LabelName, family.PhgoAliases, family.GenomeLabel)),
+		SearchStartedAt:  time.Now(),
+		SearchEndedAt:    time.Now(),
+		SearchDurationMS: 0,
+		Rows:             familyRows,
+	}}
+	if aliasText := strings.TrimSpace(family.PhgoAliases); aliasText != "" {
+		for i := range groups[0].Rows {
+			if strings.TrimSpace(groups[0].Rows[i].PhgoAliases) == "" {
+				groups[0].Rows[i].PhgoAliases = aliasText
+			}
+			if strings.TrimSpace(groups[0].Rows[i].LabelName) == "" && strings.TrimSpace(family.LabelName) != "" {
+				groups[0].Rows[i].LabelName = strings.TrimSpace(family.LabelName)
+			}
+		}
+	}
+	return w.runKeywordLikeResults(ctx, selected, groups, "family")
+}
+
+func (w *BlastWizard) searchFamilyRows(ctx context.Context, selected model.SpeciesCandidate, familySource source.FamilyCandidateFetcher) (model.SpeciesCandidate, []model.KeywordResultRow, error) {
+	candidates, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("Family", "Load TAIR family candidates"),
+		Title:       "Load TAIR family candidates",
+		Description: "Loading TAIR family candidates for the selected release and preparing the searchable candidate list.",
+		Initial:     "Loading family candidates...",
+		Total:       2,
+		AllowCancel: true,
+	}, func(taskCtx context.Context, update func(int, string)) ([]model.SpeciesCandidate, error) {
+		update(1, "Building TAIR release index and collecting family candidates...")
+		candidates, err := familySource.FetchFamilyCandidates(taskCtx, selected)
+		if err != nil {
+			return nil, err
+		}
+		update(2, fmt.Sprintf("Prepared %d TAIR family candidate(s).", len(candidates)))
+		return candidates, nil
+	})
+	if err != nil {
+		return model.SpeciesCandidate{}, nil, err
+	}
+	if len(candidates) == 0 {
+		return model.SpeciesCandidate{}, nil, nil
+	}
+	family, err := w.selectFamily(selected, candidates)
+	if err != nil {
+		return model.SpeciesCandidate{}, nil, err
+	}
+	if familySearcher, ok := w.source.(source.FamilyKeywordSearcher); ok {
+		rows, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+			Path:        w.tuiPath("Family", "Search TAIR family rows"),
+			Title:       "Search TAIR family rows",
+			Description: "Loading the selected TAIR family rows and preparing the review table.",
+			Initial:     "Searching selected family...",
+			Total:       2,
+			AllowCancel: true,
+		}, func(taskCtx context.Context, update func(int, string)) ([]model.KeywordResultRow, error) {
+			update(1, "Searching TAIR family records...")
+			rows, err := familySearcher.SearchFamilyKeywordRows(taskCtx, selected, family.JBrowseName)
+			if err != nil {
+				return nil, err
+			}
+			update(2, fmt.Sprintf("Prepared %d TAIR family row(s).", len(rows)))
+			return rows, nil
+		})
+		if err != nil {
+			return model.SpeciesCandidate{}, nil, err
+		}
+		return family, rows, nil
+	}
+	return model.SpeciesCandidate{}, nil, fmt.Errorf("%s does not support family keyword search", w.source.Name())
+}
+
+func (w *BlastWizard) runKeywordLikeResults(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup, mode string) error {
+	w.lastKeywordSpecies = selected
+	if strings.EqualFold(strings.TrimSpace(mode), "family") {
+		if identifications, err := w.autoIdentifyKeywordLabelsWithProgress(ctx, selected, groups); err == nil && len(identifications) == len(groups) {
+			annotateKeywordLabelSources(groups, identifications, "auto-identify labels")
+			applyKeywordLabelIdentifications(groups, identifications)
+			applyKeywordLabelMethod(groups, "auto-identify labels")
+		}
+	}
+keywordRowLoop:
+	for {
+		selection, err := w.selectKeywordRows(groups)
+		if err != nil {
+			if errors.Is(err, prompt.ErrBackToQueryInput) {
+				return err
+			}
+			if errors.Is(err, prompt.ErrBackToRowSelection) {
+				continue keywordRowLoop
+			}
+			if errors.Is(err, prompt.ErrBackToSpeciesSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrExitRequested) {
+				return err
+			}
+			retry, navErr := w.retryWorkflowStep(fmt.Sprintf("select TAIR rows: %v", err), prompt.ErrBackToQueryInput)
+			if navErr != nil {
+				return navErr
+			}
+			if !retry {
+				return err
+			}
+			continue keywordRowLoop
+		}
+		if selection.RunBlast {
+			if err := w.runKeywordBlastMode(ctx, selected, groups, selection.Rows, nil); err != nil {
+				if errors.Is(err, prompt.ErrBackToRowSelection) {
+					continue keywordRowLoop
+				}
+				return err
+			}
+			continue keywordRowLoop
+		}
+		w.postRunBackTarget = prompt.ErrBackToRowSelection
+		if !selection.GenerateFile {
+			continue keywordRowLoop
+		}
+		if err := w.prepareAndExportKeywordSelection(ctx, selected, groups, selection.Rows, nil); err != nil {
+			if errors.Is(err, prompt.ErrBackToRowSelection) {
+				continue keywordRowLoop
+			}
+			return err
+		}
+		continue keywordRowLoop
 	}
 }
 
@@ -9248,6 +9588,10 @@ func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context,
 		labelCtx := mergeContexts(ctx, taskCtx)
 		taskUpdate("Reviewing keyword result rows...")
 		working := cloneKeywordSearchGroups(groups)
+		if strings.EqualFold(strings.TrimSpace(w.source.Name()), "tair") {
+			taskUpdate("Resolving TAIR label candidates...")
+			return w.autoIdentifyTAIRKeywordLabels(labelCtx, working), nil
+		}
 		if _, ok := w.source.(*lemna.Client); ok {
 			taskUpdate("Searching Phytozome label candidates for Lemna rows...")
 			return w.autoIdentifyLemnaKeywordLabelsWithProgress(labelCtx, selected, working), nil
@@ -9454,6 +9798,39 @@ func cloneKeywordResultRows(rows []model.KeywordResultRow) []model.KeywordResult
 	return out
 }
 
+func (w *BlastWizard) autoIdentifyTAIRKeywordLabels(ctx context.Context, groups []model.KeywordSearchGroup) []keywordLabelIdentification {
+	taskTimestamp := keywordLabelTaskTimestamp(groups)
+	identifications := make([]keywordLabelIdentification, len(groups))
+	resolver, ok := w.source.(source.TAIRLabelNameResolver)
+	if !ok {
+		return autoIdentifyKeywordLabelIdentifications(groups)
+	}
+	for i := range identifications {
+		identifications[i].TaskTimestamp = taskTimestamp
+		identifications[i].ItemIndex = i
+	}
+	for i, group := range groups {
+		aliases := make([]string, 0, len(group.Rows)*4)
+		sourceType := ""
+		for _, row := range group.Rows {
+			rowAliases, rowSource := resolver.ResolveTAIRKeywordRowLabelCandidates(ctx, row)
+			if sourceType == "" && strings.TrimSpace(rowSource) != "" {
+				sourceType = strings.TrimSpace(rowSource)
+			}
+			aliases = append(aliases, rowAliases...)
+		}
+		ranked := labelname.RankAliases(labelname.AliasRankRequest{
+			TaskTimestamp: taskTimestamp,
+			ItemIndex:     i,
+			SearchTerm:    firstNonEmpty(group.SearchTerm, group.LabelName),
+			Aliases:       uniqueStrings(aliases),
+		})
+		identifications[i].Aliases = uniqueStrings(ranked.RankedAliases)
+		identifications[i].SourceType = sourceType
+	}
+	return identifications
+}
+
 func (w *BlastWizard) cachedKeywordTermRows(cacheKey string) ([]model.KeywordResultRow, bool) {
 	if strings.TrimSpace(cacheKey) == "" {
 		return nil, false
@@ -9568,7 +9945,16 @@ func keywordRowLabelnameCandidates(row model.KeywordResultRow) []string {
 		}
 		return phytozomeKeywordFallbackAliasCandidates(row)
 	}
+	if strings.EqualFold(strings.TrimSpace(row.SourceDatabase), "tair") {
+		return tairKeywordRowAliasCandidates(row)
+	}
 	return lemnaLocalKeywordRowAliasCandidates(row)
+}
+
+func tairKeywordRowAliasCandidates(row model.KeywordResultRow) []string {
+	aliases := make([]string, 0, 8)
+	aliases = append(aliases, labelname.SplitAliases(row.Synonyms)...)
+	return uniqueStrings(aliases)
 }
 
 func phytozomeKeywordFallbackAliasCandidates(row model.KeywordResultRow) []string {
@@ -10299,6 +10685,21 @@ func (w *BlastWizard) resolveQuerySequenceInput(ctx context.Context, candidates 
 	normalizedURL, ok := normalizeGeneReportURL(input)
 	if ok {
 		return w.resolveURLQuerySequenceInput(ctx, candidates, input, normalizedURL)
+	}
+
+	if resolver, ok := w.source.(source.QueryResolver); ok {
+		species := model.SpeciesCandidate{}
+		for _, candidate := range candidates {
+			if candidate.ProteomeID != 0 {
+				species = candidate
+				break
+			}
+		}
+		if ok, resolved, err := w.tryResolveSourceQueryInput(ctx, resolver, species, input); err != nil {
+			return nil, ok, err
+		} else if ok {
+			return resolved, true, nil
+		}
 	}
 
 	if source, ok := parseFastaQuerySequenceInput(input); ok {
@@ -11308,6 +11709,8 @@ func inferSourceDatabaseFromURL(rawURL string) string {
 		return "phytozome"
 	case "www.lemna.org", "lemna.org":
 		return "lemna"
+	case "www.arabidopsis.org", "arabidopsis.org":
+		return "tair"
 	default:
 		return ""
 	}
@@ -11319,6 +11722,8 @@ func databaseDisplayName(name string) string {
 		return "Phytozome"
 	case "lemna":
 		return "lemna.org"
+	case "tair":
+		return "TAIR"
 	default:
 		return strings.TrimSpace(name)
 	}

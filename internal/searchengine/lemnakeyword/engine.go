@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -84,15 +85,33 @@ func New(finder KeywordFinder) *Engine {
 }
 
 func (e *Engine) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return e.searchKeywordRowsWithProgram(ctx, species, keyword, e.selectProgram(keyword), true, "normal")
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "search lemna keyword engine rows",
+	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
+		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, e.selectProgram(keyword), true, "normal")
+	})
 }
 
 func (e *Engine) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return e.searchKeywordRowsWithProgram(ctx, species, keyword, wideSearchProgram{}, false, "forced-wide")
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "search lemna keyword engine rows wide",
+	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
+		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, wideSearchProgram{}, false, "forced-wide")
+	})
 }
 
 func (e *Engine) SearchKeywordRowsBroad(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return e.searchKeywordRowsWithProgram(ctx, species, keyword, broadSearchProgram{}, false, "forced-broad")
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "search lemna keyword engine rows broad",
+	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
+		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, broadSearchProgram{}, false, "forced-broad")
+	})
 }
 
 func (e *Engine) searchKeywordRowsWithProgram(ctx context.Context, species model.SpeciesCandidate, keyword string, program searchProgram, allowWideFallback bool, mode string) ([]model.KeywordResultRow, error) {

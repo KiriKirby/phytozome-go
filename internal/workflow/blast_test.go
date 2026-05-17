@@ -3296,6 +3296,90 @@ func TestFetchProteinSequenceRecordsSkipsMissingSequencesAndCachesMisses(t *test
 	}
 }
 
+func TestLoadKeywordDetailFASTAReturnsFetchedSequenceForTAIRLikeRows(t *testing.T) {
+	w := &BlastWizard{
+		source: fakeSource{
+			name:      "tair",
+			sequences: map[string]string{"AT1G01010.1": "MTAIRSEQ"},
+			headers:   map[string]string{"AT1G01010.1": ">AT1G01010.1 NAC domain containing protein 1"},
+		},
+		lastKeywordSpecies:   model.SpeciesCandidate{ProteomeID: 370201, JBrowseName: "TAIR12", GenomeLabel: "TAIR12"},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	row := model.KeywordResultRow{
+		SourceDatabase:      "tair",
+		SequenceID:          "AT1G01010.1",
+		TranscriptID:        "AT1G01010.1",
+		GeneIdentifier:      "AT1G01010",
+		SequenceHeaderLabel: "TAIR12",
+		LabelName:           "NAC001",
+	}
+	fasta, err := w.loadKeywordDetailFASTA(row)
+	if err != nil {
+		t.Fatalf("loadKeywordDetailFASTA returned error: %v", err)
+	}
+	if !strings.Contains(fasta, ">AT1G01010.1 NAC domain containing protein 1") {
+		t.Fatalf("detail FASTA header mismatch: %q", fasta)
+	}
+	if !strings.Contains(fasta, "MTAIRSEQ") {
+		t.Fatalf("detail FASTA sequence mismatch: %q", fasta)
+	}
+}
+
+func TestFetchKeywordProteinSequenceRecordsWithProgressSkipsMissingAndUsesOriginalHeaders(t *testing.T) {
+	fetchCount := map[string]int{}
+	w := &BlastWizard{
+		source: fakeSource{
+			name: "tair",
+			sequences: map[string]string{
+				"AT1G01010.1": "MTAIRSEQ",
+			},
+			headers: map[string]string{
+				"AT1G01010.1": ">AT1G01010.1 NAC domain containing protein 1",
+			},
+			fetchCount: fetchCount,
+		},
+		proteinSequenceCache: make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:  make(map[string]error),
+	}
+	selected := model.SpeciesCandidate{ProteomeID: 370201, JBrowseName: "TAIR12", GenomeLabel: "TAIR12"}
+	rows := []model.KeywordResultRow{
+		{
+			SourceDatabase:      "tair",
+			SequenceID:          "AT1G01010.1",
+			TranscriptID:        "AT1G01010.1",
+			GeneIdentifier:      "AT1G01010",
+			SequenceHeaderLabel: "TAIR12",
+			LabelName:           "NAC001",
+		},
+		{
+			SourceDatabase:      "tair",
+			SequenceID:          "missing-seq",
+			TranscriptID:        "missing-seq",
+			GeneIdentifier:      "AT1G99999",
+			SequenceHeaderLabel: "TAIR12",
+			LabelName:           "MISSING",
+		},
+	}
+	records, err := w.fetchKeywordProteinSequenceRecordsWithProgress(context.Background(), selected, rows, nil)
+	if err != nil {
+		t.Fatalf("fetchKeywordProteinSequenceRecordsWithProgress returned error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	if got := records[0].OriginalHeader; got != ">AT1G01010.1 NAC domain containing protein 1" {
+		t.Fatalf("original header = %q, want fetched header", got)
+	}
+	if got := records[0].Sequence; got != "MTAIRSEQ" {
+		t.Fatalf("sequence = %q, want MTAIRSEQ", got)
+	}
+	if fetchCount["missing-seq"] != 1 {
+		t.Fatalf("missing sequence fetch count = %d, want 1", fetchCount["missing-seq"])
+	}
+}
+
 func TestResolveKeywordRowsToBlastItemsSkipsModalWrapperWhenSuppressed(t *testing.T) {
 	w := &BlastWizard{
 		source:                fakeSource{sequences: map[string]string{"seq1": "MPEPTIDE"}},

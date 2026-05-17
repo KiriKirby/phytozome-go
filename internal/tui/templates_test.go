@@ -786,6 +786,23 @@ func TestTaskPageNoCancelWithoutFlagOrError(t *testing.T) {
 	}
 }
 
+func TestCloseOnlyModalButtonsAlwaysPrependsClose(t *testing.T) {
+	row := closeOnlyModalButtons([]buttonSpec{{
+		Label:    ButtonCancel,
+		Shortcut: ShortcutCancel,
+		Visible:  true,
+	}}, false, "", "", func() {}, nil)
+	if row == nil {
+		t.Fatal("expected button row")
+	}
+	if len(row.buttons) == 0 {
+		t.Fatal("expected buttons")
+	}
+	if row.buttons[0].Label != ButtonClose {
+		t.Fatalf("first button = %q, want %q", row.buttons[0].Label, ButtonClose)
+	}
+}
+
 func TestBlastHeaderSplitsIntoTwoRowsWithSlash(t *testing.T) {
 	top, bottom := tableHeaderLines("align_len /\nquery_length (%)")
 	if top != "align_len /" {

@@ -161,8 +161,8 @@ func resolveWezTermCLIPathFrom(cleanerPath string) (string, error) {
 	case "windows":
 		candidates = append(candidates,
 			filepath.Join(dir, windowsWezTermCLIName),
-			filepath.Join(dir, "wezterm.bin"),
 			filepath.Join(dir, "wezterm.exe"),
+			filepath.Join(dir, "wezterm.bin"),
 		)
 	default:
 		candidates = append(candidates,

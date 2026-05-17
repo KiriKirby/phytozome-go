@@ -26,16 +26,19 @@ type columnMetadata struct {
 var keywordDisplayColumnIDsByDatabase = map[string][]string{
 	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
 	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
+	"tair":      {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
 	"phytozome": {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"lemna":     {"search_term", "label_name", "labelname_type", "phgo_alias", "alias", "transcript", "description", "genome", "protein_id", "gene_identifier", "location", "uniprot", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
+	"tair":      {"search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 }
 
 var keywordExportColumnIDsByDatabase = map[string][]string{
 	"phytozome": {"row", "search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
 	"lemna":     {"row", "search_term", "label_name", "labelname_type", "phgo_alias", "alias", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
+	"tair":      {"row", "search_term", "search_type", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url"},
 }
 
 var keywordReportExtraColumnIDsByDatabase = map[string][]string{
@@ -74,6 +77,41 @@ var keywordReportExtraColumnIDsByDatabase = map[string][]string{
 		"ahrd_human_readable_description",
 		"ahrd_interpro",
 		"ahrd_gene_ontology_term",
+	},
+	"tair": {
+		"tair_version",
+		"tair_gff_url",
+		"tair_fasta_header",
+		"tair_fasta_description",
+		"tair_fasta_symbols",
+		"gff_seqid",
+		"gff_source",
+		"gff_type",
+		"gff_start",
+		"gff_end",
+		"gff_score",
+		"gff_strand",
+		"gff_phase",
+		"gff_attributes",
+		"attr_ID",
+		"attr_Name",
+		"attr_Parent",
+		"attr_Alias",
+		"attr_Dbxref",
+		"attr_dbxref",
+		"attr_symbol",
+		"attr_gene_symbol",
+		"attr_product",
+		"attr_description",
+		"attr_Note",
+		"attr_note",
+		"attr_comment",
+		"attr_gene_id",
+		"attr_transcript_id",
+		"attr_protein_id",
+		"attr_protein",
+		"attr_Derives_from",
+		"attr_UniProtKB",
 	},
 }
 
@@ -404,6 +442,31 @@ var supplementalColumnHelpText = map[string]string{
 		"Gene Ontology term text carried by the already-loaded AHRD record. It preserves GO-style annotation text already present in the AHRD table for the matched row.",
 		"已加载 AHRD 记录中携带的 Gene Ontology 术语文本。它保留的是匹配行在 AHRD 表里本来就已有的 GO 风格注释文本。",
 		"すでに読み込まれた AHRD レコードに含まれていた Gene Ontology term テキストです。一致行について AHRD 表が元から持っていた GO 風注釈を保持します。",
+	),
+	"tair_version": columnHelp(
+		"TAIR release version used to build this row, such as TAIR10, TAIR11, TAIR12, or Araport11. It identifies the exact Arabidopsis release snapshot that supplied the indexed annotation and sequence metadata.",
+		"构建这一行结果时使用的 TAIR 发布版本，例如 TAIR10、TAIR11、TAIR12 或 Araport11。它标识了提供该索引注释与序列元数据的确切 Arabidopsis 发布快照。",
+		"この行の構築に使われた TAIR release version です。TAIR10、TAIR11、TAIR12、Araport11 などを示し、索引化された注釈と配列 metadata を供給した正確な Arabidopsis release snapshot を特定します。",
+	),
+	"tair_gff_url": columnHelp(
+		"Direct TAIR download URL for the GFF or GFF3 file used to build the row index. It records the exact release asset address that the workflow fetched or cached while preparing TAIR keyword and family searches.",
+		"用于构建结果索引的 GFF 或 GFF3 文件对应的 TAIR 直接下载 URL。它记录了工作流在准备 TAIR keyword 和 family 搜索时实际抓取或缓存的精确发布资源地址。",
+		"行インデックス構築に使われた GFF または GFF3 ファイルの TAIR 直接ダウンロード URL です。TAIR keyword / family search を準備するときにワークフローが実際に取得またはキャッシュした正確な release asset アドレスを記録します。",
+	),
+	"tair_fasta_header": columnHelp(
+		"Original TAIR FASTA header associated with the matched protein sequence. It preserves the source sequence header text exactly as downloaded so the derived protein description and symbol fields can be traced back to the release FASTA.",
+		"与匹配蛋白序列关联的原始 TAIR FASTA header。它按下载内容原样保留源序列头文本，使派生出来的蛋白描述和 symbol 字段都能追溯回发布版 FASTA。",
+		"一致したタンパク質配列に対応する元の TAIR FASTA header です。ダウンロード時の source sequence header をそのまま保持し、派生した protein description や symbol 欄を release FASTA へ追跡できるようにします。",
+	),
+	"tair_fasta_description": columnHelp(
+		"Protein-description text parsed from the matched TAIR FASTA header. It captures the sequence-side description before the workflow chooses shorter display fields or blends it with GFF-derived annotation text.",
+		"从匹配 TAIR FASTA header 解析出的蛋白描述文本。它保留的是序列侧的描述内容，优先级压缩成更短显示字段或与 GFF 注释融合之前的原貌。",
+		"一致した TAIR FASTA header から解析したタンパク質説明テキストです。短い表示欄へ要約されたり GFF 注釈と統合されたりする前の、sequence 側 description を保持します。",
+	),
+	"tair_fasta_symbols": columnHelp(
+		"Symbol text parsed from the matched TAIR FASTA header. It records sequence-side symbol hints that can supplement or confirm identifiers and labels derived from the GFF annotation.",
+		"从匹配 TAIR FASTA header 解析出的 symbol 文本。它记录的是序列侧的 symbol 提示，可用于补充或校验从 GFF 注释得到的编号和标签。",
+		"一致した TAIR FASTA header から解析した symbol テキストです。GFF 注釈から得た ID やラベルを補強・確認する sequence 側 symbol ヒントを記録します。",
 	),
 }
 

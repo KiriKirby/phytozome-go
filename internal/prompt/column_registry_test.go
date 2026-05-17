@@ -72,11 +72,20 @@ func TestColumnSchemasExistPerDatabaseModeAndView(t *testing.T) {
 	if ids := KeywordDisplayColumnIDs("phytozome"); len(ids) == 0 {
 		t.Fatal("expected phytozome keyword display schema")
 	}
+	if ids := KeywordDisplayColumnIDs("tair"); len(ids) == 0 {
+		t.Fatal("expected tair keyword display schema")
+	}
 	if ids := KeywordDetailColumnIDs("lemna"); len(ids) == 0 {
 		t.Fatal("expected lemna keyword detail schema")
 	}
+	if ids := KeywordDetailColumnIDs("tair"); len(ids) == 0 {
+		t.Fatal("expected tair keyword detail schema")
+	}
 	if ids := KeywordExportColumnIDs("phytozome", true, nil); len(ids) == 0 {
 		t.Fatal("expected phytozome keyword export schema")
+	}
+	if ids := KeywordExportColumnIDs("tair", true, nil); len(ids) == 0 {
+		t.Fatal("expected tair keyword export schema")
 	}
 	if ids := BlastDisplayColumnIDs("phytozome", "", true, true); len(ids) == 0 {
 		t.Fatal("expected phytozome blast display schema")
@@ -102,7 +111,7 @@ func TestAllSchemaColumnsResolveToExplicitHelpEntries(t *testing.T) {
 			}
 		}
 	}
-	for _, db := range []string{"phytozome", "lemna"} {
+	for _, db := range []string{"phytozome", "lemna", "tair"} {
 		add(KeywordDisplayColumnIDs(db))
 		add(KeywordDetailColumnIDs(db))
 		add(KeywordExportColumnIDs(db, true, nil))
@@ -183,6 +192,19 @@ func TestKeywordReportColumnIDsIncludeLemnaFormalExtras(t *testing.T) {
 	for _, required := range []string{"gff_seqid", "attr_ID", "ahrd_human_readable_description"} {
 		if !seen[required] {
 			t.Fatalf("lemna keyword report schema missing %q", required)
+		}
+	}
+}
+
+func TestKeywordReportColumnIDsIncludeTAIRFormalExtras(t *testing.T) {
+	ids := KeywordReportColumnIDs("tair", true, nil)
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, required := range []string{"tair_version", "tair_fasta_header", "gff_attributes", "attr_Dbxref"} {
+		if !seen[required] {
+			t.Fatalf("tair keyword report schema missing %q", required)
 		}
 	}
 }

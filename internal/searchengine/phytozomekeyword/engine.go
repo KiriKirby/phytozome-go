@@ -18,6 +18,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/netconfig"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -112,11 +113,23 @@ func New(finder GeneFinder) *Engine {
 }
 
 func (e *Engine) SearchKeywordRows(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return e.searchKeywordRowsWithProgram(ctx, species, keyword, e.selectProgram(keyword), true, "normal")
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "phytozome-next.jgi.doe.gov",
+		Description: "search phytozome keyword engine rows",
+	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
+		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, e.selectProgram(keyword), true, "normal")
+	})
 }
 
 func (e *Engine) SearchKeywordRowsWide(ctx context.Context, species model.SpeciesCandidate, keyword string) ([]model.KeywordResultRow, error) {
-	return e.searchKeywordRowsWithProgram(ctx, species, keyword, wideSearchProgram{}, false, "forced-wide")
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "phytozome-next.jgi.doe.gov",
+		Description: "search phytozome keyword engine rows wide",
+	}, func(runCtx context.Context) ([]model.KeywordResultRow, error) {
+		return e.searchKeywordRowsWithProgram(runCtx, species, keyword, wideSearchProgram{}, false, "forced-wide")
+	})
 }
 
 func (e *Engine) searchKeywordRowsWithProgram(ctx context.Context, species model.SpeciesCandidate, keyword string, program searchProgram, allowWideFallback bool, mode string) ([]model.KeywordResultRow, error) {

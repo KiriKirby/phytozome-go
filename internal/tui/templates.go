@@ -1168,6 +1168,7 @@ type SearchPage struct {
 	Placeholder string
 	Choices     []Choice
 	Filter      func(query string, choices []Choice) []Choice
+	OnVisibleChoices func(query string, visible []Choice, refresh func([]Choice))
 	AllowBack   bool
 	AllowHome   bool
 	Hints       []string
@@ -1858,6 +1859,36 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 	refresh = func() {
 		applyFilter()
 		renderSearchResults()
+		if page.OnVisibleChoices != nil {
+			start := currentPage * pageSize
+			end := start + pageSize
+			if end > len(filtered) {
+				end = len(filtered)
+			}
+			visible := append([]Choice(nil), filtered[start:end]...)
+			page.OnVisibleChoices(query, visible, func(updated []Choice) {
+				app.QueueUpdateDraw(func() {
+					if len(updated) == 0 {
+						return
+					}
+					updatedByValue := make(map[string]Choice, len(updated))
+					for _, choice := range updated {
+						updatedByValue[choice.Value] = choice
+					}
+					for i := range page.Choices {
+						if replacement, ok := updatedByValue[page.Choices[i].Value]; ok {
+							page.Choices[i] = replacement
+						}
+					}
+					for i := range filtered {
+						if replacement, ok := updatedByValue[filtered[i].Value]; ok {
+							filtered[i] = replacement
+						}
+					}
+					renderSearchResults()
+				})
+			})
+		}
 	}
 
 	input.SetChangedFunc(func(text string) {
@@ -7859,12 +7890,14 @@ func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update fu
 		}
 	}
 	if allowCancel {
-		addButtonRow(modalBody, buttonRow(buttonSpec{
-			Label:    ButtonCancel,
-			Shortcut: ShortcutCancel,
-			Action:   cancelTask,
-			Visible:  true,
-		}))
+		addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
+			{
+				Label:    ButtonCancel,
+				Shortcut: ShortcutCancel,
+				Action:   cancelTask,
+				Visible:  true,
+			},
+		}, false, "", "", cancelTask, nil))
 	}
 	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
 	app.SetFocus(modalBody)
@@ -8048,12 +8081,14 @@ func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, u
 		}
 	}
 	if allowCancel {
-		addButtonRow(modalBody, buttonRow(buttonSpec{
-			Label:    ButtonCancel,
-			Shortcut: ShortcutCancel,
-			Action:   cancelTask,
-			Visible:  true,
-		}))
+		addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
+			{
+				Label:    ButtonCancel,
+				Shortcut: ShortcutCancel,
+				Action:   cancelTask,
+				Visible:  true,
+			},
+		}, false, "", "", cancelTask, nil))
 	}
 	app.SetRoot(taskModalRoot(page, modalBody, 90, 14), true)
 	app.SetFocus(modalBody)

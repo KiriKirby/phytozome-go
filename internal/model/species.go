@@ -18,12 +18,20 @@ type SpeciesCandidate struct {
 	ReleaseDate string
 	SearchAlias string
 	IsOfficial  bool
+	GroupKey    string
+	ParentKey   string
+	HasChildren bool
+	LabelName   string
+	PhgoAliases string
 }
 
 func (s SpeciesCandidate) DisplayLabel() string {
-	label := s.GenomeLabel
-	if s.SearchAlias != "" {
-		label = s.SearchAlias
+	label := strings.TrimSpace(s.GenomeLabel)
+	if label == "" {
+		label = strings.TrimSpace(s.SearchAlias)
+	}
+	if label == "" {
+		label = strings.TrimSpace(s.JBrowseName)
 	}
 
 	parts := []string{label}

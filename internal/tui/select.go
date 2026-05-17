@@ -61,6 +61,7 @@ type StartupChoice struct {
 func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice, error) {
 	features := []Option{
 		{Value: "keyword", Label: "Keyword", Description: "search annotations, IDs, aliases, or descriptions"},
+		{Value: "family", Label: "Family", Description: "TAIR family search and selection"},
 		{Value: "blast", Label: "Blast", Description: "sequence / FASTA / URL query against one species"},
 		{Value: "tools", Label: "Tools", Description: "standalone analysis and helper workflows"},
 	}
@@ -68,10 +69,15 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 		"keyword": {
 			{Value: "phytozome:keyword", Label: "Phytozome keyword", Description: "keyword search in Phytozome species"},
 			{Value: "lemna:keyword", Label: "lemna keyword", Description: "keyword search in lemna.org releases"},
+			{Value: "tair:keyword", Label: "TAIR keyword", Description: "keyword search in TAIR Arabidopsis releases"},
 		},
 		"blast": {
 			{Value: "phytozome:blast", Label: "Phytozome blast", Description: "BLAST against a selected Phytozome species"},
 			{Value: "lemna:blast", Label: "lemna blast", Description: "BLAST against lemna.org releases"},
+			{Value: "tair:blast", Label: "TAIR blast", Description: "BLAST against TAIR Arabidopsis releases"},
+		},
+		"family": {
+			{Value: "tair:family", Label: "TAIR family", Description: "TAIR family search using release version selection"},
 		},
 		"tools": {
 			{Value: "tool:pathway_search", Label: "Pathway search", Description: "pathway search entry point; implementation comes next"},
@@ -82,7 +88,7 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 	var result StartupChoice
 
 	featureList := optionListWithStart("Function selection:", features, 1)
-	subOptionList := optionListWithStart("Sub-option selection:", subOptions[features[0].Value], 4)
+	subOptionList := optionListWithStart("Sub-option selection:", subOptions[features[0].Value], 5)
 	selectedFeatureIndex := 0
 	selectedFeature := func() Option {
 		featureIndex := selectedFeatureIndex
@@ -95,7 +101,7 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 		return subOptions[selectedFeature().Value]
 	}
 	refreshSubOptions := func() {
-		setOptionListItems(subOptionList, "Sub-option selection:", currentSubOptions(), 4)
+		setOptionListItems(subOptionList, "Sub-option selection:", currentSubOptions(), 5)
 	}
 	selectFeature := func(index int) {
 		if index < 0 || index >= len(features) {
@@ -181,15 +187,15 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 			return nil
 		case tcell.KeyRune:
 			switch event.Rune() {
-			case '1', '2', '3':
+			case '1', '2', '3', '4':
 				index := int(event.Rune() - '1')
 				if index >= 0 && index < len(features) {
 					selectFeature(index)
 					focusStartupList(app, featureList, subOptionList, featureList)
 					return nil
 				}
-			case '4', '5', '6', '7', '8', '9':
-				index := int(event.Rune() - '4')
+			case '5', '6', '7', '8', '9':
+				index := int(event.Rune() - '5')
 				if index >= 0 && index < len(currentSubOptions()) {
 					subOptionList.SetCurrentItem(index)
 					focusStartupList(app, featureList, subOptionList, subOptionList)
@@ -354,7 +360,7 @@ func startupRoot(app *tview.Application, info StartupInfo, featureList *tview.Li
 			start()
 		}, Visible: true, Primary: true},
 	))
-	module.AddItem(hintView("Tab/Left/Right switch selection box | Up/Down choose item | 1-3 choose function | 4+ choose sub-option"), 1, 0, false)
+	module.AddItem(hintView("Tab/Left/Right switch selection box | Up/Down choose item | 1-4 choose function | 5+ choose sub-option"), 1, 0, false)
 	module.AddItem(hintView("Enter moves from function to sub-option, then starts the selected workflow."), 1, 0, false)
 
 	moduleFrame := tview.NewFrame(module)

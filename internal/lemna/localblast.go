@@ -28,6 +28,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/blastplus"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	phygoboost "github.com/KiriKirby/phytozome-go/internal/phygoboost"
 	"github.com/KiriKirby/phytozome-go/internal/progressctx"
 )
 
@@ -62,14 +63,19 @@ func WithLocalBlastThreads(ctx context.Context, threads int) context.Context {
 // LocalBlastRun orchestrates a local BLAST execution.
 // It returns a populated model.BlastJob on success or an error otherwise.
 func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (model.BlastJob, error) {
-	// Validate
-	if req.Species.JBrowseName == "" {
-		return model.BlastJob{}, fmt.Errorf("missing species in BlastRequest")
-	}
-	if strings.TrimSpace(req.Sequence) == "" {
-		return model.BlastJob{}, fmt.Errorf("empty query sequence")
-	}
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "run lemna local blast",
+	}, func(runCtx context.Context) (model.BlastJob, error) {
+		return localBlastRun(runCtx, c, req)
+	})
+}
 
+func localBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (model.BlastJob, error) {
+	if c == nil {
+		return model.BlastJob{}, fmt.Errorf("nil lemna client")
+	}
 	blastProg, err := normalizeProgram(req.Program)
 	if err != nil {
 		return model.BlastJob{}, err
@@ -78,101 +84,209 @@ func LocalBlastRun(ctx context.Context, c *Client, req model.BlastRequest) (mode
 	if job, ok := c.cachedLocalBlastJob(cacheKey); ok {
 		return job, nil
 	}
-
-	rel, err := c.releaseForSpecies(ctx, req.Species)
-	if err != nil {
-		return model.BlastJob{}, fmt.Errorf("resolve release metadata: %w", err)
-	}
-	fastaURL, dbType, dbKey, err := localBlastDatabase(rel, blastProg)
+	runner, err := NewLocalBlastRunner(ctx, c, req)
 	if err != nil {
 		return model.BlastJob{}, err
 	}
-
-	cacheDir, err := ensureCacheDir(req.Species.JBrowseName, rel.ReleaseDir)
+	job, err := runner.Run(ctx, req)
 	if err != nil {
-		return model.BlastJob{}, fmt.Errorf("ensure cache dir: %w", err)
-	}
-
-	if err := ensureBlastTools(blastProg); err != nil {
 		return model.BlastJob{}, err
 	}
-	progressctx.Report(ctx, 1, fmt.Sprintf("Preparing local %s FASTA and BLAST database...", strings.ToUpper(blastProg)))
+	c.mu.Lock()
+	c.localBlastJobCache[cacheKey] = job
+	c.mu.Unlock()
+	return job, nil
+}
 
-	fastaPath, err := downloadAndPrepareFasta(ctx, c, fastaURL, cacheDir)
-	if err != nil {
-		return model.BlastJob{}, fmt.Errorf("download FASTA: %w", err)
+type LocalBlastRunner struct {
+	c           *Client
+	prepared    localBlastPreparedResources
+	protToTrans map[string]string
+	transToGene map[string]string
+	ahrdMap     map[string]ahrdRecord
+}
+
+func NewLocalBlastRunner(ctx context.Context, c *Client, req model.BlastRequest) (*LocalBlastRunner, error) {
+	return phygoboost.RunTaskSpecValue(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "create lemna local blast runner",
+	}, func(runCtx context.Context) (*LocalBlastRunner, error) {
+		prepared, err := prepareLocalBlastResources(runCtx, c, req, false)
+		if err != nil {
+			return nil, err
+		}
+		runner := &LocalBlastRunner{
+			c:        c,
+			prepared: prepared,
+		}
+		type referenceResult struct {
+			protToTrans map[string]string
+			transToGene map[string]string
+			ahrdMap     map[string]ahrdRecord
+		}
+		results := make([]referenceResult, 2)
+		spec := phygoboost.ParallelSpec{Level: phygoboost.ExecManaged, Domain: "www.lemna.org", Description: "warm local blast references"}
+		_ = phygoboost.ParallelForSpec(runCtx, spec, len(results), func(parallelCtx context.Context, i int) error {
+			switch i {
+			case 0:
+				protToTrans, transToGene, err := c.cachedProteinTranscriptMaps(parallelCtx, prepared.Release)
+				if err == nil {
+					results[i] = referenceResult{protToTrans: protToTrans, transToGene: transToGene}
+				}
+			case 1:
+				ahrdMap, err := c.loadAHRDRecords(parallelCtx, prepared.Release)
+				if err == nil {
+					results[i] = referenceResult{ahrdMap: ahrdMap}
+				}
+			}
+			return parallelCtx.Err()
+		})
+		runner.protToTrans = results[0].protToTrans
+		runner.transToGene = results[0].transToGene
+		runner.ahrdMap = results[1].ahrdMap
+		if runner.protToTrans == nil {
+			runner.protToTrans = map[string]string{}
+		}
+		if runner.transToGene == nil {
+			runner.transToGene = map[string]string{}
+		}
+		if runner.ahrdMap == nil {
+			runner.ahrdMap = map[string]ahrdRecord{}
+		}
+		return runner, nil
+	})
+}
+
+func PrepareLocalBlast(ctx context.Context, c *Client, req model.BlastRequest) error {
+	return phygoboost.RunTaskSpec(ctx, phygoboost.TaskSpec{
+		Level:       phygoboost.ExecManaged,
+		Domain:      "www.lemna.org",
+		Description: "prepare lemna local blast",
+	}, func(runCtx context.Context) error {
+		_, err := prepareLocalBlastResources(runCtx, c, req, false)
+		return err
+	})
+}
+
+func (r *LocalBlastRunner) Run(ctx context.Context, req model.BlastRequest) (model.BlastJob, error) {
+	if r == nil || r.c == nil {
+		return model.BlastJob{}, fmt.Errorf("nil lemna local blast runner")
+	}
+	if strings.TrimSpace(req.Sequence) == "" {
+		return model.BlastJob{}, fmt.Errorf("empty query sequence")
 	}
 
-	dbPrefix, err := localBlastDBPrefix(cacheDir, dbType, dbKey)
-	if err != nil {
-		return model.BlastJob{}, fmt.Errorf("prepare BLAST database path: %w", err)
-	}
-	progressctx.Report(ctx, 60, fmt.Sprintf("Preparing local %s database...", strings.ToUpper(blastProg)))
-	if err := ensureBlastDBOnce(ctx, c, fastaPath, dbPrefix, dbType); err != nil {
-		return model.BlastJob{}, fmt.Errorf("makeblastdb: %w", err)
-	}
-
-	fastaIdx, err := c.cachedFastaIndex(fastaPath)
-	if err != nil {
-		return model.BlastJob{}, fmt.Errorf("build FASTA index: %w", err)
-	}
-
-	progressctx.Report(ctx, 80, fmt.Sprintf("Running local %s...", strings.ToUpper(blastProg)))
-	result, err := runBlastAndParse(ctx, blastProg, dbPrefix, fastaIdx, req)
+	prepared := r.prepared
+	progressctx.Report(ctx, 80, fmt.Sprintf("Running local %s...", strings.ToUpper(prepared.Program)))
+	result, err := runBlastAndParse(ctx, prepared.Program, prepared.DBPrefix, prepared.FastaIndex, req)
 	if err != nil {
 		return model.BlastJob{}, fmt.Errorf("run blast: %w", err)
 	}
-	progressctx.Report(ctx, 90, fmt.Sprintf("Parsed local %s results with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
+	progressctx.Report(ctx, 90, fmt.Sprintf("Parsed local %s results with %d hits.", strings.ToUpper(prepared.Program), len(result.Rows)))
 
 	if err := ctx.Err(); err != nil {
 		return model.BlastJob{}, err
 	}
 	progressctx.Report(ctx, 92, "Enriching local BLAST hits with Lemna release metadata...")
-	if protToTrans, transToGene, perr := c.cachedProteinTranscriptMaps(ctx, rel); perr == nil {
-		ahrdMap := map[string]ahrdRecord{}
-		progressctx.Report(ctx, 95, "Loading Lemna AHRD annotations for local BLAST hits...")
-		if recs, aerr := c.loadAHRDRecords(ctx, rel); aerr == nil {
-			ahrdMap = recs
-		}
+	if len(r.protToTrans) > 0 || len(r.transToGene) > 0 {
 		progressctx.Report(ctx, 98, "Applying Lemna gene, transcript, and annotation mappings...")
-		enrichBlastRowsWithMappings(rel, &result.Rows, ahrdMap, protToTrans, transToGene, fastaIdx)
-	} else {
+		enrichBlastRowsWithMappings(prepared.Release, &result.Rows, r.ahrdMap, r.protToTrans, r.transToGene, prepared.FastaIndex)
+	} else if len(r.ahrdMap) > 0 {
 		progressctx.Report(ctx, 96, "Loading fallback Lemna annotations for local BLAST hits...")
-		if ahrdMap, aerr := c.loadAHRDRecords(ctx, rel); aerr == nil && len(ahrdMap) > 0 {
-			enrichBlastRowsWithAHRD(result.Rows, ahrdMap)
-		}
+		enrichBlastRowsWithAHRD(result.Rows, r.ahrdMap)
 	}
 	if err := ctx.Err(); err != nil {
 		return model.BlastJob{}, err
 	}
-	progressctx.Report(ctx, 100, fmt.Sprintf("Local %s completed with %d hits.", strings.ToUpper(blastProg), len(result.Rows)))
+	progressctx.Report(ctx, 100, fmt.Sprintf("Local %s completed with %d hits.", strings.ToUpper(prepared.Program), len(result.Rows)))
 
-	// Construct a Job id and message
+	jobID := fmt.Sprintf("local-%d", time.Now().UnixNano())
 	job := model.BlastJob{
-		JobID:   fmt.Sprintf("local-%s-%d", req.Species.JBrowseName, time.Now().Unix()),
+		JobID:   jobID,
 		Message: "local BLAST completed",
 	}
-
-	// Attach results into the returned job via a side channel: we can't return
-	// BlastResult here in the Job type, but callers of LocalBlastRun are expected
-	// to call a parser or use the returned model.BlastResult (we also return it
-	// via a side-effect by saving to a cache file). To be practical, we'll save
-	// results to a result file in cacheDir and return job.JobID so caller can
-	// subsequently load or WaitForBlastResults can pick it up.
-	if err := saveBlastResultToCache(cacheDir, job.JobID, result); err != nil {
-		// Non-fatal: return job with warning message
-		job.Message = fmt.Sprintf("local BLAST completed; failed to cache results: %v", err)
+	result.JobID = jobID
+	if err := saveBlastResultToCache(prepared.CacheDir, jobID, result); err != nil {
+		return model.BlastJob{}, fmt.Errorf("cache local BLAST result: %w", err)
 	}
-	c.mu.Lock()
-	if c.localBlastJobCache == nil {
-		c.localBlastJobCache = make(map[string]model.BlastJob)
-	}
-	c.localBlastJobCache[cacheKey] = job
-	c.localResultsCache[job.JobID] = result
-	c.mu.Unlock()
-
-	// Return job (results cached)
+	r.c.mu.Lock()
+	r.c.localResultsCache[jobID] = result
+	r.c.mu.Unlock()
 	return job, nil
+}
+
+type localBlastPreparedResources struct {
+	Release    releaseInfo
+	CacheDir   string
+	FastaPath  string
+	DBPrefix   string
+	DBType     string
+	Program    string
+	FastaIndex map[string]fastaEntry
+}
+
+func prepareLocalBlastResources(ctx context.Context, c *Client, req model.BlastRequest, requireSequence bool) (localBlastPreparedResources, error) {
+	// Validate
+	if req.Species.JBrowseName == "" {
+		return localBlastPreparedResources{}, fmt.Errorf("missing species in BlastRequest")
+	}
+	if requireSequence && strings.TrimSpace(req.Sequence) == "" {
+		return localBlastPreparedResources{}, fmt.Errorf("empty query sequence")
+	}
+
+	blastProg, err := normalizeProgram(req.Program)
+	if err != nil {
+		return localBlastPreparedResources{}, err
+	}
+
+	rel, err := c.releaseForSpecies(ctx, req.Species)
+	if err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("resolve release metadata: %w", err)
+	}
+	fastaURL, dbType, dbKey, err := localBlastDatabase(rel, blastProg)
+	if err != nil {
+		return localBlastPreparedResources{}, err
+	}
+
+	cacheDir, err := ensureCacheDir(req.Species.JBrowseName, rel.ReleaseDir)
+	if err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("ensure cache dir: %w", err)
+	}
+
+	if err := ensureBlastTools(blastProg); err != nil {
+		return localBlastPreparedResources{}, err
+	}
+	progressctx.Report(ctx, 1, fmt.Sprintf("Preparing local %s FASTA and BLAST database...", strings.ToUpper(blastProg)))
+
+	fastaPath, err := downloadAndPrepareFasta(ctx, c, fastaURL, cacheDir)
+	if err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("download FASTA: %w", err)
+	}
+
+	dbPrefix, err := localBlastDBPrefix(cacheDir, dbType, dbKey)
+	if err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("prepare BLAST database path: %w", err)
+	}
+	progressctx.Report(ctx, 60, fmt.Sprintf("Preparing local %s database...", strings.ToUpper(blastProg)))
+	if err := ensureBlastDBOnce(ctx, c, fastaPath, dbPrefix, dbType); err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("makeblastdb: %w", err)
+	}
+
+	fastaIdx, err := c.cachedFastaIndex(fastaPath)
+	if err != nil {
+		return localBlastPreparedResources{}, fmt.Errorf("build FASTA index: %w", err)
+	}
+
+	return localBlastPreparedResources{
+		Release:    rel,
+		CacheDir:   cacheDir,
+		FastaPath:  fastaPath,
+		DBPrefix:   dbPrefix,
+		DBType:     dbType,
+		Program:    blastProg,
+		FastaIndex: fastaIdx,
+	}, nil
 }
 
 func (c *Client) cachedLocalBlastJob(cacheKey string) (model.BlastJob, bool) {
@@ -414,44 +528,53 @@ func downloadAndPrepareFasta(ctx context.Context, c *Client, url string, cacheDi
 			return path, nil
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return "", err
-		}
-		resp, err := c.baseHTTP.Do(req)
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("download %s: unexpected status %s", url, resp.Status)
-		}
+		if err := phygoboost.RunTaskSpec(ctx, phygoboost.TaskSpec{
+			Level:       phygoboost.ExecManaged,
+			Domain:      hostForRemoteFile(url),
+			Description: "download lemna local blast file",
+		}, func(runCtx context.Context) error {
+			req, err := http.NewRequestWithContext(runCtx, http.MethodGet, url, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := c.baseHTTP.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("download %s: unexpected status %s", url, resp.Status)
+			}
 
-		tmpPath := destPath + ".part"
-		out, err := os.Create(tmpPath)
-		if err != nil {
-			return "", err
-		}
-		progressctx.Report(ctx, 1, fmt.Sprintf("Downloading FASTA: %s", filepath.Base(destPath)))
-		if _, err := io.CopyBuffer(&localProgressWriter{
-			ctx:     ctx,
-			sink:    out,
-			total:   resp.ContentLength,
-			base:    1,
-			span:    39,
-			prefix:  fmt.Sprintf("Downloading FASTA %s", filepath.Base(destPath)),
-			lastPct: -1,
-		}, resp.Body, make([]byte, 1024*1024)); err != nil {
-			_ = out.Close()
-			_ = os.Remove(tmpPath)
-			return "", err
-		}
-		if err := out.Close(); err != nil {
-			_ = os.Remove(tmpPath)
-			return "", err
-		}
-		if err := os.Rename(tmpPath, destPath); err != nil {
-			_ = os.Remove(tmpPath)
+			tmpPath := destPath + ".part"
+			out, err := os.Create(tmpPath)
+			if err != nil {
+				return err
+			}
+			progressctx.Report(runCtx, 1, fmt.Sprintf("Downloading FASTA: %s", filepath.Base(destPath)))
+			if _, err := io.CopyBuffer(&localProgressWriter{
+				ctx:     runCtx,
+				sink:    out,
+				total:   resp.ContentLength,
+				base:    1,
+				span:    39,
+				prefix:  fmt.Sprintf("Downloading FASTA %s", filepath.Base(destPath)),
+				lastPct: -1,
+			}, resp.Body, make([]byte, 1024*1024)); err != nil {
+				_ = out.Close()
+				_ = os.Remove(tmpPath)
+				return err
+			}
+			if err := out.Close(); err != nil {
+				_ = os.Remove(tmpPath)
+				return err
+			}
+			if err := os.Rename(tmpPath, destPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return err
+			}
+			return nil
+		}); err != nil {
 			return "", err
 		}
 

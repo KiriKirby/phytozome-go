@@ -27,6 +27,7 @@ type sessionManifest struct {
 	CreatedAt     time.Time                  `json:"created_at"`
 	GlobalRunRoot bool                       `json:"global_run_root"`
 	Instances     map[string]sessionInstance `json:"instances"`
+	NextOrdinals  map[string]int             `json:"next_ordinals,omitempty"`
 }
 
 type sessionInstance struct {
@@ -72,6 +73,9 @@ func loadSessionManifest(runID string) (sessionManifest, error) {
 	}
 	if manifest.Instances == nil {
 		manifest.Instances = map[string]sessionInstance{}
+	}
+	if manifest.NextOrdinals == nil {
+		manifest.NextOrdinals = map[string]int{}
 	}
 	for key, inst := range manifest.Instances {
 		inst.InstanceID = strings.TrimSpace(inst.InstanceID)
@@ -202,6 +206,14 @@ func markGlobalRunRoot(runID string) error {
 }
 
 func nextSiblingOrdinal(manifest sessionManifest, parentID string) int {
+	if manifest.NextOrdinals == nil {
+		manifest.NextOrdinals = map[string]int{}
+	}
+	key := strings.TrimSpace(parentID)
+	if next := manifest.NextOrdinals[key]; next > 0 {
+		manifest.NextOrdinals[key] = next + 1
+		return next
+	}
 	maxOrdinal := 0
 	prefix := ""
 	if parentID != "" {
@@ -226,7 +238,9 @@ func nextSiblingOrdinal(manifest sessionManifest, parentID string) int {
 			maxOrdinal = n
 		}
 	}
-	return maxOrdinal + 1
+	next := maxOrdinal + 1
+	manifest.NextOrdinals[key] = next + 1
+	return next
 }
 
 func (w *BlastWizard) markInstanceActive() error {

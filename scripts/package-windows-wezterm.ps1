@@ -44,7 +44,6 @@ try {
 }
 
 & (Join-Path $PSScriptRoot "set-exe-icon.ps1") -ExePath (Join-Path $bundleDir "wezterm.bin") -IconPath (Join-Path $repoRoot "cmd\phytozome-go-winlauncher\phytozome-go.ico")
-Copy-Item -LiteralPath (Join-Path $bundleDir "wezterm.bin") -Destination (Join-Path $bundleDir "wezterm-cli.bin") -Force
 
 if (-not $SkipZip) {
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue

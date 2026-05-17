@@ -121,7 +121,7 @@ func TestEnsureLaunchSessionPreservesProvidedInstance(t *testing.T) {
 	}
 }
 
-func TestAllocateSessionInstanceReusesReleasedSiblingOrdinal(t *testing.T) {
+func TestAllocateSessionInstanceUsesNextSiblingOrdinalAfterRelease(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -156,12 +156,12 @@ func TestAllocateSessionInstanceReusesReleasedSiblingOrdinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate reused child: %v", err)
 	}
-	if reused.InstanceID != "1.1" {
-		t.Fatalf("reused child = %q, want 1.1", reused.InstanceID)
+	if reused.InstanceID != "1.2" {
+		t.Fatalf("reused child = %q, want 1.2", reused.InstanceID)
 	}
 }
 
-func TestAllocateRootSessionInstanceReusesReleasedRootOrdinal(t *testing.T) {
+func TestAllocateRootSessionInstanceUsesNextRootOrdinalAfterRelease(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -196,8 +196,8 @@ func TestAllocateRootSessionInstanceReusesReleasedRootOrdinal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate reused root: %v", err)
 	}
-	if reused.InstanceID != "2" {
-		t.Fatalf("reused root = %q, want 2", reused.InstanceID)
+	if reused.InstanceID != "3" {
+		t.Fatalf("reused root = %q, want 3", reused.InstanceID)
 	}
 	if root1.InstanceID != "1" {
 		t.Fatalf("root1 changed unexpectedly: %q", root1.InstanceID)

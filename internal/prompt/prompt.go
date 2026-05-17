@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"regexp"
 	"runtime"
@@ -27,22 +28,25 @@ import (
 )
 
 type Prompter struct {
-	out                 io.Writer
-	sessionPath         []string
-	blastProgramPath    string
+	out                   io.Writer
+	sessionPath           []string
+	blastProgramPath      string
 	homeNavigationEnabled bool
-	rowStates           map[string]tui.RowSelectionState
-	blastRunStates      map[string]tui.BlastRunSelectionState
-	keywordSelections   map[string][]bool
-	blastSelections     map[string][]bool
-	blastRunSelected    map[string][][]bool
-	blastFilterSettings model.BlastFilterSettings
-	blastFilterFlags    map[string][]bool
-	blastRunFilterFlags map[string][][]bool
-	loadKeywordFASTA    func(row model.KeywordResultRow) (string, error)
-	loadBlastFASTA      func(row model.BlastResultRow) (string, error)
-	detailFASTACache    map[string]string
+	rowStates             map[string]tui.RowSelectionState
+	blastRunStates        map[string]tui.BlastRunSelectionState
+	keywordSelections     map[string][]bool
+	blastSelections       map[string][]bool
+	blastRunSelected      map[string][][]bool
+	blastFilterSettings   model.BlastFilterSettings
+	blastFilterFlags      map[string][]bool
+	blastRunFilterFlags   map[string][][]bool
+	loadKeywordFASTA      func(row model.KeywordResultRow) (string, error)
+	loadBlastFASTA        func(row model.BlastResultRow) (string, error)
+	detailFASTACache      map[string]string
 }
+
+type FamilySearchProvider func(keyword string, scope []model.SpeciesCandidate) []model.SpeciesCandidate
+type FamilyChoiceLabelLoader func(query string, visible []model.SpeciesCandidate, refresh func([]model.SpeciesCandidate))
 
 var BlastFilterSuggest func(BlastFilterRequest) (BlastFilterSuggestion, error)
 
@@ -694,6 +698,22 @@ func (p *Prompter) SetDatabaseContext(database string) {
 	p.sessionPath = []string{database}
 }
 
+func (p *Prompter) PushSessionContext(parts ...string) func() {
+	if len(parts) == 0 {
+		return func() {}
+	}
+	previous := append([]string(nil), p.sessionPath...)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			p.sessionPath = append(p.sessionPath, part)
+		}
+	}
+	return func() {
+		p.sessionPath = previous
+	}
+}
+
 func (p *Prompter) SetBlastProgramContext(program string) {
 	p.blastProgramPath = strings.TrimSpace(program)
 }
@@ -764,6 +784,7 @@ func (p *Prompter) ChooseDatabase() (string, error) {
 		Choices: []tui.Choice{
 			{Value: "phytozome", Label: "phytozome", Description: p.t("original Phytozome workflow")},
 			{Value: "lemna", Label: "lemna", Description: p.t("lemna.org download-backed workflow")},
+			{Value: "tair", Label: "TAIR", Description: p.t("Arabidopsis TAIR workflow")},
 		},
 		AllowBack:   false,
 		AllowHome:   false,
@@ -814,6 +835,7 @@ func (p *Prompter) ChooseBlastTargetDatabase() (string, error) {
 		Choices: []tui.Choice{
 			{Value: "phytozome", Label: "phytozome", Description: p.t("original Phytozome workflow")},
 			{Value: "lemna", Label: "lemna", Description: p.t("lemna.org download-backed workflow")},
+			{Value: "tair", Label: "TAIR", Description: p.t("Arabidopsis TAIR workflow")},
 		},
 		AllowBack:   true,
 		AllowHome:   p.allowHome(true),
@@ -1030,6 +1052,42 @@ func (p *Prompter) SelectSpecies(candidates []model.SpeciesCandidate) (model.Spe
 	}
 	return candidates[index], nil
 
+}
+
+func (p *Prompter) SelectTAIRVersion(candidates []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
+	choices := make([]tui.Choice, 0, len(candidates))
+	for i, candidate := range candidates {
+		descriptionParts := []string{strings.TrimSpace(candidate.JBrowseName)}
+		if strings.TrimSpace(candidate.ReleaseDate) != "" {
+			descriptionParts = append(descriptionParts, strings.TrimSpace(candidate.ReleaseDate))
+		}
+		choices = append(choices, tui.Choice{
+			Value:       strconv.Itoa(i),
+			Label:       candidate.DisplayLabel(),
+			Description: strings.Join(descriptionParts, " | "),
+		})
+	}
+	result, err := tui.RunChoicePage(tui.ChoicePage{
+		Path:        p.tuiPath("Startup", "TAIR version selection"),
+		Title:       p.t("TAIR version selection"),
+		Description: p.t("Select one TAIR release version from the loaded candidates."),
+		Choices:     choices,
+		AllowBack:   true,
+		AllowHome:   p.allowHome(true),
+		ConfirmText: tui.ButtonSelect,
+		Hints:       []string{p.t("Up/Down choose version | Number keys select version")},
+	})
+	if err != nil {
+		return model.SpeciesCandidate{}, err
+	}
+	if navErr := tuiNavError(result.Nav, ErrBackToModeSelection); navErr != nil {
+		return model.SpeciesCandidate{}, navErr
+	}
+	index, err := strconv.Atoi(result.Value)
+	if err != nil || index < 0 || index >= len(candidates) {
+		return model.SpeciesCandidate{}, ErrExitRequested
+	}
+	return candidates[index], nil
 }
 
 func (p *Prompter) KeywordLabelNames(termCount int, backTarget error) ([]string, error) {
@@ -2749,6 +2807,407 @@ func (p *Prompter) SearchAndSelectSpecies(candidates []model.SpeciesCandidate, s
 
 }
 
+func (p *Prompter) SearchAndSelectFamily(candidates []model.SpeciesCandidate, searchFn func(string) []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
+	return p.SearchAndSelectFamilyWithProvider(candidates, func(keyword string, scope []model.SpeciesCandidate) []model.SpeciesCandidate {
+		if len(scope) == 0 {
+			return searchFn(keyword)
+		}
+		matches := searchFn(keyword)
+		allowed := make(map[string]model.SpeciesCandidate, len(scope))
+		for _, candidate := range scope {
+			allowed[familyCandidateStableKey(candidate)] = candidate
+		}
+		out := make([]model.SpeciesCandidate, 0, len(matches))
+		for _, candidate := range matches {
+			if scoped, ok := allowed[familyCandidateStableKey(candidate)]; ok {
+				out = append(out, scoped)
+			}
+		}
+		return out
+	}, nil)
+}
+
+func (p *Prompter) SearchAndSelectFamilyWithProvider(candidates []model.SpeciesCandidate, searchFn FamilySearchProvider, loader FamilyChoiceLabelLoader) (model.SpeciesCandidate, error) {
+	if candidate, ok, err := p.searchAndSelectFamilyHierarchical(candidates, searchFn, loader); ok || err != nil {
+		return candidate, err
+	}
+	choices := make([]tui.Choice, 0, len(candidates))
+	choiceByKey := make(map[string]model.SpeciesCandidate, len(candidates))
+	for i, candidate := range candidates {
+		key := strconv.Itoa(i)
+		choiceByKey[key] = candidate
+		choices = append(choices, tui.Choice{
+			Value:       key,
+			Label:       candidate.DisplayLabel(),
+			Description: strings.TrimSpace(candidate.JBrowseName + targetIDLabel(candidate.ProteomeID)),
+		})
+	}
+	result, err := tui.RunSearchPage(tui.SearchPage{
+		Path:        p.tuiPath("Startup", "TAIR family search"),
+		Title:       p.t("TAIR family search"),
+		Description: p.t("Search and select one TAIR family or subfamily on the same page."),
+		Label:       p.t("Keyword"),
+		Choices:     choices,
+		AllowBack:   true,
+		AllowHome:   p.allowHome(true),
+		Hints:       []string{p.t("Search family names or identifiers, then choose one candidate. Short names are shown first; full names stay in the candidate details.")},
+		Filter: func(query string, _ []tui.Choice) []tui.Choice {
+			matches := searchFn(query, candidates)
+			out := make([]tui.Choice, 0, len(matches))
+			for _, candidate := range matches {
+				for key, original := range choiceByKey {
+					if familyCandidateStableKey(original) == familyCandidateStableKey(candidate) {
+						out = append(out, tui.Choice{
+							Value:       key,
+							Label:       candidate.DisplayLabel(),
+							Description: strings.TrimSpace(candidate.JBrowseName + targetIDLabel(candidate.ProteomeID)),
+						})
+						break
+					}
+				}
+			}
+			return out
+		},
+		OnVisibleChoices: func(query string, visible []tui.Choice, refreshChoices func([]tui.Choice)) {
+			if loader == nil {
+				return
+			}
+			visibleCandidates := make([]model.SpeciesCandidate, 0, len(visible))
+			for _, choice := range visible {
+				if candidate, ok := choiceByKey[choice.Value]; ok {
+					visibleCandidates = append(visibleCandidates, candidate)
+				}
+			}
+			loader(query, visibleCandidates, func(updated []model.SpeciesCandidate) {
+				out := make([]tui.Choice, 0, len(updated))
+				for _, candidate := range updated {
+					for key, original := range choiceByKey {
+						if familyCandidateStableKey(original) == familyCandidateStableKey(candidate) {
+							choiceByKey[key] = candidate
+							out = append(out, tui.Choice{
+								Value:       key,
+								Label:       candidate.DisplayLabel(),
+								Description: strings.TrimSpace(candidate.JBrowseName + targetIDLabel(candidate.ProteomeID)),
+							})
+							break
+						}
+					}
+				}
+				refreshChoices(out)
+			})
+		},
+	})
+	if err != nil {
+		return model.SpeciesCandidate{}, err
+	}
+	if result.Nav == tui.NavBack || result.Nav == tui.NavHome {
+		return model.SpeciesCandidate{}, ErrBackToDatabaseSelection
+	}
+	if result.Nav == tui.NavExit {
+		return model.SpeciesCandidate{}, ErrExitRequested
+	}
+	candidate, ok := choiceByKey[result.Value]
+	if !ok {
+		return model.SpeciesCandidate{}, ErrExitRequested
+	}
+	return candidate, nil
+}
+
+func (p *Prompter) searchAndSelectFamilyHierarchical(candidates []model.SpeciesCandidate, searchFn FamilySearchProvider, loader FamilyChoiceLabelLoader) (model.SpeciesCandidate, bool, error) {
+	hasHierarchy := false
+	childrenByParent := make(map[string][]model.SpeciesCandidate)
+	roots := make([]model.SpeciesCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		groupKey := strings.TrimSpace(candidate.GroupKey)
+		if parent := strings.TrimSpace(candidate.ParentKey); parent != "" && groupKey != "" {
+			hasHierarchy = true
+			childrenByParent[parent] = append(childrenByParent[parent], candidate)
+			continue
+		}
+		roots = append(roots, candidate)
+		if candidate.HasChildren {
+			hasHierarchy = true
+		}
+	}
+	if !hasHierarchy || len(roots) == 0 {
+		return model.SpeciesCandidate{}, false, nil
+	}
+
+	sortFamilyCandidatesForHierarchy(roots)
+	for key := range childrenByParent {
+		sortFamilyCandidatesForHierarchy(childrenByParent[key])
+	}
+
+	current := roots
+	stack := make([][]model.SpeciesCandidate, 0, 4)
+	levelTitle := "top-level"
+	for {
+		choices, choiceByValue := familyChoicesFromCandidates(current)
+		result, err := tui.RunSearchPage(tui.SearchPage{
+			Path:        p.tuiPath("Startup", "TAIR family search", levelTitle),
+			Title:       p.t("TAIR family search"),
+			Description: p.t("Browse TAIR families one hierarchy level at a time. Choose a [group] entry to open subfamilies, or choose a leaf family to continue."),
+			Label:       p.t("Keyword"),
+			Choices:     choices,
+			AllowBack:   true,
+			AllowHome:   p.allowHome(true),
+			Hints: []string{
+				p.t("This page shows only one level of the family tree."),
+				p.t("Entries marked [group] open the next level; leaf entries go directly to the TAIR results table."),
+			},
+			Filter: func(query string, _ []tui.Choice) []tui.Choice {
+				query = strings.TrimSpace(query)
+				if query == "" {
+					filteredChoices, _ := familyChoicesFromCandidates(current)
+					return filteredChoices
+				}
+				filtered := searchFn(query, current)
+				sortFamilyCandidatesForHierarchy(filtered)
+				filteredChoices, _ := familyChoicesFromCandidates(filtered)
+				return filteredChoices
+			},
+			OnVisibleChoices: func(query string, visible []tui.Choice, refreshChoices func([]tui.Choice)) {
+				if loader == nil {
+					return
+				}
+				visibleCandidates := make([]model.SpeciesCandidate, 0, len(visible))
+				for _, choice := range visible {
+					if candidate, ok := choiceByValue[choice.Value]; ok {
+						visibleCandidates = append(visibleCandidates, candidate)
+					}
+				}
+				loader(query, visibleCandidates, func(updated []model.SpeciesCandidate) {
+					for _, candidate := range updated {
+						value := strings.TrimSpace(candidate.GroupKey)
+						if value == "" {
+							value = strings.TrimSpace(candidate.JBrowseName)
+						}
+						choiceByValue[value] = candidate
+					}
+					updatedChoices, _ := familyChoicesFromCandidates(updated)
+					refreshChoices(updatedChoices)
+				})
+			},
+		})
+		if err != nil {
+			return model.SpeciesCandidate{}, true, err
+		}
+		if result.Nav == tui.NavHome {
+			return model.SpeciesCandidate{}, true, ErrBackToDatabaseSelection
+		}
+		if result.Nav == tui.NavExit {
+			return model.SpeciesCandidate{}, true, ErrExitRequested
+		}
+		if result.Nav == tui.NavBack {
+			if len(stack) == 0 {
+				return model.SpeciesCandidate{}, true, ErrBackToDatabaseSelection
+			}
+			current = stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			levelTitle = "subfamilies"
+			continue
+		}
+		selected, ok := choiceByValue[result.Value]
+		if !ok {
+			return model.SpeciesCandidate{}, true, ErrExitRequested
+		}
+		children := childrenByParent[strings.TrimSpace(selected.GroupKey)]
+		if len(children) > 0 {
+			stack = append(stack, current)
+			current = children
+			levelTitle = strings.TrimSpace(selected.GenomeLabel)
+			continue
+		}
+		return selected, true, nil
+	}
+}
+
+func familyCandidateStableKey(candidate model.SpeciesCandidate) string {
+	return strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		firstNonEmptyText(candidate.GroupKey, candidate.JBrowseName),
+		strings.TrimSpace(candidate.ParentKey),
+		strings.TrimSpace(candidate.GenomeLabel),
+	}, "|")))
+}
+
+func familyChoicesFromCandidates(candidates []model.SpeciesCandidate) ([]tui.Choice, map[string]model.SpeciesCandidate) {
+	choices := make([]tui.Choice, 0, len(candidates))
+	choiceByValue := make(map[string]model.SpeciesCandidate, len(candidates))
+	for _, candidate := range candidates {
+		value := strings.TrimSpace(candidate.GroupKey)
+		if value == "" {
+			value = strings.TrimSpace(candidate.JBrowseName)
+		}
+		label := strings.TrimSpace(candidate.GenomeLabel)
+		if label == "" {
+			label = strings.TrimSpace(candidate.JBrowseName)
+		}
+		if labelName := strings.TrimSpace(candidate.LabelName); labelName != "" {
+			label += " [" + labelName + "]"
+		}
+		if candidate.HasChildren {
+			label += " [group]"
+		}
+		description := strings.TrimSpace(candidate.CommonName)
+		if fullName := strings.TrimSpace(candidate.JBrowseName); fullName != "" && !strings.EqualFold(fullName, label) {
+			if description != "" {
+				description = fullName + " | " + description
+			} else {
+				description = fullName
+			}
+		}
+		choices = append(choices, tui.Choice{
+			Value:       value,
+			Label:       label,
+			Description: description,
+		})
+		choiceByValue[value] = candidate
+	}
+	return choices, choiceByValue
+}
+
+func sortFamilyCandidatesForHierarchy(candidates []model.SpeciesCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+		if left.HasChildren != right.HasChildren {
+			return left.HasChildren
+		}
+		leftLabel := strings.ToLower(strings.TrimSpace(firstNonEmptyText(left.GenomeLabel, left.JBrowseName)))
+		rightLabel := strings.ToLower(strings.TrimSpace(firstNonEmptyText(right.GenomeLabel, right.JBrowseName)))
+		if leftLabel != rightLabel {
+			return leftLabel < rightLabel
+		}
+		leftCount := parseFamilyGeneCount(left.CommonName)
+		rightCount := parseFamilyGeneCount(right.CommonName)
+		if leftCount != rightCount {
+			return leftCount < rightCount
+		}
+		return strings.ToLower(strings.TrimSpace(left.JBrowseName)) < strings.ToLower(strings.TrimSpace(right.JBrowseName))
+	})
+}
+
+func familyFuzzyScore(candidate model.SpeciesCandidate, query string) float64 {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return 0
+	}
+	queryLower := strings.ToLower(query)
+	queryLoose := normalizeFamilySearchText(query)
+	if queryLoose == "" {
+		queryLoose = queryLower
+	}
+	fields := []string{
+		candidate.GenomeLabel,
+		candidate.JBrowseName,
+		candidate.CommonName,
+		candidate.SearchAlias,
+		candidate.GroupKey,
+		candidate.ParentKey,
+		candidate.LabelName,
+	}
+	score := 0.0
+	for index, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		fieldLower := strings.ToLower(field)
+		fieldLoose := normalizeFamilySearchText(field)
+		weight := math.Max(1, 7-float64(index))
+		switch {
+		case fieldLower == queryLower:
+			score += 200 * weight
+		case fieldLoose == queryLoose:
+			score += 170 * weight
+		case strings.HasPrefix(fieldLower, queryLower):
+			score += 120 * weight
+		case strings.HasPrefix(fieldLoose, queryLoose):
+			score += 100 * weight
+		case strings.Contains(fieldLower, queryLower):
+			score += 70 * weight
+		case strings.Contains(fieldLoose, queryLoose):
+			score += 55 * weight
+		default:
+			score += familySubsequenceScore(fieldLoose, queryLoose) * weight
+		}
+	}
+	score -= float64(len(strings.Fields(strings.ToLower(firstNonEmptyText(candidate.JBrowseName, candidate.GenomeLabel)))))
+	return score
+}
+
+func familySubsequenceScore(text string, query string) float64 {
+	text = strings.TrimSpace(text)
+	query = strings.TrimSpace(query)
+	if text == "" || query == "" {
+		return 0
+	}
+	textRunes := []rune(text)
+	queryRunes := []rune(query)
+	pos := 0
+	spanStart := -1
+	spanEnd := -1
+	matched := 0
+	for _, q := range queryRunes {
+		found := false
+		for pos < len(textRunes) {
+			if textRunes[pos] == q {
+				if spanStart < 0 {
+					spanStart = pos
+				}
+				spanEnd = pos
+				matched++
+				pos++
+				found = true
+				break
+			}
+			pos++
+		}
+		if !found {
+			break
+		}
+	}
+	if matched == 0 {
+		return 0
+	}
+	score := float64(matched * 8)
+	if matched == len(queryRunes) {
+		score += 25
+	}
+	if spanStart == 0 {
+		score += 12
+	}
+	if spanStart >= 0 && spanEnd >= spanStart {
+		span := spanEnd - spanStart + 1
+		score += math.Max(0, 12-float64(span-len(queryRunes)))
+	}
+	return score
+}
+
+func normalizeFamilySearchText(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func parseFamilyGeneCount(value string) int {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) == 0 {
+		return 0
+	}
+	count, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return 0
+	}
+	return count
+}
+
 func (p *Prompter) SequenceInput() (string, error) {
 	result, err := tui.RunMultiLinePage(tui.MultiLinePage{
 		Path:        p.blastTUIPath("BLAST input"),
@@ -2836,6 +3295,23 @@ func (p *Prompter) phytozomeContext() bool {
 	return false
 }
 
+func (p *Prompter) familyContext() bool {
+	for _, part := range p.sessionPath {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "family" || strings.Contains(part, "tair family") {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Prompter) keywordRowSelectionDescription() string {
+	if p.familyContext() {
+		return p.t("No rows are selected by default in TAIR family mode. Review the family result table and choose exactly the rows you want.")
+	}
+	return p.t("The first result under each search term is selected by default.")
+}
+
 func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (KeywordRowSelection, error) {
 	totalRows := countKeywordResultRows(groups)
 	selected := make([]bool, totalRows)
@@ -2866,12 +3342,20 @@ func (p *Prompter) SelectKeywordRows(groups []model.KeywordSearchGroup) (Keyword
 	stateKey := tableStateKey("keyword", columns, tableRows)
 	if cached, ok := p.keywordSelections[stateKey]; ok && len(cached) == totalRows {
 		selected = append([]bool(nil), cached...)
+	} else if !p.familyContext() {
+		offset := 0
+		for _, group := range groups {
+			if len(group.Rows) > 0 {
+				selected[offset] = true
+			}
+			offset += len(group.Rows)
+		}
 	}
 	for {
 		result, err := tui.RunRowSelectionPage(tui.RowSelectionPage{
 			Path:          p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "Row selection"),
 			Title:         p.t("Keyword results:"),
-			Description:   p.t("The first result under each search term is selected by default."),
+			Description:   p.keywordRowSelectionDescription(),
 			Columns:       columns,
 			Rows:          tableRows,
 			Selected:      selected,
@@ -5072,4 +5556,3 @@ func looksLikeURL(value string) bool {
 	}
 	return false
 }
-
