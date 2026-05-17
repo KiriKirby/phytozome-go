@@ -128,9 +128,12 @@ try {
         $env:GOARCH = $GOARCH
         $env:CGO_ENABLED = "0"
         go build -trimpath -ldflags="-X main.version=$BuildVersion" -o (Join-Path $appMacOSDir "phytozome-go.bin") .\cmd\phytozome-go
+        if ($LASTEXITCODE -ne 0) {
+            throw "go build darwin/$GOARCH phytozome-go failed"
+        }
         go build -trimpath -ldflags="-X main.version=$BuildVersion" -o $cleanCachePath .\cmd\phytozome-go-cleancache
         if ($LASTEXITCODE -ne 0) {
-            throw "go build darwin/$GOARCH failed"
+            throw "go build darwin/$GOARCH phytozome-go-cleancache failed"
         }
     } finally {
         if ($null -eq $oldGOOS) { Remove-Item -LiteralPath Env:\GOOS -ErrorAction SilentlyContinue } else { Set-Item -LiteralPath Env:\GOOS -Value $oldGOOS }

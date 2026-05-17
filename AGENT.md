@@ -536,9 +536,15 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
 - Whenever output paths, cache paths, batch behavior, or recovery commands change, update the README and this file in the same change.
 - Release packaging rules:
   - use the fixed release build template instead of hand-running ad hoc build commands:
-    - local artifact build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-release.ps1`
-    - GitHub release build after committing the intended changes: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-release.ps1 -Publish`
+    - Codex must directly use `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-codex.ps1`
+    - local artifact build: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-codex.ps1`
+    - GitHub release build after committing the intended changes: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-codex.ps1 -Publish`
     - optional explicit version format: `-BuildVersion vYYYYMMDDTHHMMSSZ`
+  - `scripts\build-codex.ps1` is the Codex-facing entrypoint and must stay as a thin wrapper around `scripts\build-release.ps1`; do not make Codex call scattered per-platform packaging commands directly for normal release builds
+  - single-platform development bundle helpers must stay symmetric across platforms:
+    - Windows: `scripts\build-windows-wezterm-dev.ps1`
+    - Linux: `scripts\build-linux-wezterm-dev.ps1`
+    - macOS: `scripts\build-macos-wezterm-dev.ps1`
   - `scripts\build-release.ps1` owns clearing `bin/`, rebuilding all supported release artifacts, validating package contents, extracting/verifying Windows icons, and writing `bin\SHA256SUMS.txt`
   - keep release assets aligned with the actual executable names documented in the README
   - all desktop release assets should use the bundled `WezTerm` runtime model instead of shipping bare `linux` or `darwin` binaries

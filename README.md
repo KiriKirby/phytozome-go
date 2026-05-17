@@ -89,8 +89,17 @@ Useful commands:
 # Build the Windows WezTerm bundle without zipping it
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-wezterm-dev.ps1
 
+# Build the Linux WezTerm bundle without archiving it
+powershell -ExecutionPolicy Bypass -File .\scripts\build-linux-wezterm-dev.ps1
+
+# Build the macOS WezTerm bundle without archiving it
+powershell -ExecutionPolicy Bypass -File .\scripts\build-macos-wezterm-dev.ps1 -GOARCH arm64
+
 # Package the Windows WezTerm bundle and zip it
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-wezterm.ps1 -BuildVersion dev
+
+# Build every release bundle through the same Codex/release entrypoint
+powershell -ExecutionPolicy Bypass -File .\scripts\build-codex.ps1
 
 # Launch the debug bundle in the bundled WezTerm terminal
 powershell -ExecutionPolicy Bypass -File .\scripts\run-wizard-external.ps1
@@ -98,6 +107,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-wizard-external.ps1
 
 What these scripts do:
 
+- `scripts\build-codex.ps1` is the Codex-facing wrapper for the full cross-platform release build and forwards to `scripts\build-release.ps1`
+- `scripts\build-linux-wezterm-dev.ps1` and `scripts\build-macos-wezterm-dev.ps1` mirror the Windows dev helper pattern for unarchived single-platform bundle staging
 - `scripts\prepare-windows-wezterm.ps1` downloads and prepares the selected WezTerm Windows runtime under `bin\tooling\windows-wezterm\`
 - `scripts\package-windows-wezterm.ps1` stages a distributable bundle in `bin\phytozome-go_windows_amd64_wezterm\`
 - `scripts\run-wizard-external.ps1` starts the bundled GUI launcher, which opens the cache cleaner first; the cleaner then opens `phytozome-go.bin` in a fresh tab and exits
