@@ -69,6 +69,12 @@
     return { item, row, key: `${item},${row}` };
   }
 
+  function parseDisplayPrefixCoordinate(value) {
+    const match = /^\[([1-9][0-9]*),([1-9][0-9]*)\]$/.exec(String(value || "").trim());
+    if (!match) return null;
+    return { item: Number.parseInt(match[1], 10), row: Number.parseInt(match[2], 10) };
+  }
+
   function parseRangeEndpoint(token, alignmentWidth, lineNumber, lineText) {
     if (token === "~") return null;
     if (!/^(0|[1-9][0-9]*)$/.test(token)) {
@@ -156,6 +162,17 @@
       normalized.sequence = String(row.sequence || "");
       normalized.canvas_item_index = Number.parseInt(row.canvas_item_index ?? row.canvasItemIndex, 10);
       normalized.canvas_row = Number.parseInt(row.canvas_row ?? row.canvasRow, 10);
+      // The DSL is a user-facing, one-based coordinate language.  Canvas keeps
+      // its indexes zero-based internally, so a record can legitimately carry
+      // both 0,0 machine coordinates and the visible [1,1] PHgo prefix.  The
+      // prefix is the canonical public coordinate whenever it is present; only
+      // falling back when numeric fields are absent made the first row (and every
+      // other zero-based coordinate) impossible to select from a valid script.
+      const coordinate = parseDisplayPrefixCoordinate(normalized.display_prefix);
+      if (coordinate) {
+        normalized.canvas_item_index = coordinate.item;
+        normalized.canvas_row = coordinate.row;
+      }
       normalized.state = String(row.state || "green").toLowerCase();
       out.push(normalized);
       if (Number.isFinite(normalized.canvas_item_index) && Number.isFinite(normalized.canvas_row)) {

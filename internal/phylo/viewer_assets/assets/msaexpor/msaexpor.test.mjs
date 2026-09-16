@@ -53,6 +53,36 @@ const model = {
 }
 
 {
+  const plan = api.parseAdvancedLayout(">1,1/1,2/1,3/1,4/1,5/1,6\\10,100", {
+    alignmentWidth: 300,
+    rows: [
+      { taxon_id: "one", display_prefix: "[1,1]", sequence: "A".repeat(300) },
+      { taxon_id: "two", display_prefix: "[1,2]", sequence: "A".repeat(300) },
+      { taxon_id: "three", display_prefix: "[1,3]", sequence: "A".repeat(300) },
+      { taxon_id: "four", display_prefix: "[1,4]", sequence: "A".repeat(300) },
+      { taxon_id: "five", display_prefix: "[1,5]", sequence: "A".repeat(300) },
+      { taxon_id: "six", display_prefix: "[1,6]", sequence: "A".repeat(300) }
+    ]
+  });
+  assert.equal(plan.blocks[0].rows.length, 6);
+}
+
+// Canvas stores row indexes internally as zero-based values while the MSA
+// labels and the documented DSL are one-based.  A live export model contains
+// both; the visible prefix must win so the script users see is usable verbatim.
+{
+  const plan = api.parseAdvancedLayout(">1,1/1,2\\0,10", {
+    alignmentWidth: 10,
+    rows: [
+      { taxon_id: "first", display_prefix: "[1,1]", canvas_item_index: 0, canvas_row: 0, sequence: "A".repeat(10) },
+      { taxon_id: "second", display_prefix: "[1,2]", canvas_item_index: 0, canvas_row: 1, sequence: "A".repeat(10) }
+    ]
+  });
+  assert.equal(plan.blocks[0].rows[0].taxon_id, "first");
+  assert.equal(plan.blocks[0].rows[1].taxon_id, "second");
+}
+
+{
   const plan = api.parseAdvancedLayout(">~\\10,100/~,~,~", model);
   assert.equal(plan.blocks.length, 3);
   assert.equal(plan.blocks[0].rows.length, rows.length);

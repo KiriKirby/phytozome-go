@@ -49,7 +49,7 @@ Meaning:
 - second exported row is PHgo coordinate `1,3`
 - third exported row is PHgo coordinate `1,6`
 
-PHgo coordinates map to `canvas_item_index,canvas_row` values from `metadata.records` and `/msa/selection`.
+PHgo coordinates are always the one-based coordinates shown in the MSA ID list. The `/msa/selection` API exposes matching one-based `canvas_item_index,canvas_row` values, while internal Canvas and legacy `metadata.records` indexes can remain zero-based. When both numeric fields and the canonical visible `display_prefix` exist, the exporter treats the prefix (for example `[1,4]`) as authoritative, so the script can always use the displayed coordinate verbatim.
 
 Rows are rendered in the exact order listed. Current Jalview visual sort order is ignored while advanced layout is enabled.
 

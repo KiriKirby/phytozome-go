@@ -891,7 +891,9 @@ func TestJalviewAlignedFASTAUsesRawDisplayNameAndSelectionKeepsCoordinatePrefix(
 	body := getViewerPayload(t, server.URL()+"/sessions/canvas/msa/selection")
 	if !strings.Contains(body, `"display_name":"Alpha name"`) ||
 		!strings.Contains(body, `"display_prefix":"[1,2]"`) ||
-		!strings.Contains(body, `"display_label":"[1,2] Alpha name"`) {
+		!strings.Contains(body, `"display_label":"[1,2] Alpha name"`) ||
+		!strings.Contains(body, `"canvas_item_index":1`) ||
+		!strings.Contains(body, `"canvas_row":2`) {
 		t.Fatalf("MSA selection should split raw display name and coordinate prefix: %s", body)
 	}
 }

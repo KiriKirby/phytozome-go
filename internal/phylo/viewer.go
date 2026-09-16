@@ -734,12 +734,15 @@ func (v *ViewerServer) handleMSASelectionGet(w http.ResponseWriter, r *http.Requ
 			state = "green"
 		}
 		rows = append(rows, row{
-			TaxonID:         taxonID,
-			DisplayName:     jalviewRecordDisplayName(record),
-			DisplayPrefix:   strings.TrimSpace(record.DisplayPrefix),
-			DisplayLabel:    inputRecordDisplayLabel(record),
-			CanvasItemIndex: record.CanvasItemIndex,
-			CanvasRow:       record.CanvasRow,
+			TaxonID:       taxonID,
+			DisplayName:   jalviewRecordDisplayName(record),
+			DisplayPrefix: strings.TrimSpace(record.DisplayPrefix),
+			DisplayLabel:  inputRecordDisplayLabel(record),
+			// The browser/DSL contract is one-based ([item,row]).  Keep the
+			// zero-based values inside InputRecord for Canvas operations, but do
+			// not leak them through the public MSA selection API.
+			CanvasItemIndex: record.CanvasItemIndex + 1,
+			CanvasRow:       record.CanvasRow + 1,
 			Index:           index,
 			State:           state,
 		})
