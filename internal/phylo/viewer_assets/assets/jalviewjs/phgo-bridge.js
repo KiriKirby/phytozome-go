@@ -1925,6 +1925,89 @@
     return "";
   }
 
+  function booleanFormatValue(value, fallback) {
+    const normalized = primitiveValue(value);
+    return typeof normalized === "boolean" ? normalized : fallback;
+  }
+
+  function formatFlag(owner, methods, fallback) {
+    return booleanFormatValue(callValue(owner, methods), fallback);
+  }
+
+  function sequenceGroupAt(alignment, seq, column) {
+    if (!alignment || !seq) return null;
+    let rawGroups = null;
+    try {
+      if (typeof alignment.findAllGroups$jalview_datamodel_SequenceI === "function") {
+        rawGroups = alignment.findAllGroups$jalview_datamodel_SequenceI(seq);
+      }
+    } catch (_error) {
+      return null;
+    }
+    const groups = javaListToArray(rawGroups, 5000);
+    for (const group of groups) {
+      const start = Number(primitiveValue(callValue(group, ["getStartRes$"])));
+      const end = Number(primitiveValue(callValue(group, ["getEndRes$"])));
+      if (Number.isFinite(start) && Number.isFinite(end) && start <= column && column <= end) return group;
+    }
+    return null;
+  }
+
+  function residueShaderColour(shader, seq, column) {
+    if (!shader || !seq) return null;
+    try {
+      const scheme = callValue(shader, ["getColourScheme$"]);
+      if (scheme == null) return null;
+      const residue = sequenceCharAt(seq, column);
+      if (typeof shader.findColour$C$I$jalview_datamodel_SequenceI === "function") {
+        return shader.findColour$C$I$jalview_datamodel_SequenceI(residue, column, seq);
+      }
+      if (typeof shader.findColour$ === "function") return shader.findColour$(residue, column, seq);
+    } catch (_error) {
+      // A missing colour scheme means the normal text colour remains authoritative.
+    }
+    return null;
+  }
+
+  function darkerColourHex(color, fallback) {
+    if (!color) return fallback;
+    try {
+      if (typeof color.darker$ === "function") return javaColorToHex(color.darker$(), fallback);
+    } catch (_error) {
+      // Use the original scheme colour when the Java colour helper is unavailable.
+    }
+    return javaColorToHex(color, fallback);
+  }
+
+  // Jalview's SequenceRenderer gives a SequenceGroup precedence over the
+  // viewport's Format menu state. Keep this decision independent of the export
+  // controls: Boxes controls fills, Text controls glyph visibility, and Colour
+  // Text controls the glyph colour (with Jalview's darker-on-boxes contrast).
+  function residueFormatStyle(viewport, alignment, seq, column) {
+    const group = sequenceGroupAt(alignment, seq, column);
+    const hasGroup = !!group;
+    const showBoxes = hasGroup
+      ? formatFlag(group, ["getDisplayBoxes$", "isDisplayBoxes$"], false)
+      : formatFlag(viewport, ["getShowBoxes$", "isShowBoxes$"], false);
+    const showText = hasGroup
+      ? formatFlag(group, ["getDisplayText$", "isDisplayText$"], true)
+      : formatFlag(viewport, ["getShowText$", "isShowText$"], true);
+    const colourText = hasGroup
+      ? formatFlag(group, ["getColourText$", "isColourText$"], false)
+      : formatFlag(viewport, ["getColourText$", "isColourText$"], false);
+    const shader = hasGroup
+      ? callValue(group, ["getGroupColourScheme$"])
+      : callValue(viewport, ["getResidueShading$"]);
+    const defaultText = hasGroup
+      ? javaColorToHex(callValue(group, ["getTextColour$"]), viewportTextColour(viewport))
+      : viewportTextColour(viewport);
+    const schemeColour = residueShaderColour(shader, seq, column);
+    const textFill = colourText && schemeColour
+      ? (showBoxes ? darkerColourHex(schemeColour, defaultText) : javaColorToHex(schemeColour, defaultText))
+      : defaultText;
+    return { showBoxes, showText, textFill };
+  }
+
   function viewportTextColour(viewport) {
     try {
       if (viewport && typeof viewport.getTextColour$ === "function") return javaColorToHex(viewport.getTextColour$(), "#111111");
@@ -2091,7 +2174,6 @@
     const previousExportActive = window.__PHGO_MSAEXPOR_RENDER_ACTIVE__;
     const font = viewportFontSpec(viewport);
     const textFill = viewportTextColour(viewport);
-    const showText = primitiveValue(callValue(viewport, ["getShowText$"])) !== false;
     const renderGaps = primitiveValue(callValue(viewport, ["isRenderGaps$"])) !== false;
     const parts = [
       `<svg xmlns="http://www.w3.org/2000/svg" width="${numberAttr(width)}" height="${numberAttr(height)}" viewBox="0 0 ${numberAttr(width)} ${numberAttr(height)}" data-msaexpor="1" data-msaexpor-renderer="jalview-vector">`,
@@ -2130,12 +2212,13 @@
             const ch = sequenceCharAt(seq, col);
             if (!ch) continue;
             const cellX = gridX + (col - start) * charWidth;
-            const fill = residueCellColour(seqCanvas, alignPanel, viewport, seq, col, exportSettings);
-            if (colorIsVisibleCellFill(fill)) {
+            const format = residueFormatStyle(viewport, alignment, seq, col);
+            const fill = format.showBoxes ? residueCellColour(seqCanvas, alignPanel, viewport, seq, col, exportSettings) : "";
+            if (format.showBoxes && colorIsVisibleCellFill(fill)) {
               addSVGRect(parts, cellX, rowY, charWidth, charHeight, { fill });
             }
-            if (showText && (renderGaps || (ch !== "-" && ch !== "."))) {
-              addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: textFill, className: "msaexpor-residue" });
+            if (format.showText && (renderGaps || (ch !== "-" && ch !== "."))) {
+              addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: format.textFill, className: "msaexpor-residue" });
             }
           }
           if (exportSettings.showRightResidueNumbers) {
@@ -2742,5 +2825,10 @@
     return api;
   }
 
-  window.PHGOJalviewBridge = { init };
+  // Kept deliberately small: this lets the vendored bridge's format semantics
+  // be regression-tested without a running SwingJS desktop.
+  window.PHGOJalviewBridge = {
+    init,
+    testHooks: { residueFormatStyle }
+  };
 })();

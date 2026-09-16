@@ -420,8 +420,14 @@ func TestMSAExporNativeVectorBridgeRenderingContract(t *testing.T) {
 		`const previousExportActive = window.__PHGO_MSAEXPOR_RENDER_ACTIVE__;`,
 		`bridge.__msaexporRenderSettings = exportSettings;`,
 		`window.__PHGO_MSAEXPOR_RENDER_ACTIVE__ = true;`,
-		`addSVGRect(parts, cellX, rowY, charWidth, charHeight, { fill });`,
-		`addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: textFill, className: "msaexpor-residue" });`,
+		`function residueFormatStyle(viewport, alignment, seq, column)`,
+		`function sequenceGroupAt(alignment, seq, column)`,
+		`function residueShaderColour(shader, seq, column)`,
+		`const format = residueFormatStyle(viewport, alignment, seq, col);`,
+		`const fill = format.showBoxes ? residueCellColour(seqCanvas, alignPanel, viewport, seq, col, exportSettings) : "";`,
+		`if (format.showBoxes && colorIsVisibleCellFill(fill)) {`,
+		`if (format.showText && (renderGaps || (ch !== "-" && ch !== "."))) {`,
+		`addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: format.textFill, className: "msaexpor-residue" });`,
 		`addGroupOutlines(parts, alignment, indexes, start, endExclusive, gridX, rowStartY, charWidth, charHeight);`,
 		`bridge.__msaexporRenderSettings = previousExportSettings;`,
 		`if (typeof previousExportActive !== "undefined") {`,
@@ -469,6 +475,20 @@ func TestMSAExporJavaScriptUnitTests(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "msaexpor tests passed") {
 		t.Fatalf("msaexpor JavaScript tests did not report success: %s", output)
+	}
+}
+
+func TestPHGOJalviewBridgeFormatJavaScriptUnitTests(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not available")
+	}
+	cmd := exec.Command("node", "viewer_assets/assets/jalviewjs/phgo-bridge.test.mjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("PHgo bridge format JavaScript tests failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "phgo bridge format tests passed") {
+		t.Fatalf("PHgo bridge format JavaScript tests did not report success: %s", output)
 	}
 }
 
