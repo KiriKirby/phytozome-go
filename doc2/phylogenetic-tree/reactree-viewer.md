@@ -128,6 +128,12 @@ Required preview fields:
 
 Browser-side Reactree controls are authoritative for interactive inspection and export. TUI-pushed configuration only seeds the initial state and current data payload.
 
+Node-edit commands use persistent modes. Reroot and Flip remain active after each
+completed node edit; Swap remains active after each completed sibling pair; and
+Color remains active after each color edit. Click the active command again to
+leave it, select another mode to switch modes, or press Escape to cancel the
+current mode. Midpoint and ladderize apply immediately and are not modes.
+
 PHgo viewer styling should prefer Reactree's official/default light theme. Overrides are limited to removing PHgo outer chrome, keeping the preview canvas white, preserving the blue accent family, hiding Reactree's vertical resize handle, and adding the horizontal alignment splitter.
 
 ## Live Update Rule

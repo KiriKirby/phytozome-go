@@ -2536,14 +2536,15 @@ function patchReactreeViewerPolishMJS(file) {
   const renderDepsOriginal = '  }, [treeData, containerH, hScale, vScale, fontScale, strokeWidth, layout, treeType, colorOverrides, theme, labelMode, alignLabels, truncateNames, collapsedNodes, collapseLabels, searchQuery, searchMatchIdx, showAlignment]);';
   const renderDepsRenderStyle = '  }, [treeData, containerH, hScale, vScale, fontScale, strokeWidth, layout, renderStyle, treeType, colorOverrides, theme, labelMode, alignLabels, truncateNames, collapsedNodes, collapseLabels, searchQuery, searchMatchIdx, showAlignment]);';
   const renderDepsRuntimeFont = '  }, [treeData, containerH, hScale, vScale, fontScale, fontFamily, strokeWidth, layout, renderStyle, treeType, colorOverrides, theme, labelMode, alignLabels, truncateNames, collapsedNodes, collapseLabels, searchQuery, searchMatchIdx, showAlignment]);';
-  if (!text.includes(renderDepsRuntimeFont)) {
+  const renderDepsPHGOLabels = '  }, [treeData, containerH, hScale, vScale, fontScale, fontFamily, strokeWidth, layout, renderStyle, treeType, colorOverrides, theme, labelMode, alignLabels, truncateNames, collapsedNodes, collapseLabels, searchQuery, searchMatchIdx, showAlignment, showPhgoCoords, labelMetadata]);';
+  if (!text.includes(renderDepsRuntimeFont) && !text.includes(renderDepsPHGOLabels)) {
     if (text.includes(renderDepsOriginal)) {
       replaceOnce(renderDepsOriginal, renderDepsRenderStyle, 'Reactree style render dependencies');
     }
     if (text.includes(renderDepsRenderStyle)) {
       replaceOnce(renderDepsRenderStyle, renderDepsRuntimeFont, 'Reactree tree font render dependencies');
     }
-    if (!text.includes(renderDepsRuntimeFont)) {
+    if (!text.includes(renderDepsRuntimeFont) && !text.includes(renderDepsPHGOLabels)) {
       throw new Error(`Reactree render dependencies anchor not found in ${file}`);
     }
   }
@@ -2567,6 +2568,40 @@ function patchReactreeViewerPolishMJS(file) {
 }
 
 patchReactreeViewerPolishMJS(join(packageRoot, 'dist', 'index.mjs'));
+
+function patchReactreePersistentEditModes(file) {
+  let text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+  const originalText = text;
+  const replacements = [
+    [
+      '      setTooltip(null);\n      setRerootMode(false);\n      dispatch({ type: "REROOT", newData: buildRerooted(d, null) });',
+      '      setTooltip(null);\n      dispatch({ type: "REROOT", newData: buildRerooted(d, null) });',
+    ],
+    [
+      '      setTooltip(null);\n      setFlipMode(false);\n      dispatch({ type: "FLIP", newData: rebuildWithFlip(root, d) });',
+      '      setTooltip(null);\n      dispatch({ type: "FLIP", newData: rebuildWithFlip(root, d) });',
+    ],
+    [
+      '        setTooltip(null);\n        setSwapFirst(null);\n        setSwapMode(false);\n        dispatch({ type: "SWAP", newData: rebuildWithSwap(root, first, d) });',
+      '        setTooltip(null);\n        setSwapFirst(null);\n        dispatch({ type: "SWAP", newData: rebuildWithSwap(root, first, d) });',
+    ],
+  ];
+  for (const [original, replacement] of replacements) {
+    if (text.includes(original)) {
+      text = text.replace(original, replacement);
+    } else if (!text.includes(replacement)) {
+      throw new Error(`Reactree persistent edit-mode anchor not found in ${file}`);
+    }
+  }
+  if (text !== originalText) {
+    writeFileSync(file, text);
+    console.log(`Patched Reactree persistent edit modes: ${file}`);
+  } else {
+    console.log(`Reactree persistent edit modes already present: ${file}`);
+  }
+}
+
+patchReactreePersistentEditModes(join(packageRoot, 'dist', 'index.mjs'));
 
 function patchReactreeOfficeRibbonMJS(file) {
   let text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n');

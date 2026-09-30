@@ -258,6 +258,12 @@ load so stale browser reroot/flip state cannot hide the MEGA-default preview.
 Standalone `.pgv` sessions keep their saved Reactree tree state because opening
 that file is an explicit snapshot-restore action.
 
+Reactree's node-edit commands have two interaction categories. Reroot, Flip,
+Swap, and Color are persistent modes: completing a valid node edit preserves the
+active command so the user can continue editing. The active command itself,
+another mode command, or Escape exits that mode. Midpoint rerooting and
+ladderizing are immediate actions and do not establish a persistent mode.
+
 ## Audit Requirements
 
 - Maintain an explicit mapping/gap table for every MEGA Tree Explorer display
