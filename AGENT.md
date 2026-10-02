@@ -968,6 +968,20 @@ Priority 4 (low / optional)
 - Lemna local BLAST FASTA assets should live under `.cache/lemna/localblast/<jbrowseName>/<release>/`. BLAST database index files may use `.cache/lemna/localblastdb/<dbtype_hash>/` when the species/release cache path would make Windows BLAST+ output prefixes too long; `makeblastdb` itself should build in a short OS temp directory and then move complete DB files into the app-local cache.
 - Persistent Phytozome caches should live under `.cache/phytozome/...`.
 
+## Documentation Center
+
+- The public static Documentation Center is rooted at `docs/dc.html`. Its topic
+  pages live under `docs/dc/` and retain the legacy layout in
+  `docs/dc/dc_sample.html`.
+- `docs/dc/CONTENT_MODEL.md` defines the navigation and writing contract.
+  `docs/dc/generate-docs.js` is the maintainable source for generated overview
+  and topic pages; run `node docs/dc/generate-docs.js` after changing its topic
+  data, then verify internal links and `git diff --check`.
+- Documentation must distinguish released behavior from planned behavior. In
+  particular, system-tree computation is Windows-amd64-only, the Symbol Name
+  database is installed from a prebuilt manifest/release-asset path, and no
+  numeric public error-code registry exists.
+
 ## Current implementation status
 
 - Done:
