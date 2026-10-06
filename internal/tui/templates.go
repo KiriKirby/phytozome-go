@@ -4702,9 +4702,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		updateAliasButtonVisibility()
 	})
 	body.AddItem(modeText, 1, 0, false)
-	shortcutHint := "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+	shortcutHint := "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
 	if page.LoadAliases != nil && page.ApplyAlias != nil {
-		shortcutHint = "Ctrl+A selects all | Ctrl+N clears all | Ctrl+F opens filter when available | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+		shortcutHint = "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens filter when available | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
 	}
 	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", shortcutHint))
 
@@ -4806,11 +4806,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			syncVisibleSelectionMarkers()
 			setSelectionHeader()
 			return nil
-		case tcell.KeyCtrlN:
-			setAll(selected, false)
-			syncVisibleSelectionMarkers()
-			setSelectionHeader()
-			return nil
 		case tcell.KeyCtrlF:
 			if page.AllowFilter {
 				requestFilter()
@@ -4890,6 +4885,12 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				return nil
 			}
 		case tcell.KeyRune:
+			if shortcutMatchesEvent(ShortcutClear, event) {
+				setAll(selected, false)
+				syncVisibleSelectionMarkers()
+				setSelectionHeader()
+				return nil
+			}
 			if event.Rune() == ' ' {
 				toggleCurrent()
 				return nil
@@ -6913,15 +6914,6 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				refreshList()
 			}
 			return nil
-		case tcell.KeyCtrlN:
-			if len(currentSelected()) > 0 {
-				setAll(currentSelected(), false)
-				setAll(currentMSAFlags(), false)
-				syncVisibleSelectionMarkers()
-				setSelectionHeader()
-				refreshList()
-			}
-			return nil
 		case tcell.KeyCtrlF:
 			if page.AllowFilter {
 				requestFilter()
@@ -6992,6 +6984,16 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				return nil
 			}
 		case tcell.KeyRune:
+			if shortcutMatchesEvent(ShortcutClear, event) {
+				if len(currentSelected()) > 0 {
+					setAll(currentSelected(), false)
+					setAll(currentMSAFlags(), false)
+					syncVisibleSelectionMarkers()
+					setSelectionHeader()
+					refreshList()
+				}
+				return nil
+			}
 			if event.Rune() == ' ' {
 				toggleCurrent()
 				return nil
@@ -9629,7 +9631,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 
 	actionButtons := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; app.Stop() }, Visible: page.AllowBack},
-		buttonSpec{Label: "New group", Shortcut: "Ctrl+N", Action: createGroup, Visible: true},
+		buttonSpec{Label: "New group", Shortcut: "Ctrl+Shift+N", Action: createGroup, Visible: true},
 		buttonSpec{Label: "Rename", Shortcut: "F2", Action: renameSelected, Visible: true},
 		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: showSelectedAliases, Visible: true},
 		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: removeOrDeleteSelected, Visible: true},
@@ -9637,7 +9639,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+N creates a group. Ctrl+Enter applies."})
+	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+Shift+N creates a group. Ctrl+Enter applies."})
 
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
 	refreshGroupedList()
@@ -9720,7 +9722,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				return nil
 			}
 		}
-		if event.Key() == tcell.KeyCtrlN {
+		if shortcutMatchesEvent("Ctrl+Shift+N", event) {
 			createGroup()
 			return nil
 		}
@@ -13633,8 +13635,6 @@ func isCtrlEnter(event *tcell.EventKey) bool {
 		return false
 	}
 	switch event.Key() {
-	case tcell.KeyCtrlJ:
-		return true
 	case tcell.KeyEnter:
 		return event.Modifiers()&tcell.ModCtrl != 0
 	default:
@@ -13952,7 +13952,7 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 	case "esc", "escape":
 		return !wantCtrl && !wantShift && event.Key() == tcell.KeyEscape
 	case "enter":
-		if wantCtrl && !wantShift {
+		if wantCtrl {
 			return isCtrlEnter(event)
 		}
 		return event.Key() == tcell.KeyEnter && ((event.Modifiers()&tcell.ModCtrl) != 0) == wantCtrl && ((event.Modifiers()&tcell.ModShift) != 0) == wantShift
@@ -13990,13 +13990,19 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 		case "h":
 			return event.Key() == tcell.KeyCtrlH
 		case "j":
-			return event.Key() == tcell.KeyCtrlJ
+			return event.Key() == tcell.KeyCtrlJ && !strings.EqualFold(keyName, "enter")
 		case "k":
 			return event.Key() == tcell.KeyCtrlK
 		case "l":
 			return event.Key() == tcell.KeyCtrlL
 		case "n":
-			return event.Key() == tcell.KeyCtrlN
+			// Bare Ctrl+N is intentionally not a valid application shortcut;
+			// terminals may emit it while streaming multiline paste.
+			return false
+		case "m":
+			// Ctrl+M is carriage return in terminal input and must never be
+			// bound as an application shortcut.
+			return false
 		case "o":
 			return event.Key() == tcell.KeyCtrlO
 		case "r":

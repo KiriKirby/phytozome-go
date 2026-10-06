@@ -1977,7 +1977,7 @@ func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T
 func TestFamilyBlastCustomizeModalCtrlEnterAppliesFromListFocus(t *testing.T) {
 	for _, event := range []*tcell.EventKey{
 		tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl),
-		tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0),
+		tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl),
 	} {
 		app := newApp()
 		var result FamilyBlastResult
@@ -2075,14 +2075,17 @@ func TestCtrlEnterShortcutRequiresCtrlModifiedEnter(t *testing.T) {
 	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)) {
 		t.Fatal("Ctrl+Enter should match KeyEnter with Ctrl modifier")
 	}
-	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
-		t.Fatal("Ctrl+Enter should match KeyCtrlJ fallback")
+	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
+		t.Fatal("Ctrl+Enter must not match Ctrl+J, which is emitted by multiline paste")
 	}
 	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, 0)) {
 		t.Fatal("Ctrl+Enter should not match plain Enter")
 	}
-	if !isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
-		t.Fatal("KeyCtrlJ should be treated as Ctrl+Enter fallback")
+	if isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
+		t.Fatal("KeyCtrlJ must not be treated as Ctrl+Enter")
+	}
+	if isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlM, 0, 0)) {
+		t.Fatal("KeyCtrlM must not be treated as Ctrl+Enter")
 	}
 }
 

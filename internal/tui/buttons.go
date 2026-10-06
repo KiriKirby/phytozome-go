@@ -42,16 +42,18 @@ const (
 )
 
 const (
-	ShortcutBack        = "Esc"
-	ShortcutHome        = "Ctrl+O"
-	ShortcutConfirm     = "Enter"
-	ShortcutApply       = "Enter"
-	ShortcutPaste       = "Ctrl+V"
-	ShortcutOpenFile    = "Ctrl+F"
-	ShortcutCancel      = "Esc"
-	ShortcutAuto        = "Enter"
-	ShortcutSelectAll   = "Ctrl+A"
-	ShortcutClear       = "Ctrl+N"
+	ShortcutBack      = "Esc"
+	ShortcutHome      = "Ctrl+O"
+	ShortcutConfirm   = "Enter"
+	ShortcutApply     = "Enter"
+	ShortcutPaste     = "Ctrl+V"
+	ShortcutOpenFile  = "Ctrl+F"
+	ShortcutCancel    = "Esc"
+	ShortcutAuto      = "Enter"
+	ShortcutSelectAll = "Ctrl+A"
+	// Ctrl+N can be emitted as a line-feed/control character during
+	// bracketed multiline paste. Keep clear actions off that key.
+	ShortcutClear       = "Ctrl+Shift+N"
 	ShortcutClearFilter = "Ctrl+L"
 	ShortcutToggle      = "Space"
 	ShortcutCopy        = "Ctrl+Y"
