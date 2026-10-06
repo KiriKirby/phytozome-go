@@ -1,6 +1,10 @@
 # phytozome GO
 
-![phytozome GO](https://kirikirby.github.io/phytozome-go/images/video.gif)
+<p align="center">
+  <a href="https://kirikirby.github.io/phytozome-go/">
+    <img src="https://img.shields.io/badge/Visit%20the%20phytozome%20GO%20website-275317?style=for-the-badge" alt="Visit the phytozome GO website">
+  </a>
+</p>
 
 <p align="center">
   <a href="https://github.com/KiriKirby/phytozome-go/releases"><img src="https://img.shields.io/github/v/release/KiriKirby/phytozome-go?label=release" alt="Latest release"></a>
@@ -377,6 +381,8 @@ This software is released to everyone under the **Common Public Attribution Lice
 But open source does not mean that the author must remain silent about every user and every use of the software.
 
 The author explicitly rejects a research culture that ranks researchers in a rigid hierarchy, measures the value of research by institutional prestige and capital interests, and sacrifices the rights of ordinary workers for the benefit of the privileged. In particular, the author openly opposes and condemns those who work at RIKEN yet look down on researchers at other institutions from a position of arrogance; who stand with management and capital while suppressing or belittling the workers around them; and who act as strikebreakers against the interests of those workers.
+
+For the author's detailed statement concerning RIKEN and this political position, see the [RIKEN statement](https://kirikirby.github.io/phytozome-go/riken).
 
 If you work at RIKEN, the author asks you to look seriously at the workers around you first: researchers, technicians, administrative staff, contract workers, postdoctoral researchers, students, and everyone else whose labor keeps the research system running. Instead of standing with the privileged to defend hierarchy, stand with the workers around you to fight for better working conditions, fairer treatment, and a workplace with dignity.
 
