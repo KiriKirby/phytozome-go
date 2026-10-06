@@ -1,678 +1,407 @@
 # phytozome GO
 
-`phytozome GO` is a cross-platform interactive CLI for two closely related jobs:
+<p align="center">
+  <img src="docs/logo3large.png" alt="phytozome GO" width="520">
+</p>
 
-- searching `Phytozome` genomes with keyword or BLAST workflows
-- searching `lemna.org` releases with a matching wizard-style workflow
+<p align="center">
+  <a href="https://github.com/KiriKirby/phytozome-go/releases"><img src="https://img.shields.io/github/v/release/KiriKirby/phytozome-go?label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-CPAL--1.0-275317" alt="CPAL-1.0 license"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26.3-00ADD8?logo=go" alt="Go 1.26.3"></a>
+  <a href="https://kirikirby.github.io/phytozome-go/dc.html"><img src="https://img.shields.io/badge/docs-Documentation%20Center-275317" alt="Documentation Center"></a>
+</p>
 
-The program is designed for real biological work where you often need to move from one known gene or protein to a shortlist of homologs, review rows interactively, and export both a table and peptide sequences without hand-copying between websites.
+**phytozome GO** is a terminal-native research workbench for finding, comparing,
+curating, and exporting plant gene and sequence records. It joins source-aware
+keyword search, BLAST, result review, local annotation-aware identifier handling,
+Canvas curation, and optional phylogenetic-tree and multiple-sequence-alignment
+work into one reproducible desktop workflow.
 
-![phytozome GO logo](docs/logo3large.png)
+It is designed for a common comparative-genomics path: start from a gene,
+protein, FASTA record, or source URL; find candidate records in a selected
+database release; review evidence in tables; export data and sequences; and carry
+the selected records into a Canvas for further analysis. The interface is a TUI
+(terminal user interface), with local browser pages used where an interactive tree
+or alignment viewer is the appropriate tool.
 
-## What This Tool Is For
+> **Scope notice.** phytozome GO is an independent open-source client. It is not
+> affiliated with or endorsed by Phytozome, JGI, lemna.org, TAIR, NCBI, PLAZA,
+> UniProt, InterPro, MEGA, Jalview, or any other data/service provider.
 
-This tool is useful when you are doing work like:
+## Contents
 
-- starting from `LOC_Os03g11614.1` in *Oryza sativa* and finding homologs in a selected `lemna.org` release
-- searching several flowering regulator genes together and exporting one result package per query
-- searching a species by keyword, selecting good candidate genes, then copying the generated link list into BLAST mode
-- switching between `Phytozome` and `lemna.org` without learning two different command-line interfaces
+- [Why phytozome GO](#why-phytozome-go)
+- [Core capabilities](#core-capabilities)
+- [Supported sources and provenance](#supported-sources-and-provenance)
+- [Install and launch](#install-and-launch)
+- [Quick start](#quick-start)
+- [Scientific workflow](#scientific-workflow)
+- [Outputs and reproducibility](#outputs-and-reproducibility)
+- [Platform support and requirements](#platform-support-and-requirements)
+- [Documentation](#documentation)
+- [Development](#development)
+- [Citation](#citation)
+- [License and third-party components](#license-and-third-party-components)
 
-The wizard keeps the same broad experience across both databases:
+## Why phytozome GO
 
-- choose database
-- choose mode
-- choose species
-- provide query input
-- review results
-- select rows
-- export Excel and peptide FASTA files
+Comparative sequence work often spans sources with different release policies,
+identifier systems, query capabilities, and data-download layouts. A browser-only
+workflow makes it easy to lose the selected release, source fields, input order,
+or the exact subset exported for follow-up analysis.
 
-## Supported Databases
+phytozome GO provides:
 
-### `phytozome`
+- one interactive workflow for keyword search, BLAST, result selection, and
+  export;
+- source- and release-aware retrieval rather than hidden cross-source fallback;
+- grouped result review that preserves original input terms and multi-query BLAST
+  context;
+- a local, validated Symbol Name database for alias ranking without submitting
+  identifiers to a separate name-matching service;
+- cached downloads, request coalescing, and bounded concurrency for practical
+  work with remote biological data services;
+- portable exports and `.pgo` snapshots that preserve work already performed.
 
-Use this when you want the original Phytozome-backed workflow.
+The program does not claim that sequence similarity, a symbol alias, or an
+automatically selected row establishes orthology, gene family membership, or
+biological function. Those remain research decisions that require source-aware
+interpretation and appropriate downstream validation.
 
-Typical use cases:
+## Core capabilities
 
-- exact gene ID search such as `Glyma.01G000100`
-- transcript or protein lookups from Phytozome report URLs
-- BLAST against a selected Phytozome proteome/genome
+| Area | What phytozome GO provides |
+| --- | --- |
+| **Keyword search** | Batched, grouped search for identifiers, loci, symbols, and annotations; source-specific exact, wide, and broad paths; row details; selection; and source-aware provenance. |
+| **BLAST** | `blastn`, `blastx`, `tblastn`, and `blastp` when supported by the selected target; online-first execution where reliable; selected-release local BLAST+ fallback when official FASTA is available. |
+| **Result review** | Selectable keyword and BLAST tables, multi-run BLAST review, detailed fields, complete aliases in details/exports, and biologically explicit identifiers. |
+| **Symbol names** | Validated prebuilt `symbolname.pgd` installation and local alias ranking from structured source metadata. A missing match remains blank; the application does not invent a name. |
+| **Canvas** | A curated sequence workspace combining FASTA imports, keyword rows, and BLAST rows for export, tree analysis, and MSA. |
+| **Phylogenetics** | Windows-amd64 system-tree workflow using the bundled `mega-phgo-runtime`, with MEGA-backed alignment/inference, Reactree preview, and shared Canvas state. |
+| **MSA** | A local JalviewJS-based alignment workspace after a successful Canvas tree refresh, with durable MSA state and PHgo-owned SVG/PNG/PDF image export. |
+| **Reproducibility** | XLSX, FASTA, PDF report, and `.pgo` session-snapshot output; snapshots preserve workflow state and selected generated artifacts rather than silently rerunning a search. |
 
-### `lemna`
+## Supported sources and provenance
 
-Use this when you want the `lemna.org` workflow.
+The selected database and release are part of the result context. phytozome GO
+does not silently replace a selected versioned release with a different source
+when a lookup fails.
 
-Important behavior:
+| Source path | Current role |
+| --- | --- |
+| **Phytozome** | Primary source-backed keyword and sequence workflows. Provider-specific acquisition/parsing is isolated from the shared workflow. |
+| **lemna.org** | Download-backed species/release discovery, GFF3/AHRD/FASTA keyword workflow, and capability-aware BLAST. The public `download/` releases are authoritative; the homepage is used only to identify official clones. |
+| **TAIR** | Selected-release Arabidopsis workflows. Versioned keyword, sequence, and local-BLAST work uses only the configured official assets for that release. TAIR12 follows its documented ENA project path; unavailable bulk assets remain unavailable rather than being substituted. |
+| **NCBI and PLAZA** | Source-specific paths support documented NCBI search types and PLAZA Gene locus priority. PLAZA results retain `plaza_*` provenance and are identified as PLAZA-derived. |
 
-- species come from `https://www.lemna.org/download/`
-- the homepage clone list is only used to mark official clones
-- keyword search is backed by release `GFF3`, `AHRD`, and FASTA assets
-- BLAST will use server-side paths when reliable, then fall back to local BLAST when needed
+External references can enrich a result, but the primary source database remains
+visible in `source_database`. A row-level report URL is stored only when the
+source supplied that exact row URL; the application does not generate a plausible
+web URL from an identifier.
 
-## Install And Run
+### Identifier and alias policy
 
-Download the release asset for your platform from GitHub Releases and extract it.
+`geneid`, `protein_id`, and transcript identifiers are distinct biological fields
+and are presented as such. `phgo_alias` is the ranked alias list produced by the
+local Symbol Name system; it is not the source database's raw `alias`, `symbols`,
+or `synonyms` field. Table cells abbreviate long alias lists for readability, but
+details, reports, snapshots, and exports retain full stored values.
 
-Examples:
+## Install and launch
+
+### Recommended installation: release bundle
+
+Download the archive for your platform from
+[GitHub Releases](https://github.com/KiriKirby/phytozome-go/releases), extract
+the **entire** bundle to a writable local directory, and launch it from there.
+Do not run the executable directly from an archive or separate it from its
+companion files.
+
+| Platform | Release bundle | Launch |
+| --- | --- | --- |
+| Windows amd64 | `phytozome-go_windows_amd64_wezterm.zip` | Run `phytozome-go.exe`. |
+| Linux amd64 | `phytozome-go_linux_amd64_wezterm.tar.gz` | Run `./phytozome-go` from the extracted bundle. |
+| macOS Intel | `phytozome-go_macos_amd64_wezterm.tar.gz` | Open `phytozome GO.app`. |
+| macOS Apple Silicon | `phytozome-go_macos_arm64_wezterm.tar.gz` | Open `phytozome GO.app`. |
+
+Reserve at least **50 GB** of free local storage if you expect to install the
+Symbol Name database, cache source releases, build local BLAST databases, or keep
+tree artifacts. A fast local disk is strongly recommended. On Windows, create a
+shortcut to the executable if desired, but leave the bundle directory intact.
+
+At packaged startup, the helper initializes the application-local cache, can
+check GitHub Releases for an updated bundle, and can offer the prebuilt Symbol
+Name database. Updates require consent; accepted updates preserve user output and
+validate the replacement bundle before relaunching.
+
+### Command-line entry points
+
+The normal launch opens the interactive TUI. The executable also supports:
 
 ```text
-Windows:
-Run `phytozome-go.exe` from the extracted `phytozome-go_windows_amd64_wezterm.zip` bundle
-
-Linux:
-Run `./phytozome-go` from the extracted `phytozome-go_linux_amd64_wezterm.tar.gz` bundle
-
-macOS Intel:
-Open `phytozome GO.app` from `phytozome-go_macos_amd64_wezterm.tar.gz`
-
-macOS Apple Silicon:
-Open `phytozome GO.app` from `phytozome-go_macos_arm64_wezterm.tar.gz`
+phytozome-go version
+phytozome-go blast plan
+phytozome-go blast wizard
 ```
 
-All release bundles now ship with a bundled `WezTerm` runtime. The Windows `amd64` bundle also ships with the PHgo tree runtime files directly at the app root as `.bin` files, so Canvas system-tree analysis works without any extra runtime download step and without an extra runtime subfolder. Linux and macOS releases do not bundle PHgo system-tree runtime support yet, and system-tree on those platforms reports unsupported. Opening the packaged app starts `phgohelper.bin` in tab `[0]`; the helper clears `.cache/`, checks for app updates, and checks the local `symbolname.pgd` database before opening `core.bin`. If it installs a newer release, it preserves `output/` and `symbolname.pgd` while replacing the rest of the bundle so bundled runtime files and managed folders such as `blastplus/` are refreshed by the new version. New tabs opened from inside `WezTerm` launch the wizard directly through `core.bin`; if tab `[0]` is still initializing, the wizard waits, and if the symbol-name database is downloading, symbol-name use waits for that download to finish.
+Use `phytozome-go --help` for the currently compiled command summary.
 
-## License
+### Network access
 
-This repository is licensed under the `Common Public Attribution License 1.0` (`CPAL-1.0`).
+Release checks, source metadata, optional components, and public biological data
+depend on their respective upstream services. Use a reliable, lawful network path
+that can reach those services. In networks where GitHub or a selected provider is
+inaccessible, including some networks in mainland China, restore access before
+retrying; do not disable certificate validation.
 
-The canonical license text is stored in [LICENSE](/C:/Users/wangsychn/Documents/GitHub/phytozome-batch-cli/LICENSE) and the in-app startup screen and CLI metadata are expected to display the same license identifier.
+## Quick start
 
-## Windows Build And Debug
+### 1. Start a keyword-search workflow
 
-The Windows development flow can use the same bundled `WezTerm` terminal client as the packaged app instead of launching the CLI directly in the host console.
+1. Launch phytozome GO and select a source and, when requested, a species/release.
+2. Open **Keyword Search**.
+3. Select the appropriate search type, then enter one identifier, locus, symbol,
+   or annotation term per line.
+4. Run a precise search when you expect a defined identifier match. Choose Wide
+   or Broad search explicitly when you need a source-defined discovery path.
+5. Inspect row details, select candidate rows, and export them or send the rows
+   with resolved sequences to BLAST or Canvas.
 
-Useful commands:
+Precise search does not silently widen itself after a no-result outcome. This
+keeps negative results interpretable and makes broader search an explicit choice.
+
+### 2. Start a BLAST workflow
+
+1. Open **BLAST** and choose the target source/species/release.
+2. Paste a sequence, one or more FASTA records, supported source/report URLs, or
+   eligible rows transferred from Keyword Search.
+3. Choose a valid query/database combination:
+
+   | Query | Target database | Program |
+   | --- | --- | --- |
+   | Nucleotide | Nucleotide | `blastn` |
+   | Nucleotide | Protein | `blastx` |
+   | Protein | Nucleotide | `tblastn` |
+   | Protein | Protein | `blastp` |
+
+4. Run the shown online path when available. When a reliable server path is not
+   available, install/allow the prompted BLAST+ component to use the matching
+   official local FASTA fallback.
+5. Review each query run, inspect hit details, select rows, and export the current
+   table or all original query runs as appropriate.
+
+For a multi-query workflow, review/export remains multi-run even if filtering or
+family merging leaves one visible table. Query labels describe query sources;
+each hit retains its own independent label information.
+
+### 3. Curate and explore in Canvas
+
+Add selected keyword/BLAST rows or FASTA records to **Canvas**. Canvas maintains
+the source context, sequence availability, selection state, and display names.
+Export selected rows as FASTA or save a `.pgo` snapshot. On Windows amd64, open
+the system-tree panel, choose a target/method, and refresh to generate a shared
+tree and MSA payload for the local browser viewers.
+
+## Scientific workflow
+
+```mermaid
+flowchart LR
+    A[Sequence, FASTA, identifier, or URL] --> B{Choose workflow}
+    B -->|Keyword search| C[Selected source and release]
+    B -->|BLAST| D[Capability-aware online or local BLAST+]
+    C --> E[Grouped result review]
+    D --> F[Per-query hit review]
+    E --> G[Select, annotate, export]
+    F --> G
+    G --> H[Canvas]
+    H --> I[FASTA / XLSX / PDF / .pgo]
+    H --> J[Windows amd64: tree + MSA]
+```
+
+### Local BLAST behavior
+
+Local BLAST is a fallback, not a hidden replacement for a usable online path. The
+application downloads the compatible official FASTA for the selected release,
+creates/reuses a local database, runs the appropriate BLAST+ command, parses the
+result, and reports the active phase. It does not construct a target database by
+borrowing FASTA from a different source or release.
+
+### Symbol Name database behavior
+
+`symbolname.pgd` is a local prebuilt database distributed through a manifest and
+release assets from the dedicated
+[symbol-name database repository](https://github.com/KiriKirby/phytozome-go-symbolname-db).
+Installation stages parts locally, reassembles/decompresses them, and validates
+the resulting database. It is not built from NCBI source files on an end-user
+machine. Automatic name workflows show progress and report install failures
+instead of silently applying a heuristic fallback.
+
+### Tree and MSA behavior
+
+The system-tree workflow is intentionally bounded:
+
+- it is supported by the packaged **Windows amd64** release only;
+- it uses the bundled `mega-phgo-runtime` and its runtime-owned MUSCLE binary,
+  never an arbitrary system `PATH` installation;
+- protein mode exposes protein ClustalW/MUSCLE methods; DNA mode exposes DNA and
+  codon ClustalW/MUSCLE methods;
+- phytozome GO does not reverse-translate, infer sequence type from letters, or
+  biologically repair input before the runtime executes it;
+- Reactree owns tree rendering and interaction; the MSA viewer is a local
+  JalviewJS workspace backed by the shared Canvas artifacts.
+
+On Linux and macOS, system-tree computation reports unsupported rather than
+downloading a substitute runtime. Wine may be used independently to run the
+complete Windows release; see the [Wine User's Guide](https://wiki.winehq.org/Wine_User%27s_Guide).
+
+## Outputs and reproducibility
+
+The export flow opens a system folder picker where available and otherwise uses
+an `output/` directory beside the executable. An extra export folder name is a
+subfolder of the chosen location, not a forced location elsewhere on the system.
+
+| Output | Purpose |
+| --- | --- |
+| **XLSX** | Selected rows, complete available columns, source metadata, and workflow-specific context. |
+| **FASTA** | Selected resolved sequences using the chosen header style. Generated headers contain no whitespace, tabs, or line breaks. |
+| **PDF** | Analysis/report output for supported result workflows. |
+| **`.pgo`** | A compressed, versioned session snapshot for resuming review/export without rerunning saved work. |
+| **SVG / PNG / PDF** | Data-driven MSA image output from the Canvas MSA export workflow. |
+
+Snapshots preserve durable workflow context, result rows, review state,
+selections, cached sequence data needed for later work, and explicitly selected
+artifacts. They do not preserve incidental UI state such as open menus, scroll
+offsets, or browser viewport position. Reopening a snapshot does not rerun a
+search or BLAST job unless a later user action requires new work.
+
+### Local files and cache policy
+
+All managed runtime artifacts stay next to the application bundle:
+
+```text
+output/       default export destination
+.cache/       source caches, downloaded assets, local BLAST DBs, tree artifacts
+blastplus/    managed BLAST+ component when required
+```
+
+The cache can be regenerated, but deleting it removes installed/downloaded data
+and prepared local BLAST assets. Preserve outputs and `.pgo` snapshots before any
+manual cache cleanup.
+
+## Platform support and requirements
+
+| Capability | Windows amd64 | Linux amd64 | macOS Intel / Apple Silicon |
+| --- | :---: | :---: | :---: |
+| Interactive TUI and source workflows | ✓ | ✓ | ✓ |
+| Keyword search, result review, exports, snapshots | ✓ | ✓ | ✓ |
+| On-demand BLAST+ workflow when supported by bundle/source | ✓ | ✓ | ✓ |
+| Canvas system-tree computation | ✓ | — | — |
+| Local Reactree/JalviewJS browser viewers after supported refresh | ✓ | platform-dependent viewer use | platform-dependent viewer use |
+
+The platform table describes the project boundary, not upstream-service
+availability. A database/source may still lack an asset or server capability for
+a specific release and query/program combination.
+
+## Documentation
+
+The [Documentation Center](https://kirikirby.github.io/phytozome-go/dc.html)
+contains user-focused reference articles for installation, updates, keyword
+search, BLAST, result tables, exports, sessions, Canvas, trees, and MSA.
+
+Repository design documentation is organized under [`doc2/`](doc2/):
+
+- [Main interface design index](doc2/main-interface-redesign/README.md)
+- [Phylogenetic tree system](doc2/phylogenetic-tree/README.md)
+- [Session snapshot system](doc2/session-snapshot-system.md)
+- [FASTA export headers](doc2/fasta-export-headers.md)
+
+For source behavior, start with the Documentation Center's
+[Keyword connector reference](docs/dc/keyword-connectors.html) and
+[BLAST connector reference](docs/dc/blast-connectors.html).
+
+## Development
+
+### Prerequisites
+
+- Go **1.26.3** (the version declared by `go.mod`)
+- Git
+- PowerShell on Windows for the supplied packaging scripts
+- Node.js only when regenerating static Documentation Center pages
+
+### Build and validate
 
 ```powershell
-# Run the normal local Windows-only build/test flow into bin\
+# Run the repository-wide Go checks.
+go test ./...
+go vet ./...
+go build ./...
+
+# Windows development bundle and tests (writes only beneath bin\).
 powershell -ExecutionPolicy Bypass -File .\scripts\build-codex.ps1
 
-# Run the underlying Windows-only dev bundle helper directly
-powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-dev.ps1
-
-# Build every release bundle only for publishing
+# Full cross-platform release packaging.
 powershell -ExecutionPolicy Bypass -File .\scripts\build-codex.ps1 -Publish
-
-# Launch the debug bundle in the bundled WezTerm terminal
-powershell -ExecutionPolicy Bypass -File .\scripts\run-wizard-external.ps1
 ```
 
-What these scripts do:
+`-Publish` is a release operation. It expects a clean worktree and prepares
+Windows, Linux, and macOS release archives; use it only when publishing a
+release. See the scripts themselves for the complete set of release parameters.
 
-- `scripts\build-codex.ps1` is the normal local build entrypoint; without `-Publish` it runs Windows-only build/test work and writes development artifacts only under `bin\`
-- `scripts\build-codex.ps1 -Publish` is the release entrypoint and forwards to the full cross-platform `scripts\build-release.ps1`
-- The published project website now lives directly under `docs\`; the embedded changelog page is `docs\nac.html` and the site favicon is `docs\favicon.png`
-- Project design and implementation documentation lives under `doc2\`; keep new Markdown documentation there instead of in the website root
-- `scripts\build-windows-dev.ps1` is the underlying Windows-only development build/test helper
-- `scripts\prepare-windows-wezterm.ps1` downloads and prepares the selected WezTerm Windows runtime under `bin\tooling\windows-wezterm\`
-- `scripts\package-windows-wezterm.ps1` stages a distributable bundle in `bin\phytozome-go_windows_amd64_wezterm\`
-- `scripts\run-wizard-external.ps1` starts the bundled GUI launcher, which opens `phgohelper.bin` first; the helper then opens `core.bin` when startup preflight is done
-- `cmd\phytozome-go-winlauncher` builds the Windows GUI launcher used by that bundle
+### Documentation Center maintenance
 
-Normal development now stays Windows-only and keeps generated build/test artifacts in `bin\`. Full cross-platform packaging is reserved for release publishing.
-
-## Files The Program Creates
-
-The program keeps all runtime artifacts next to the executable so nothing is scattered around your system.
-
-- `output/`
-  - created next to the executable as the default export location
-  - exports can instead be written to another folder selected in the operating system folder picker
-- `.cache/`
-  - Phytozome persistent caches
-  - lemna release caches
-  - local BLAST databases and downloaded FASTA
-  - Canvas tree runtime artifacts and restored tree snapshot files under `.cache/tree/`
-- `blastplus/`
-  - managed BLAST+ tool folder created on demand
-  - not preserved across self-update; the updated bundle recreates it when needed
-- `mega-phgo-runtime.bin`
-- `muscleWin64.bin`
-  - bundled directly in the Windows `amd64` release package
-  - required for Canvas system-tree on Windows; if the folder is missing, the bundle was extracted incompletely or modified
-  - Linux and macOS releases currently do not include this folder because system-tree is not yet supported there
-
-If you choose an extra folder name during batch BLAST export, that folder is created inside the export directory selected in the system folder picker. The picker opens at the app-local `output/` directory by default and creates it if needed.
-
-## FASTA Header Formats
-
-FASTA export settings provide the full PHgo header, PHgo Lite, original source header, and minimal ID-only header choices. Canvas additionally provides a display-name-only choice.
-
-PHgo Lite is a compact, importable PHgo format:
+Topic pages use the legacy static website layout deliberately. Update
+[`docs/dc/generate-docs.js`](docs/dc/generate-docs.js), then regenerate:
 
 ```text
->Bd21-3|Bradi3g18960(Bd4CL1)
+node docs/dc/generate-docs.js
 ```
 
-It uses the available species abbreviation when present, then `ID2`, followed by the symbol in parentheses. If the symbol is empty, `~`, or `~~`, PHgo Lite writes only `>species|ID2`. Both forms are recognized when pasted or imported into BLAST and Canvas. Generated FASTA headers replace whitespace with underscores at the final file-writing boundary, so the written file remains valid single-token FASTA.
+The content model and writing contract are in
+[`docs/dc/CONTENT_MODEL.md`](docs/dc/CONTENT_MODEL.md). Check internal links and
+run `git diff --check` before committing generated pages.
 
-## Session Snapshots
+### Contributing
 
-Export settings include `Save session snapshot (.pgo)`. A `.pgo` file stores the current result review state, user row/alias edits, table position/sort state, and cached sequence data needed by later exports so it can be reopened later from `Explore` -> `Open session` and return directly to the saved result table.
+Contributions should preserve source/release provenance, avoid undocumented
+cross-source fallbacks, and include proportionate tests. Please open an issue or
+discussion before a large workflow, data-source, snapshot-format, or tree-runtime
+change so the implementation and its design documentation can evolve together.
 
-`Explore` also includes `NWK tree browser`, which opens one local `.nwk` path, `file://` link, or `http(s)` `.nwk` URL at a time in the embedded Reactree viewer. Each submission opens a new browser page, and leaving that input screen stops the local viewer service.
+Do not commit runtime caches, release archives, downloaded source assets, or
+private biological data. Keep generated build artifacts under `bin/` and user
+exports outside the source tree.
 
-Canvas tree preview uses the same local viewer stack, but each Canvas page keeps its own separate viewer service. Leaving that Canvas page stops only that page's viewer service, so multiple Canvas pages can preview trees independently.
+## Citation
 
-When an older `.pgo` snapshot still references legacy `output/tree/...` tree artifacts, PHgo remaps those restored files into `.cache/tree/...` during snapshot open instead of recreating the old output-side tree cache.
-
-The snapshot format is documented in `doc2/session-snapshot-system.md`.
-
-## Global Navigation Commands
-
-These commands are available throughout the wizard and are shown on screen:
-
-- `back` = return to the previous page
-- `spawn` = return to mode selection
-- `lobby` = return to database selection
-- `exit` = quit the wizard
-
-This matters when you are several steps deep and want to change only one decision without restarting the whole session.
-
-Example:
-
-- you selected `lemna`
-- then chose `blast`
-- then selected the wrong species
-- type `back` to return to species selection
-
-Example:
-
-- you started in `blast` mode but decide keyword search is more appropriate
-- type `spawn` to jump back to mode selection
-
-## High-Level Workflow
-
-```mermaid
-flowchart TD
-    A[Start wizard] --> B[Choose database]
-    B --> C[Choose mode]
-    C --> D[Choose species]
-    D --> E[Enter query input]
-    E --> F[Review results]
-    F --> G[Select rows]
-    G --> H[Export Excel and peptide FASTA]
-```
-
-## Step-By-Step Tutorial
-
-This section explains the wizard the way a real user experiences it.
-
-## Step 1: Choose Database
-
-You first choose:
-
-- `phytozome`
-- `lemna`
-
-How to decide:
-
-- choose `phytozome` when your target species and identifiers are in Phytozome
-- choose `lemna` when your target species is one of the duckweed or related releases hosted by `lemna.org`
-
-Real example:
-
-- you have a rice gene link and want to search homologs in a selected `lemna.org` release
-- choose `lemna`
-- the query sequence can still come from the Phytozome URL, but the search target will be the selected lemna species
-
-## Step 2: Choose Mode
-
-You then choose:
-
-- `blast`
-- `keyword`
-
-### When to use `blast`
-
-Use BLAST when you already have a sequence or a precise source record.
-
-Typical inputs:
-
-- plain protein sequence
-- plain nucleotide sequence
-- FASTA entry
-- Phytozome gene report URL
-- a batch list of many URLs or sequences
-
-Real example:
-
-- you know `OsMADS1` and want sequence similarity hits in another plant genome
-- BLAST is the right starting point
-
-### When to use `keyword`
-
-Use keyword search when you want to search annotations, IDs, aliases, or descriptions inside one chosen species.
-
-Real example:
-
-- you want to search several flowering regulator genes inside one proteome
-- use keyword mode with terms like `LOC_Os03g11614`, `OsMADS1`, or annotation words
-
-## Step 3: Choose Species
-
-After mode selection, the wizard asks for one species.
-
-### In `phytozome`
-
-Species are filtered from the Phytozome species list.
-
-### In `lemna`
-
-Species are loaded from the `download/` releases. When the list is small, the wizard shows the full numbered list directly.
-
-What you see may include:
-
-- label
-- common name
-- JBrowse name
-- target ID
-- official clone marking
-
-Real example:
-
-- choose the `lemna.org` release you actually want to search
-- the wizard then shows a capability summary for BLAST and available FASTA fallback paths
-
-## BLAST Mode: Detailed Guide
-
-BLAST mode is the more feature-rich path, especially for batch work.
-
-```mermaid
-flowchart TD
-    A[Choose blast mode] --> B[Choose species]
-    B --> C[Paste one or more queries]
-    C --> D[Resolve URLs or FASTA metadata]
-    D --> E[Choose BLAST program]
-    E --> F[Choose server or local when needed]
-    F --> G[Run each query]
-    G --> H[Review one result table at a time]
-    H --> I[Select rows]
-    I --> J[Export files]
-```
-
-## BLAST Input Formats
-
-The wizard accepts all of these:
-
-- plain sequence lines
-- FASTA
-- Phytozome gene/transcript report URL
-- multiple newline-separated queries
-- a copied keyword `list` block
-- `load "file.txt"` to read a prepared batch input file from the program directory
-
-### Example 1: Single FASTA query
+If phytozome GO contributes to published work, cite the release used and the
+repository commit or archive. A machine-readable citation record is provided in
+[`CITATION.cff`](CITATION.cff).
 
 ```text
->O.sativa Japonica Group|LOC_Os03g11614.1 (OsMADS1)
-MSS...
+Wang S. phytozome GO: a terminal-native workbench for source-aware plant
+gene and sequence workflows. Version <version used>. 2026.
+https://github.com/KiriKirby/phytozome-go
 ```
 
-What happens:
-
-- the wizard reads the FASTA metadata
-- `O.sativa Japonica Group|LOC_Os03g11614.1` becomes the query source header
-- `(OsMADS1)` becomes the visible identification label
-
-### Example 2: Phytozome URL query
-
-```text
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
-```
-
-What happens:
-
-- the wizard fetches the sequence from Phytozome
-- if you are in `lemna` mode, it uses that sequence against the selected lemna species
-- export metadata keeps the original pasted URL
-
-### Example 3: Batch BLAST from many Phytozome URLs
-
-```text
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os01g69850
-https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os06g06750
-```
-
-What happens:
-
-- each line becomes a separate BLAST query
-- the wizard resolves them in parallel
-- you then enter one symbol name per query
-- each query is reviewed and exported separately
-
-## BLAST Program Selection
-
-The wizard groups the programs by query type.
-
-### Nucleotide query starts here
-
-- `blastn` = nucleotide query vs nucleotide/genome database
-- `blastx` = nucleotide query translated to protein vs protein database
-
-### Protein query starts here
-
-- `tblastn` = protein query vs translated nucleotide/genome database
-- `blastp` = protein query vs protein database
-
-Real example:
-
-- if your query is a protein FASTA from `OsMADS1`, choose `blastp` or `tblastn`
-- if your query is a CDS sequence, choose `blastn` or `blastx`
-
-## Server And Local BLAST
-
-In `lemna` mode, the wizard may ask whether to use:
-
-- `server`
-- `local`
-
-### `server`
-
-Use the BLAST service exposed by the website when the target database is available and robust enough for automation.
-
-### `local`
-
-The program downloads the correct release FASTA, builds a local BLAST database, and runs BLAST on your machine.
-
-You do not need to prepare local FASTA by hand.
-
-Local mode is useful when:
-
-- lemna.org does not expose the needed server-side DB
-- the server form is unreliable for automation
-- the downloadable database assets are more complete than the site form
-
-## Batch BLAST Approval Flow
-
-For multiple BLAST queries, the wizard processes one query at a time.
-
-For each query:
-
-1. run BLAST
-2. print the full result table
-3. open the row selection step
-4. let you approve rows
-5. export files for that query
-
-Useful commands during selection:
-
-- `all`
-- `none`
-- `toggle 1 2 5~8`
-- `done`
-- `done all`
-- `doneall`
-
-`done all` means:
-
-- approve the current selection
-- automatically approve the remaining queries with their default selected rows
-
-This is useful when you have a long batch and the remaining tables are straightforward.
-
-## BLAST Output Files
-
-Each BLAST query can generate:
-
-- `<name>.xlsx`
-- `<name>.fasta`
-
-The `.xlsx` file contains:
-
-- the selected BLAST rows
-- top metadata such as gene name, gene ID, and source report URL when available
-
-The `.fasta` file contains:
-
-- the query sequence first
-- then peptide sequences for selected hits
-
-Real example:
-
-If your query is `OsMADS1` from rice, the query header in the FASTA export looks like:
-
-```text
->O.sativa Japonica Group|LOC_Os03g11614.1 (OsMADS1)
-```
-
-## Keyword Mode: Detailed Guide
-
-Keyword mode is best when you want to search a species by identifiers or annotation text before deciding which sequences to export.
-
-```mermaid
-flowchart TD
-    A[Choose keyword mode] --> B[Choose species]
-    B --> C[Enter one or more keyword terms]
-    C --> D[Enter label_name values]
-    D --> E[Enter export file name]
-    E --> F[Run keyword search]
-    F --> G[Review grouped result table]
-    G --> H[Select rows]
-    H --> I[Export table and peptide sequences]
-```
-
-## Keyword Input
-
-You can enter:
-
-- one term
-- multiple terms separated by spaces
-- multiple terms separated by new lines
-
-Real example:
-
-```text
-LOC_Os03g11614
-LOC_Os01g69850
-LOC_Os06g06750
-LOC_Os07g41370
-LOC_Os02g07430
-LOC_Os10g25170
-```
-
-This is useful when you already know the source genes and want to pull equivalent candidates inside one target species.
-
-## label_name In Keyword Mode
-
-After keyword input, the wizard asks for `label_name` values. These are the short names used for display, default file naming, and FASTA labels.
-
-Rules:
-
-- one label per keyword term
-- use `~` for an intentional blank
-- the count must match exactly
-
-Real example:
-
-```text
-OsMADS1
-OsMADS14
-OsMADS15
-OsMADS18
-OsMADS5
-OsMADS56
-```
-
-These labels are then carried into:
-
-- the result table
-- the Excel export
-- default export names and FASTA labels
-
-## Keyword Result Selection
-
-The keyword result table is grouped by search term. You then select rows interactively.
-
-Useful commands:
-
-- `all`
-- `none`
-- `toggle ...`
-- `done`
-- `list`
-
-## Example: Keyword To BLAST Workflow
-
-A realistic workflow looks like this:
-
-1. choose `phytozome`
-2. choose `keyword`
-3. choose a species
-4. search for several flowering regulator genes
-5. export the selected keyword rows
-8. paste the list block directly
-9. search homologs in another species
-
-This is one of the main reasons the wizard supports both modes inside the same program.
-
-## Loading, Progress, And Error Recovery
-
-The program always tries to show progress:
-
-- progress bars when the number of items is known
-- spinners when duration is unknown
-
-When a recoverable step fails, the wizard uses explicit recovery commands such as:
-
-- `retry`
-- `skip`
-- `back`
-- `exit`
-
-Examples:
-
-- one query in a batch fails to resolve: retry only that query, skip it, or go back
-- one keyword is slow or unavailable: retry that term or skip it
-- a local BLAST step fails because tools are missing: retry after installation, go back, or exit
-
-## Performance And Caching
-
-The program uses controlled parallelism and local caches so repeated work does not hammer the same remote endpoints over and over.
-
-Current worker caps:
-
-- batch keyword search: `6`
-- batch BLAST input resolution: `6`
-- sequence prefetch: `8`
-- lemna release metadata fetch: `6`
-
-Actual worker count is dynamic:
-
-- bounded by task count
-- bounded by `GOMAXPROCS`
-- bounded by the per-stage cap above
-
-Persistent cache examples:
-
-- Phytozome gene records
-- Phytozome protein sequences
-- Phytozome keyword rows
-- lemna text pages
-- lemna AHRD records
-- lemna FASTA indexes
-- lemna protein/transcript maps
-- lemna local BLAST assets and databases
-
-## Practical Examples
-
-## Example A: Search One Rice Gene Against A Lemna Release
-
-Goal:
-
-- start from `LOC_Os03g11614`
-- search homologs in the `lemna.org` release you care about
-
-Steps:
-
-1. choose `lemna`
-2. choose `blast`
-3. choose the target release
-4. paste `https://phytozome-next.jgi.doe.gov/report/gene/Osativa_323_v7.0/LOC_Os03g11614`
-5. choose `blastp`
-6. review rows
-7. select the hits you want
-8. export files to the folder you choose in the system picker
-
-## Example B: Search Many Flowering Regulator Genes Together
-
-Goal:
-
-- search a panel of genes such as `OsMADS1`, `OsMADS14`, `OsMADS15`, `OsMADS18`
-- generate one BLAST export per query
-
-Steps:
-
-1. choose `phytozome` keyword mode
-2. search the known source IDs
-3. use `list`
-4. switch to BLAST mode with `spawn`
-5. paste the entire list block
-6. choose the target species
-7. choose BLAST program
-8. use `done all` once the default result selections look correct
-
-## Example C: Search An Entire Lemna Release By Annotation
-
-Goal:
-
-- search a lemna species for genes whose GFF/AHRD annotation matches a term
-
-Steps:
-
-1. choose `lemna`
-2. choose `keyword`
-3. choose the release you want to annotate-search
-4. enter annotation-like terms
-5. review rows collected from `GFF3` and `AHRD`
-6. export table and peptides
-
-## Troubleshooting
-
-## Local BLAST tools missing
-
-If local BLAST is required and the program cannot find `makeblastdb` or the selected BLAST executable, install NCBI BLAST+ or use the program's BLAST+ installation path if configured by the current build.
-
-## No keyword rows found
-
-Possible reasons:
-
-- the identifier belongs to a different species
-- the release does not contain the expected annotation text
-- the exact ID format differs from the one you entered
-
-## A batch query fails partway through
-
-Use:
-
-- `retry` if the step is transient
-- `skip` if you want the rest of the batch to continue
-- `back` if the query configuration is wrong
-
-## Release Assets
-
-Current release assets are built for:
-
-- Windows `amd64` WezTerm bundle zip
-- Linux `amd64` WezTerm bundle tarball
-- macOS `amd64` app bundle tarball
-- macOS `arm64` app bundle tarball
-
-Canvas system-tree analysis currently works only in the Windows `amd64` release bundle, which ships with `mega-phgo-runtime.bin` and `muscleWin64.bin` directly in the app root. Linux and macOS report the tree runtime as unsupported instead of downloading or using placeholder runtime packages.
-
-The repository keeps release binaries in `bin/` during packaging. GitHub Releases is the canonical download point for end users.
-
-## Technical Notes
-
-- Language: Go
-- Network layer: `net/http`
-- Excel export: `excelize`
-- Target sites:
-  - `https://phytozome-next.jgi.doe.gov`
-  - `https://www.lemna.org`
-
-The codebase isolates Phytozome-specific and lemna-specific logic behind internal adapters so the wizard can stay stable even when upstream sites evolve.
-
+Also cite the original data resources and analysis software used in your work,
+including the selected source/release and any relevant BLAST+, MEGA, Jalview,
+UniProt, InterPro, NCBI, TAIR, PLAZA, Phytozome, or lemna.org references. The
+application's output provenance helps identify those dependencies; it does not
+replace the providers' required citations or terms of use.
+
+## License and third-party components
+
+This repository is licensed under the
+[Common Public Attribution License 1.0 (CPAL-1.0)](LICENSE). Review the license
+before redistributing modified or bundled versions.
+
+phytozome GO interoperates with or bundles components subject to their own terms,
+including NCBI BLAST+, the MEGA-derived PHgo runtime, MUSCLE, Reactree, and
+JalviewJS. Upstream biological data, website content, and APIs remain governed by
+their respective providers' access, attribution, and redistribution policies.
+
+## Acknowledgements
+
+phytozome GO depends on the scientific software, public databases, and open-source
+libraries named above. We thank the maintainers and data curators whose work makes
+reproducible plant comparative-genomics workflows possible.

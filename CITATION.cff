@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use phytozome GO, please cite the software version and repository commit or release used."
+title: "phytozome GO"
+abstract: "A terminal-native workbench for source-aware plant gene and sequence workflows."
+type: software
+authors:
+  - family-names: Wang
+    given-names: Shuyang
+    alias: KiriKirby
+repository-code: "https://github.com/KiriKirby/phytozome-go"
+url: "https://kirikirby.github.io/phytozome-go/"
+license: CPAL-1.0
