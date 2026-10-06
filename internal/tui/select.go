@@ -84,8 +84,9 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 			{Value: "tool:open_session", Label: "Open session", Description: "open a saved .pgo session snapshot from a path or output file name"},
 			{Value: "tool:new_canvas", Label: "New canvas", Description: "create a blank canvas workspace"},
 			{Value: "tool:nwk_browser", Label: "Tree viewer browser", Description: "open one .nwk or .pgv file path or URL at a time in the local tree viewer"},
-			{Value: "tair:family", Label: "TAIR database family index", Description: "TAIR family index search using release version selection"},
-			{Value: "tool:pathway_search", Label: "Pathway search", Description: "pathway search entry point; implementation comes next"},
+			// Temporarily disabled until these discovery workflows are reliable:
+			// {Value: "tair:family", Label: "TAIR database family index", Description: "TAIR family index search using release version selection"},
+			// {Value: "tool:pathway_search", Label: "Pathway search", Description: "pathway search entry point; implementation comes next"},
 		},
 	}
 

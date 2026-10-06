@@ -558,16 +558,16 @@ func TestMainExploreListKeyboardNavigationAndNumberSelection(t *testing.T) {
 	if got := list.GetCurrentItem(); got != 0 {
 		t.Fatalf("Up selected item %d, want 0", got)
 	}
-	handleMainExploreListKey(list, tcell.NewEventKey(tcell.KeyRune, '4', tcell.ModNone), app)
-	if got := list.GetCurrentItem(); got != 3 {
-		t.Fatalf("shortcut 4 selected item %d, want 3", got)
+	handleMainExploreListKey(list, tcell.NewEventKey(tcell.KeyRune, '3', tcell.ModNone), app)
+	if got := list.GetCurrentItem(); got != 2 {
+		t.Fatalf("shortcut 3 selected item %d, want 2", got)
 	}
-	if state.Explore.Tool != "tair_family" {
-		t.Fatalf("shortcut 4 updated tool to %q, want tair_family", state.Explore.Tool)
+	if state.Explore.Tool != "nwk_browser" {
+		t.Fatalf("shortcut 3 updated tool to %q, want nwk_browser", state.Explore.Tool)
 	}
 	handleMainExploreListKey(list, tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone), app)
 	handleMainExploreListKey(list, tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone), app)
-	if got := list.GetCurrentItem(); got != 4 {
+	if got := list.GetCurrentItem(); got != 2 {
 		t.Fatalf("Down should clamp at last item without wrapping, got %d", got)
 	}
 }

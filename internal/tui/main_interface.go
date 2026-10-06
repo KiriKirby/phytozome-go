@@ -1307,8 +1307,9 @@ func buildMainExploreTab(_ *tview.Application, state *MainInterfaceState) (tview
 		{Value: "open_session", Label: "Open session", Description: "open a saved .pgo session snapshot"},
 		{Value: "new_canvas", Label: "New canvas", Description: "create a blank canvas workspace"},
 		{Value: "nwk_browser", Label: "Tree viewer browser", Description: "open a .nwk or .pgv file in the local tree viewer"},
-		{Value: "tair_family", Label: "TAIR database family index", Description: "TAIR family index search"},
-		{Value: "pathway_search", Label: "Pathway search", Description: "pathway-guided protein discovery entry point"},
+		// Temporarily disabled until these discovery workflows are reliable:
+		// {Value: "tair_family", Label: "TAIR database family index", Description: "TAIR family index search"},
+		// {Value: "pathway_search", Label: "Pathway search", Description: "pathway-guided protein discovery entry point"},
 	}
 	list := optionListWithStart("", options, 1)
 	list.SetBorder(false)
