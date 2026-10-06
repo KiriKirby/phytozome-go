@@ -1,8 +1,6 @@
 # phytozome GO
 
-<p align="center">
-  <img src="https://kirikirby.github.io/phytozome-go/images/video.gif" alt="phytozome GO" width="520">
-</p>
+![phytozome GO](https://kirikirby.github.io/phytozome-go/images/video.gif)
 
 <p align="center">
   <a href="https://github.com/KiriKirby/phytozome-go/releases"><img src="https://img.shields.io/github/v/release/KiriKirby/phytozome-go?label=release" alt="Latest release"></a>
