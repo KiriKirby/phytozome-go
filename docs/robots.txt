@@ -1,0 +1,8 @@
+# phytozome GO welcomes search engines, research indexers, and AI crawlers.
+# Public documentation and site pages may be crawled, indexed, and cited.
+
+User-agent: *
+Allow: /
+
+# Sitemap for the GitHub Pages project site.
+Sitemap: https://kirikirby.github.io/phytozome-go/sitemap.xml
