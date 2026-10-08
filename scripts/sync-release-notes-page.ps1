@@ -81,7 +81,7 @@ $content = @(
     "",
     "<head>",
     "<meta http-equiv=""Content-Type"" content=""text/html; charset=utf-8"">",
-    "<title>新建网页 1</title>",
+    "<title>PHgo - Release Notes</title>",
     "</head>",
     "",
     "<body bgcolor=""#FFFFFF"">",
@@ -100,9 +100,9 @@ if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
         if ($line -like "vti_filesize:IR|*") {
             "vti_filesize:IR|$((Get-Item -LiteralPath $targetPath).Length)"
         } elseif ($line -like "vti_cachedtitle:SR|*") {
-            "vti_cachedtitle:SR|新建网页 1"
+            "vti_cachedtitle:SR|PHgo - Release Notes"
         } elseif ($line -like "vti_title:SR|*") {
-            "vti_title:SR|新建网页 1"
+            "vti_title:SR|PHgo - Release Notes"
         } else {
             $line
         }
