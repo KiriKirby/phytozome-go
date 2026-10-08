@@ -79,6 +79,32 @@ func TestNCBIGeneLocusPrioritySearchesLocusThenSearchTerm(t *testing.T) {
 	}
 }
 
+func TestNCBIGeneLocusPrioritySkipKeepsOtherKeywordResults(t *testing.T) {
+	w := NewBlastWizard(nil)
+	w.source = keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{
+		"PAL1": {{SourceDatabase: "ncbi", ProteinID: "NP_fallback"}},
+	}}
+	groups, err := w.searchMainKeywordGroupsWithGeneLocusPriorityProgressSkipping(
+		context.Background(),
+		model.SpeciesCandidate{GenomeLabel: "Arabidopsis thaliana"},
+		[]string{"CYP84A1", "PAL1"},
+		[]string{"", ""},
+		false,
+		tui.GeneLocusPriorityNCBI,
+		map[int]bool{0: true},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("priority search after skip: %v", err)
+	}
+	if len(groups) != 2 || len(groups[0].Rows) != 0 {
+		t.Fatalf("skipped group = %#v, want an empty preserved group", groups)
+	}
+	if len(groups[1].Rows) != 1 || groups[1].Rows[0].ProteinID != "NP_fallback" {
+		t.Fatalf("later keyword result was not preserved: %#v", groups[1].Rows)
+	}
+}
+
 func TestSetBlastQueryItemGeneLocusSeedsQuerySource(t *testing.T) {
 	item := blastQueryItem{
 		RawInput:  ">q1\nAAAA",

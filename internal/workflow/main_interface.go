@@ -59,51 +59,46 @@ func (w *BlastWizard) runNewMainInterface(ctx context.Context) error {
 			return err
 		}
 		state = tui.NormalizeMainInterfaceState(result.State)
-		switch result.Action {
-		case tui.MainActionExit, "":
-			return nil
-		case tui.MainActionExploreTool:
-			if err := w.runMainExploreAction(ctx, state.Explore.Tool); err != nil {
-				if errors.Is(err, prompt.ErrExitRequested) {
-					return err
-				}
-				if errors.Is(err, prompt.ErrBackToDatabaseSelection) || errors.Is(err, prompt.ErrBackToModeSelection) || errors.Is(err, prompt.ErrBackToQueryInput) {
-					continue
-				}
-				return err
+		action := result.Action
+	forAction:
+		for {
+			var actionErr error
+			switch action {
+			case tui.MainActionExit, "":
+				return nil
+			case tui.MainActionExploreTool:
+				actionErr = w.runMainExploreAction(ctx, state.Explore.Tool)
+			case tui.MainActionKeywordSearch, tui.MainActionKeywordWideSearch:
+				actionErr = w.runMainKeywordAction(ctx, state, action == tui.MainActionKeywordWideSearch)
+			case tui.MainActionBlastRun:
+				actionErr = w.runMainBlastAction(ctx, state)
+			default:
+				actionErr = fmt.Errorf("unsupported main interface action %q", action)
 			}
-		case tui.MainActionKeywordSearch, tui.MainActionKeywordWideSearch:
-			if err := w.runMainKeywordAction(ctx, state, result.Action == tui.MainActionKeywordWideSearch); err != nil {
-				var update mainInterfaceStateUpdate
-				if errors.As(err, &update) {
-					state = tui.NormalizeMainInterfaceState(update.state)
-					continue
-				}
-				if errors.Is(err, prompt.ErrExitRequested) {
-					return err
-				}
-				if isMainInterfaceBack(err) {
-					continue
-				}
-				return err
+			if actionErr == nil {
+				break forAction
 			}
-		case tui.MainActionBlastRun:
-			if err := w.runMainBlastAction(ctx, state); err != nil {
-				var update mainInterfaceStateUpdate
-				if errors.As(err, &update) {
-					state = tui.NormalizeMainInterfaceState(update.state)
-					continue
-				}
-				if errors.Is(err, prompt.ErrExitRequested) {
-					return err
-				}
-				if isMainInterfaceBack(err) {
-					continue
-				}
-				return err
+			var update mainInterfaceStateUpdate
+			if errors.As(actionErr, &update) {
+				state = tui.NormalizeMainInterfaceState(update.state)
+				break forAction
 			}
-		default:
-			return fmt.Errorf("unsupported main interface action %q", result.Action)
+			if errors.Is(actionErr, prompt.ErrExitRequested) {
+				return actionErr
+			}
+			if isMainInterfaceBack(actionErr) {
+				break forAction
+			}
+			decision, recoveryErr := w.recoverUnexpectedWorkflowError(actionErr, prompt.ErrBackToDatabaseSelection)
+			if recoveryErr != nil {
+				if errors.Is(recoveryErr, prompt.ErrExitRequested) {
+					return recoveryErr
+				}
+				break forAction
+			}
+			if decision != recoveryRetry {
+				break forAction
+			}
 		}
 	}
 }
@@ -312,16 +307,37 @@ func (w *BlastWizard) searchMainKeywordGroupsWithGeneLocusPriority(ctx context.C
 	if priorityDatabase == tui.GeneLocusPriorityPLAZA {
 		databaseLabel = "PLAZA"
 	}
-	return tui.RunProgressTaskValueContext(tui.TaskPage{
-		Path:        w.tuiPath("Keyword", "Searching"),
-		Title:       "Searching " + databaseLabel + " and NCBI keyword terms",
-		Description: "Using " + databaseLabel + " Gene locus priority where a locus is available.",
-		Initial:     "Searching " + databaseLabel + " and NCBI keyword terms...",
-		Total:       len(keywords),
-		CancelError: prompt.ErrBackToQueryInput,
-	}, func(taskCtx context.Context, update func(int, string)) ([]model.KeywordSearchGroup, error) {
-		return w.searchMainKeywordGroupsWithGeneLocusPriorityProgress(mergeContexts(ctx, taskCtx), selected, keywords, geneLoci, wide, priorityDatabase, update)
-	})
+	skipped := make(map[int]bool)
+	for {
+		groups, err := tui.RunProgressTaskValueContext(tui.TaskPage{
+			Path:        w.tuiPath("Keyword", "Searching"),
+			Title:       "Searching " + databaseLabel + " and NCBI keyword terms",
+			Description: "Using " + databaseLabel + " Gene locus priority where a locus is available.",
+			Initial:     "Searching " + databaseLabel + " and NCBI keyword terms...",
+			Total:       len(keywords),
+			CancelError: prompt.ErrBackToQueryInput,
+		}, func(taskCtx context.Context, update func(int, string)) ([]model.KeywordSearchGroup, error) {
+			return w.searchMainKeywordGroupsWithGeneLocusPriorityProgressSkipping(mergeContexts(ctx, taskCtx), selected, keywords, geneLoci, wide, priorityDatabase, skipped, update)
+		})
+		if err == nil {
+			return groups, nil
+		}
+		var recoverErr *keywordSearchRecoveryError
+		if !errors.As(err, &recoverErr) {
+			return nil, err
+		}
+		action, actionErr := w.prompt.FetchErrorAction(recoverErr.Error(), prompt.ErrBackToQueryInput)
+		if actionErr != nil {
+			return nil, actionErr
+		}
+		decision, navErr := interpretRecoveryAction(action, prompt.ErrBackToQueryInput, true)
+		if navErr != nil {
+			return nil, navErr
+		}
+		if decision == recoverySkip {
+			skipped[recoverErr.Index] = true
+		}
+	}
 }
 
 func (w *BlastWizard) searchMainKeywordGroupsWithPLAZAPriorityProgress(ctx context.Context, selected model.SpeciesCandidate, keywords []string, geneLoci []string, wide bool, update func(int, string)) ([]model.KeywordSearchGroup, error) {
@@ -329,6 +345,10 @@ func (w *BlastWizard) searchMainKeywordGroupsWithPLAZAPriorityProgress(ctx conte
 }
 
 func (w *BlastWizard) searchMainKeywordGroupsWithGeneLocusPriorityProgress(ctx context.Context, selected model.SpeciesCandidate, keywords []string, geneLoci []string, wide bool, priorityDatabase string, update func(int, string)) ([]model.KeywordSearchGroup, error) {
+	return w.searchMainKeywordGroupsWithGeneLocusPriorityProgressSkipping(ctx, selected, keywords, geneLoci, wide, priorityDatabase, nil, update)
+}
+
+func (w *BlastWizard) searchMainKeywordGroupsWithGeneLocusPriorityProgressSkipping(ctx context.Context, selected model.SpeciesCandidate, keywords []string, geneLoci []string, wide bool, priorityDatabase string, skipped map[int]bool, update func(int, string)) ([]model.KeywordSearchGroup, error) {
 	if len(keywords) != len(geneLoci) {
 		return nil, fmt.Errorf("Gene locus values (%d) do not match keyword rows (%d)", len(geneLoci), len(keywords))
 	}
@@ -359,6 +379,11 @@ func (w *BlastWizard) searchMainKeywordGroupsWithGeneLocusPriorityProgress(ctx c
 			defer wg.Done()
 			for index := range jobs {
 				started := time.Now()
+				if skipped[index] {
+					results[index] = keywordSearchResult{index: index, started: started, ended: time.Now()}
+					advance()
+					continue
+				}
 				var rows []model.KeywordResultRow
 				var err error
 				if locus := strings.TrimSpace(geneLoci[index]); locus != "" {

@@ -7506,7 +7506,11 @@ func TestHydrateSnapshotArtifactsRemapsLegacyOutputTreeRestorePathToCache(t *tes
 		t.Fatalf("OutputDir returned error: %v", err)
 	}
 	legacyPath := filepath.Join(outputDir, "tree", "legacy-session", "run1", "tree.nwk")
-	cachePath := filepath.Join(mustCanvasTreeArtifactDir("legacy-session", "run1"), "tree.nwk")
+	cacheDir, err := canvasTreeArtifactDir("legacy-session", "run1")
+	if err != nil {
+		t.Fatalf("resolve Canvas tree cache: %v", err)
+	}
+	cachePath := filepath.Join(cacheDir, "tree.nwk")
 	_ = os.Remove(cachePath)
 	t.Cleanup(func() { _ = os.Remove(cachePath) })
 

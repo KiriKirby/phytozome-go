@@ -536,6 +536,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - always provide a retry or back/exit route when a step can fail
   - when a workflow step can be recovered from safely, surface `back` explicitly in the prompt text rather than relying only on the global hint
 - Error handling:
+  - interactive workflow errors must never escape to `main` as stderr text after the TUI has started; handle expected failures at the nearest workflow step with the existing Retry/Skip/Back/Exit recovery modal, and keep a final TUI recovery boundary around the whole wizard for unforeseen returned errors or panics
+  - an ordinary empty search result is a recoverable per-item event, not a process-fatal error; batch keyword searches must offer Retry/Skip/Back inside the TUI and continue the remaining items after Skip
   - use `retry`/`skip`/`back`/`exit` patterns whenever the underlying action can support them safely
   - fetch-style errors should always offer `retry`, `skip`, `back`, and `exit` with clear page-specific back targets
   - keep fetch errors skippable where possible

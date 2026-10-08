@@ -17,15 +17,18 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/viewersnapshot"
 )
 
-func TestMustCanvasTreeArtifactDirUsesCacheRoot(t *testing.T) {
+func TestCanvasTreeArtifactDirUsesCacheRoot(t *testing.T) {
 	root, err := appfs.CacheRoot()
 	if err != nil {
 		t.Fatalf("CacheRoot returned error: %v", err)
 	}
-	got := mustCanvasTreeArtifactDir("canvas/session", "run:1")
+	got, err := canvasTreeArtifactDir("canvas/session", "run:1")
+	if err != nil {
+		t.Fatalf("resolve Canvas tree cache: %v", err)
+	}
 	want := filepath.Join(root, "tree", "canvas_session", "run_1")
 	if !strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
-		t.Fatalf("mustCanvasTreeArtifactDir = %q, want %q", got, want)
+		t.Fatalf("canvasTreeArtifactDir = %q, want %q", got, want)
 	}
 }
 

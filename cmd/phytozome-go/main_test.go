@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/KiriKirby/phytozome-go/internal/workflow"
@@ -49,5 +51,20 @@ func TestParseLaunchArgsLoadsHandoffDefaults(t *testing.T) {
 	}
 	if launch.Mode != workflow.ModeBlast {
 		t.Fatalf("launch.Mode = %q, want %q", launch.Mode, workflow.ModeBlast)
+	}
+}
+
+func TestInteractiveWizardDoesNotPrintReturnedErrorsToCLI(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(currentFile), "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	text := string(source)
+	if strings.Contains(text, "blast wizard failed") {
+		t.Fatal("interactive workflow errors must stay inside the TUI")
 	}
 }

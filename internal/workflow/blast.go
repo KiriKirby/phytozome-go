@@ -941,6 +941,38 @@ func NewBlastWizardWithLaunch(out io.Writer, tuiInfo tui.StartupInfo, launch Ins
 }
 
 func (w *BlastWizard) Run(ctx context.Context) error {
+	for {
+		err := w.runWithPanicBoundary(ctx)
+		if err == nil || errors.Is(err, prompt.ErrExitRequested) {
+			return nil
+		}
+		decision, recoveryErr := w.recoverUnexpectedWorkflowError(err, prompt.ErrBackToDatabaseSelection)
+		if recoveryErr != nil {
+			if errors.Is(recoveryErr, prompt.ErrExitRequested) {
+				return nil
+			}
+			if classifyWizardBack(recoveryErr) != wizardBackNone {
+				continue
+			}
+			return recoveryErr
+		}
+		if decision != recoveryRetry {
+			return nil
+		}
+	}
+}
+
+func (w *BlastWizard) runWithPanicBoundary(ctx context.Context) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("unexpected internal failure: %v", recovered)
+			appendSessionDebugLog("recovered workflow panic: %v", recovered)
+		}
+	}()
+	return w.run(ctx)
+}
+
+func (w *BlastWizard) run(ctx context.Context) error {
 	if w.instanceRunID != "" && w.instanceID != "" {
 		defer func() {
 			_ = w.markInstanceInactive()
@@ -1212,6 +1244,17 @@ databaseLoop:
 			}
 		}
 	}
+}
+
+func (w *BlastWizard) recoverUnexpectedWorkflowError(err error, backTarget error) (recoveryDecision, error) {
+	if err == nil {
+		return recoveryBack, nil
+	}
+	action, actionErr := w.prompt.WorkflowErrorAction(fmt.Sprintf("Unexpected workflow error: %v", err), backTarget)
+	if actionErr != nil {
+		return recoveryBack, actionErr
+	}
+	return interpretRecoveryAction(action, backTarget, false)
 }
 
 func (w *BlastWizard) runTransferEntry(ctx context.Context) error {

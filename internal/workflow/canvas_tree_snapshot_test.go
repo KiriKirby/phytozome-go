@@ -889,7 +889,10 @@ func TestRestoreCanvasTreeSnapshotRemapsLegacyOutputTreeDirToCache(t *testing.T)
 		t.Fatalf("OutputDir returned error: %v", err)
 	}
 	legacyDir := filepath.Join(outputDir, "tree", "legacy-session", "run1")
-	cacheDir := mustCanvasTreeArtifactDir("legacy-session", "run1")
+	cacheDir, err := canvasTreeArtifactDir("legacy-session", "run1")
+	if err != nil {
+		t.Fatalf("resolve Canvas tree cache: %v", err)
+	}
 	snapshot := treeSnapshotForTest(legacyDir, now)
 	writeTreeSnapshotRestoreArtifacts(t, cacheDir, snapshot)
 

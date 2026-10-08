@@ -41,7 +41,7 @@ type runtimeReleaseManifest struct {
 //go:embed runtime-release.json
 var runtimeReleaseManifestJSON []byte
 
-var currentRuntimeReleaseManifest = mustLoadRuntimeReleaseManifest()
+var currentRuntimeReleaseManifest, runtimeReleaseManifestErr = loadRuntimeReleaseManifest()
 
 type MissingToolsError struct {
 	Tools      []string
@@ -268,7 +268,10 @@ func ResolveDownload() (DownloadAsset, error) {
 	}
 	rawURL := strings.TrimSpace(os.Getenv(envDownloadURL))
 	if rawURL == "" {
-		rawURL = releaseAssetURL(assetName)
+		rawURL, err = releaseAssetURL(assetName)
+		if err != nil {
+			return DownloadAsset{}, err
+		}
 	}
 	return DownloadAsset{URL: rawURL, FileName: assetName}, nil
 }
@@ -666,6 +669,9 @@ func safeArchivePath(targetDir string, entryName string) (string, error) {
 }
 
 func assetNameForPlatform() (string, error) {
+	if runtimeReleaseManifestErr != nil {
+		return "", runtimeReleaseManifestErr
+	}
 	platform, err := runtimeAssetPlatform()
 	if err != nil {
 		return "", err
@@ -852,31 +858,34 @@ func noTimeoutHTTPClient(client *http.Client) *http.Client {
 	return &clone
 }
 
-func releaseAssetURL(assetName string) string {
+func releaseAssetURL(assetName string) (string, error) {
+	if runtimeReleaseManifestErr != nil {
+		return "", runtimeReleaseManifestErr
+	}
 	releaseVersion := strings.TrimSpace(currentRuntimeReleaseManifest.ReleaseTag)
-	return strings.TrimRight(releaseDownloadBaseURL, "/") + "/" + releaseVersion + "/" + strings.TrimSpace(assetName)
+	return strings.TrimRight(releaseDownloadBaseURL, "/") + "/" + releaseVersion + "/" + strings.TrimSpace(assetName), nil
 }
 
-func mustLoadRuntimeReleaseManifest() runtimeReleaseManifest {
+func loadRuntimeReleaseManifest() (runtimeReleaseManifest, error) {
 	var manifest runtimeReleaseManifest
 	if err := json.Unmarshal(runtimeReleaseManifestJSON, &manifest); err != nil {
-		panic(fmt.Errorf("parse PHgo tree runtime release manifest: %w", err))
+		return runtimeReleaseManifest{}, fmt.Errorf("parse PHgo tree runtime release manifest: %w", err)
 	}
 	manifest.ReleaseTag = strings.TrimSpace(manifest.ReleaseTag)
 	if manifest.ReleaseTag == "" {
-		panic("PHgo tree runtime release manifest is missing release_tag")
+		return runtimeReleaseManifest{}, fmt.Errorf("PHgo tree runtime release manifest is missing release_tag")
 	}
 	if len(manifest.Assets) == 0 {
-		panic("PHgo tree runtime release manifest is missing assets")
+		return runtimeReleaseManifest{}, fmt.Errorf("PHgo tree runtime release manifest is missing assets")
 	}
 	for platform, name := range manifest.Assets {
 		platform = strings.TrimSpace(platform)
 		name = strings.TrimSpace(name)
 		if platform == "" || name == "" {
-			panic("PHgo tree runtime release manifest contains an empty platform or asset name")
+			return runtimeReleaseManifest{}, fmt.Errorf("PHgo tree runtime release manifest contains an empty platform or asset name")
 		}
 	}
-	return manifest
+	return manifest, nil
 }
 
 var executableFn = os.Executable

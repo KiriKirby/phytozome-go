@@ -764,7 +764,10 @@ func (w *BlastWizard) buildCanvasTreeArtifactsWithRuntime(ctx context.Context, s
 	}
 	applyCanvasCoordinateMetadata(records, &meta)
 	runID := canvasTreeRunID(now)
-	artifactDir := mustCanvasTreeArtifactDir(w.canvasTreeSessionID(), runID)
+	artifactDir, err := canvasTreeArtifactDir(w.canvasTreeSessionID(), runID)
+	if err != nil {
+		return phylo.RunResult{}, fmt.Errorf("prepare Canvas tree cache: %w", err)
+	}
 	plan, err := phylo.BuildRunPlan(w.canvasTreeSessionID(), runID, artifactDir, settings, canvasTreeTargetSequenceKind(settings), records, meta, "", "", now)
 	if err != nil {
 		return phylo.RunResult{}, err
@@ -1055,12 +1058,8 @@ func sanitizeCanvasTreePathPart(value string) string {
 	return out
 }
 
-func mustCanvasTreeArtifactDir(sessionID string, runID string) string {
-	dir, err := appfs.CacheDir("tree", sanitizeCanvasTreePathPart(sessionID), sanitizeCanvasTreePathPart(runID))
-	if err != nil {
-		panic(err)
-	}
-	return dir
+func canvasTreeArtifactDir(sessionID string, runID string) (string, error) {
+	return appfs.CacheDir("tree", sanitizeCanvasTreePathPart(sessionID), sanitizeCanvasTreePathPart(runID))
 }
 
 func (w *BlastWizard) canvasTreeRowSources(ctx context.Context, state canvasLaunchState, selectedRows []canvasSelectedRow) ([]phylo.RowSource, error) {

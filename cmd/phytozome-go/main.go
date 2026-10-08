@@ -87,11 +87,7 @@ func printBlastPlan() {
 
 func runInteractiveWizard(launch workflow.InstanceLaunchRequest) error {
 	wizard := workflow.NewBlastWizardWithLaunch(os.Stdout, workflowTUIInfo(), launch)
-	err := wizard.Run(context.Background())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "blast wizard failed: %v\n", err)
-	}
-	return err
+	return wizard.Run(context.Background())
 }
 
 func printUsage() {
