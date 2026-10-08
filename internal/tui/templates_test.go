@@ -2075,6 +2075,9 @@ func TestCtrlEnterShortcutRequiresCtrlModifiedEnter(t *testing.T) {
 	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)) {
 		t.Fatal("Ctrl+Enter should match KeyEnter with Ctrl modifier")
 	}
+	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyF13, 0, tcell.ModNone)) {
+		t.Fatal("bundled-terminal F13 transport should match Ctrl+Enter")
+	}
 	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
 		t.Fatal("Ctrl+Enter must not match Ctrl+J, which is emitted by multiline paste")
 	}

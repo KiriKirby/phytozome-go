@@ -372,6 +372,17 @@ return {
   mouse_wheel_scrolls_tabs = false,
   bypass_mouse_reporting_modifiers = 'CTRL',
 
+  keys = {
+      {
+        key = 'Enter',
+        mods = 'CTRL',
+        -- tcell v2.0.1 does not decode CSI-u Ctrl+Enter.  F13 is unused by
+        -- PHgo and has a stable terminfo sequence, so use it as an internal
+        -- transport key and translate it back in the application.
+        action = act.SendKey { key = 'F13' },
+      },
+  },
+
   mouse_bindings = {
     {
       event = { Up = { streak = 1, button = 'Left' } },

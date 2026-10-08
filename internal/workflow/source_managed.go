@@ -24,6 +24,8 @@ func sourceDatabaseName(src source.DataSource) string {
 		return "phytozome"
 	case "lemna", "lemna.org":
 		return "lemna"
+	case "cyp":
+		return "cyp"
 	case "tair":
 		return "tair"
 	case "ncbi":
@@ -39,6 +41,8 @@ func sourceDomain(database string) string {
 		return "phytozome-next.jgi.doe.gov"
 	case "lemna", "lemna.org":
 		return "www.lemna.org"
+	case "cyp":
+		return ""
 	case "tair":
 		return "www.arabidopsis.org"
 	case "ncbi":

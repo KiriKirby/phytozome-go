@@ -45,6 +45,7 @@ type MainSpeciesOption struct {
 	Label       string
 	Description string
 	SearchText  string
+	Disabled    bool
 }
 
 type MainInterfaceState struct {
@@ -61,6 +62,9 @@ type MainKeywordState struct {
 	PLAZAGeneLocusPriority    bool // Deprecated compatibility alias for the old PLAZA checkbox state.
 	SpeciesKey                string
 	SpeciesLabel              string
+	SpeciesMode               string
+	FallbackSpeciesKey        string
+	FallbackSpeciesLabel      string
 	Rows                      []MainKeywordRow
 	Grid                      GridEditorState
 }
@@ -72,10 +76,12 @@ const (
 )
 
 type MainKeywordRow struct {
-	SearchTerm string
-	SymbolName string
-	GeneLocus  string
-	Aliases    []string
+	SearchTerm   string
+	SymbolName   string
+	GeneLocus    string
+	SpeciesKey   string
+	SpeciesLabel string
+	Aliases      []string
 }
 
 type MainBlastState struct {
@@ -142,15 +148,16 @@ type GridEditorState struct {
 }
 
 type gridColumn struct {
-	ID     string
-	Title  string
-	Get    func(int) string
-	Set    func(int, string)
-	Min    int
-	Weight int
-	KeepNL bool
-	Fixed  int
-	Wrap   bool
+	ID       string
+	Title    string
+	Get      func(int) string
+	Set      func(int, string)
+	Min      int
+	Weight   int
+	KeepNL   bool
+	Fixed    int
+	Wrap     bool
+	ReadOnly bool
 }
 
 type mainModuleFocus struct {
@@ -161,19 +168,20 @@ type mainModuleFocus struct {
 
 type mainGridEditor struct {
 	*tview.Box
-	columns     []gridColumn
-	rowCount    func() int
-	ensureRows  func(int)
-	cleanRows   func()
-	state       *GridEditorState
-	caretByCell map[string]int
-	rowOffset   int
-	colOffset   int
-	status      *tview.TextView
-	pasteLines  func(string, int) []string
-	enterRows   bool
-	fastaGrid   bool
-	onFocusCell func()
+	columns       []gridColumn
+	rowCount      func() int
+	ensureRows    func(int)
+	cleanRows     func()
+	state         *GridEditorState
+	caretByCell   map[string]int
+	rowOffset     int
+	colOffset     int
+	status        *tview.TextView
+	pasteLines    func(string, int) []string
+	enterRows     bool
+	fastaGrid     bool
+	onFocusCell   func()
+	onSpecialCell func(row int, column string)
 }
 
 type gridVisualLine struct {
@@ -211,6 +219,9 @@ func NormalizeMainInterfaceState(state MainInterfaceState) MainInterfaceState {
 	}
 	if state.Keyword.SearchTypeID == "" {
 		state.Keyword.SearchTypeID = mainKeywordSearchType(state.Keyword.DatabaseID).ID
+	}
+	if state.Keyword.SpeciesMode == "" {
+		state.Keyword.SpeciesMode = "custom"
 	}
 	state.Keyword.GeneLocusPriorityDatabase = normalizeGeneLocusPriorityDatabase(state.Keyword.GeneLocusPriorityDatabase)
 	if state.Keyword.GeneLocusPriorityDatabase == GeneLocusPriorityNone && state.Keyword.PLAZAGeneLocusPriority {
@@ -255,9 +266,10 @@ func MainKeywordRowsForExecution(rows []MainKeywordRow) []MainKeywordRow {
 			SearchTerm: normalizeMainGridValue(row.SearchTerm),
 			SymbolName: normalizeMainGridValue(row.SymbolName),
 			GeneLocus:  normalizeMainGridValue(row.GeneLocus),
-			Aliases:    mainAliasChoices(row.SymbolName, row.Aliases),
+			SpeciesKey: normalizeMainSpeciesKey(row.SpeciesKey), SpeciesLabel: normalizeMainSpeciesValue(row.SpeciesLabel),
+			Aliases: mainAliasChoices(row.SymbolName, row.Aliases),
 		}
-		if normalized.SearchTerm == "" && normalized.SymbolName == "" && normalized.GeneLocus == "" {
+		if normalized.SearchTerm == "" && normalized.SymbolName == "" && normalized.GeneLocus == "" && normalized.SpeciesLabel == "" {
 			continue
 		}
 		out = append(out, normalized)
@@ -302,6 +314,30 @@ func normalizeMainSpeciesOptions(options []MainSpeciesOption) []MainSpeciesOptio
 	return out
 }
 
+// normalizeMainSpeciesValue preserves the spaces that are significant in
+// scientific names while removing terminal/control whitespace introduced by
+// terminal editing or pasted values.
+func normalizeMainSpeciesValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "\t", " ")
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "~" {
+		return ""
+	}
+	return value
+}
+
+// SpeciesKey is an opaque UI identity and may contain NUL separators. Do not
+// run it through whitespace normalization, which would destroy that identity.
+func normalizeMainSpeciesKey(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", ""), "\n", ""))
+	if value == "~" {
+		return ""
+	}
+	return value
+}
+
 func filterMainSpeciesOptions(query string, options []MainSpeciesOption) []MainSpeciesOption {
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
@@ -332,8 +368,11 @@ func MainKeywordValidationIssues(state MainKeywordState) []string {
 	if strings.TrimSpace(state.DatabaseID) == "" {
 		issues = append(issues, "Choose a database.")
 	}
-	if searchType.RequiresSpecies && strings.TrimSpace(state.SpeciesLabel) == "" {
+	if searchType.RequiresSpecies && state.DatabaseID != "cyp" && strings.TrimSpace(state.SpeciesLabel) == "" {
 		issues = append(issues, "Set species.")
+	}
+	if state.DatabaseID == "cyp" && state.SpeciesMode != "custom" && strings.TrimSpace(state.FallbackSpeciesLabel) == "" {
+		issues = append(issues, "Set the CYP species for this mode.")
 	}
 	rows := MainKeywordRowsForExecution(state.Rows)
 	if len(rows) == 0 {
@@ -343,6 +382,18 @@ func MainKeywordValidationIssues(state MainKeywordState) []string {
 	for i, row := range rows {
 		if strings.TrimSpace(row.SearchTerm) == "" {
 			issues = append(issues, fmt.Sprintf("Row %d is missing search term.", i+1))
+		}
+		if state.DatabaseID == "cyp" && state.SpeciesMode == "custom" && strings.TrimSpace(row.SpeciesLabel) == "" {
+			inherited := false
+			for j := i - 1; j >= 0; j-- {
+				if strings.TrimSpace(rows[j].SpeciesLabel) != "" {
+					inherited = true
+					break
+				}
+			}
+			if !inherited {
+				issues = append(issues, fmt.Sprintf("Row %d has no species and no earlier row species to inherit.", i+1))
+			}
 		}
 	}
 	return issues
@@ -822,6 +873,9 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		status := hintView("Loading species candidates...")
 		modalBody.AddItem(inputFrame, 0, 0, true)
 		modalBody.AddItem(results, 0, 1, false)
+		if request.DatabaseID == "cyp" {
+			modalBody.AddItem(hintView("Category filter: a:/A: animals, p:/P: plants, f:/F: fungi, b:/B: bacteria; add a space before the search term."), 1, 0, false)
+		}
 		modalBody.AddItem(status, 1, 0, false)
 
 		var options []MainSpeciesOption
@@ -829,12 +883,23 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		selected := 0
 		loading := true
 		useSearch := true
+		confirmed := false
 		var close func()
 		close = func() {
 			cancel()
 			modalKeyHandler = nil
+			reverted := request.DatabaseID == "cyp" && request.Mode == "keyword" && !confirmed && state.Keyword.SpeciesMode != "custom"
+			if reverted {
+				state.Keyword.SpeciesMode = "custom"
+				state.Keyword.FallbackSpeciesKey = ""
+				state.Keyword.FallbackSpeciesLabel = ""
+			}
 			setPageRoot(app, root)
-			focusCurrentModule()
+			if reverted {
+				rebuild()
+			} else {
+				focusCurrentModule()
+			}
 		}
 		applyFilter := func() {
 			if useSearch {
@@ -875,7 +940,13 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 				if !useSearch && i < 9 {
 					prefix = fmt.Sprintf("%d. ", i+1)
 				}
-				results.SetCell(i*2, 0, tview.NewTableCell(prefix+option.Label).
+				label := prefix + option.Label
+				if option.Disabled {
+					label += " [no data]"
+					nameStyle = colorMuted
+					detailStyle = colorMuted
+				}
+				results.SetCell(i*2, 0, tview.NewTableCell(label).
 					SetTextColor(nameStyle).
 					SetExpansion(1).
 					SetClickedFunc(func() bool {
@@ -905,13 +976,32 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 				return
 			}
 			option := filtered[selected]
+			if option.Disabled {
+				status.SetText("This species has no CYP data and cannot be selected.")
+				return
+			}
 			if state.ActiveTab == "blast" {
 				state.Blast.SpeciesKey = option.Key
 				state.Blast.SpeciesLabel = option.Label
 			} else {
-				state.Keyword.SpeciesKey = option.Key
-				state.Keyword.SpeciesLabel = option.Label
+				if state.Keyword.DatabaseID == "cyp" {
+					if state.Keyword.SpeciesMode == "custom" && state.Keyword.Grid.ActiveRow >= 0 && state.Keyword.Grid.ActiveRow < len(state.Keyword.Rows) {
+						state.Keyword.Rows[state.Keyword.Grid.ActiveRow].SpeciesKey = option.Key
+						state.Keyword.Rows[state.Keyword.Grid.ActiveRow].SpeciesLabel = option.Label
+					} else {
+						state.Keyword.FallbackSpeciesKey = option.Key
+						state.Keyword.FallbackSpeciesLabel = option.Label
+					}
+					if state.Keyword.SpeciesMode == "all" {
+						state.Keyword.SpeciesKey = option.Key
+						state.Keyword.SpeciesLabel = option.Label
+					}
+				} else {
+					state.Keyword.SpeciesKey = option.Key
+					state.Keyword.SpeciesLabel = option.Label
+				}
 			}
+			confirmed = true
 			close()
 			rebuild()
 		}
@@ -1080,7 +1170,7 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 			switchTabDelta(1)
 			return nil
 		}
-		if app.GetFocus() != nil && app.GetFocus() != root {
+		if app.GetFocus() != nil {
 			switch {
 			case shortcutMatchesEvent("Ctrl+Enter", event):
 				switch state.ActiveTab {
@@ -1227,7 +1317,7 @@ func buildMainKeywordTab(app *tview.Application, state *MainInterfaceState, requ
 		state.Keyword.GeneLocusPriorityDatabase = GeneLocusPriorityNone
 		state.Keyword.PLAZAGeneLocusPriority = false
 	}
-	if searchType.ShowsSpecies {
+	if searchType.ShowsSpecies && state.Keyword.DatabaseID != "cyp" {
 		button := newMainActionButton("Species", mainSpeciesButtonLabel(state.Keyword.SpeciesLabel), func() {
 			if requestSpecies != nil {
 				requestSpecies("keyword")
@@ -1236,10 +1326,42 @@ func buildMainKeywordTab(app *tview.Application, state *MainInterfaceState, requ
 		options.AddItem(newMainControlField("Species", button), 0, 1, false)
 		optionControls = append(optionControls, button)
 	}
-	module.AddItem(options, mainOptionsHeight(searchType.ShowsSpecies, len(cap.SearchTypes) > 0), 0, false)
+	if state.Keyword.DatabaseID == "cyp" {
+		mode := mainDropDownWithRefresh("Species", []Option{{Value: "custom", Label: "Custom"}, {Value: "all", Label: "Set all"}, {Value: "fallback", Label: "Set remaining"}}, state.Keyword.SpeciesMode, func(value string) {
+			state.Keyword.SpeciesMode = value
+		}, refresh)
+		mode.SetSelectedFunc(func(_ string, index int) {
+			values := []string{"custom", "all", "fallback"}
+			if index < 0 || index >= len(values) {
+				return
+			}
+			value := values[index]
+			state.Keyword.SpeciesMode = value
+			if value != "custom" && requestSpecies != nil {
+				requestSpecies("keyword")
+			} else if refresh != nil {
+				refresh()
+			}
+		})
+		options.AddItem(newMainControlField("Species", mode), 0, 1, false)
+		optionControls = append(optionControls, mode)
+		if state.Keyword.SpeciesMode != "custom" {
+			// The selected species button remains visible as the all/fallback target.
+			state.Keyword.SpeciesLabel = state.Keyword.FallbackSpeciesLabel
+		}
+	}
+	module.AddItem(options, mainOptionsHeight(searchType.ShowsSpecies || state.Keyword.DatabaseID == "cyp", len(cap.SearchTypes) > 0), 0, false)
 
 	status := hintView("")
-	grid := newKeywordGridEditor(&state.Keyword.Rows, &state.Keyword.Grid, status, searchType)
+	grid := newKeywordGridEditor(&state.Keyword.Rows, &state.Keyword.Grid, status, searchType, state.Keyword.SpeciesMode)
+	grid.onSpecialCell = func(row int, column string) {
+		if column == "species" && state.Keyword.DatabaseID == "cyp" {
+			state.Keyword.Grid.ActiveRow = row
+			if requestSpecies != nil {
+				requestSpecies("keyword")
+			}
+		}
+	}
 	content := newButtonFlex()
 	content.SetBorder(true)
 	content.SetTitle(" Search content ")
@@ -1341,7 +1463,7 @@ func buildMainExploreTab(_ *tview.Application, state *MainInterfaceState) (tview
 	return module, []mainModuleFocus{{box: module.Box, controls: []tview.Primitive{exploreList}}}
 }
 
-func newKeywordGridEditor(rows *[]MainKeywordRow, state *GridEditorState, status *tview.TextView, capability mainSearchTypeCapability) *mainGridEditor {
+func newKeywordGridEditor(rows *[]MainKeywordRow, state *GridEditorState, status *tview.TextView, capability mainSearchTypeCapability, speciesMode ...string) *mainGridEditor {
 	ensure := func(n int) {
 		for len(*rows) < n {
 			*rows = append(*rows, MainKeywordRow{})
@@ -1359,6 +1481,19 @@ func newKeywordGridEditor(rows *[]MainKeywordRow, state *GridEditorState, status
 	}
 	if capability.ShowsGeneLocus {
 		cols = append(cols, gridColumn{ID: "locus", Title: "Gene locus", Weight: 2, Get: func(i int) string { return (*rows)[i].GeneLocus }, Set: func(i int, v string) { (*rows)[i].GeneLocus = v }})
+	}
+	showCYPRowSpecies := capability.ID == "cyp" && (len(speciesMode) == 0 || speciesMode[0] != "all")
+	if showCYPRowSpecies {
+		cols = append(cols, gridColumn{ID: "species", Title: "Species", Weight: 3, ReadOnly: true, Get: func(i int) string {
+			row := (*rows)[i]
+			if strings.TrimSpace(row.SearchTerm) == "" && strings.TrimSpace(row.SymbolName) == "" && strings.TrimSpace(row.GeneLocus) == "" {
+				return ""
+			}
+			if value := strings.TrimSpace(row.SpeciesLabel); value != "" {
+				return value
+			}
+			return "[ set species... ]"
+		}, Set: func(int, string) {}})
 	}
 	grid := newMainGridEditor(cols, func() int { return len(*rows) }, ensure, clean, state, status)
 	grid.enterRows = true
@@ -1418,10 +1553,12 @@ func MainKeywordRowsForDisplay(rows []MainKeywordRow) []MainKeywordRow {
 	out := make([]MainKeywordRow, 0, len(rows)+1)
 	for _, row := range rows {
 		normalized := MainKeywordRow{
-			SearchTerm: normalizeMainGridValue(row.SearchTerm),
-			SymbolName: normalizeMainGridValue(row.SymbolName),
-			GeneLocus:  normalizeMainGridValue(row.GeneLocus),
-			Aliases:    mainAliasChoices(row.SymbolName, row.Aliases),
+			SearchTerm:   normalizeMainGridValue(row.SearchTerm),
+			SymbolName:   normalizeMainGridValue(row.SymbolName),
+			GeneLocus:    normalizeMainGridValue(row.GeneLocus),
+			SpeciesKey:   normalizeMainSpeciesKey(row.SpeciesKey),
+			SpeciesLabel: normalizeMainSpeciesValue(row.SpeciesLabel),
+			Aliases:      mainAliasChoices(row.SymbolName, row.Aliases),
 		}
 		if normalized.SearchTerm == "" && normalized.SymbolName == "" && normalized.GeneLocus == "" {
 			continue
@@ -1759,6 +1896,7 @@ func (g *mainGridEditor) HandleKey(event *tcell.EventKey, app *tview.Application
 		return false
 	}
 	g.normalizeCursor()
+	readOnly := g.state.ActiveCol >= 0 && g.state.ActiveCol < len(g.columns) && g.columns[g.state.ActiveCol].ReadOnly
 	switch event.Key() {
 	case tcell.KeyUp:
 		g.moveVisualUp()
@@ -1779,15 +1917,27 @@ func (g *mainGridEditor) HandleKey(event *tcell.EventKey, app *tview.Application
 		g.notifyFocusCell()
 		return true
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
+		if readOnly {
+			return true
+		}
 		g.backspace()
 		return true
 	case tcell.KeyDelete:
+		if readOnly {
+			return true
+		}
 		g.deleteAtCaret()
 		return true
 	case tcell.KeyHome:
+		if readOnly {
+			return true
+		}
 		g.setCaret(0)
 		return true
 	case tcell.KeyEnd:
+		if readOnly {
+			return true
+		}
 		g.setCaret(utf8.RuneCountInString(g.currentValue()))
 		return true
 	case tcell.KeyEnter:
@@ -1799,6 +1949,12 @@ func (g *mainGridEditor) HandleKey(event *tcell.EventKey, app *tview.Application
 			return true
 		}
 		if g.enterRows {
+			if g.onSpecialCell != nil && g.state.ActiveCol >= 0 && g.state.ActiveCol < len(g.columns) {
+				if g.columns[g.state.ActiveCol].ID == "species" {
+					g.onSpecialCell(g.state.ActiveRow, "species")
+					return true
+				}
+			}
 			line, col := g.caretVisualPosition(g.activeColumnWidth())
 			_ = line
 			g.state.ActiveRow++
@@ -1814,12 +1970,19 @@ func (g *mainGridEditor) HandleKey(event *tcell.EventKey, app *tview.Application
 		return false
 	case tcell.KeyRune:
 		if event.Rune() == ' ' {
+			if g.onSpecialCell != nil && g.state.ActiveCol >= 0 && g.state.ActiveCol < len(g.columns) && g.columns[g.state.ActiveCol].ID == "species" {
+				g.onSpecialCell(g.state.ActiveRow, "species")
+				return true
+			}
 			g.nextColumn()
 			g.notifyFocusCell()
 			return true
 		}
 		if event.Rune() == '\t' {
 			return false
+		}
+		if readOnly {
+			return true
 		}
 		if event.Rune() == 0 || event.Rune() < 32 {
 			return false
@@ -1830,6 +1993,9 @@ func (g *mainGridEditor) HandleKey(event *tcell.EventKey, app *tview.Application
 		g.insertText(string(event.Rune()))
 		return true
 	case tcell.KeyCtrlV:
+		if readOnly {
+			return true
+		}
 		g.PasteClipboard(app)
 		return true
 	}
@@ -1850,6 +2016,9 @@ func (g *mainGridEditor) PasteClipboard(app *tview.Application) {
 }
 
 func (g *mainGridEditor) PasteText(text string) {
+	if g != nil && g.state != nil && g.state.ActiveCol >= 0 && g.state.ActiveCol < len(g.columns) && g.columns[g.state.ActiveCol].ReadOnly {
+		return
+	}
 	lines := splitMainPasteLines(text)
 	if g.pasteLines != nil {
 		lines = g.pasteLines(text, g.state.ActiveCol)
@@ -2036,6 +2205,9 @@ func (g *mainGridEditor) MouseHandler() func(tview.MouseAction, *tcell.EventMous
 				targetLine := my - rowTop - topPad
 				targetCol := mx - selectedColX - mainGridContentOffset()
 				g.setCaretFromVisualPosition(targetLine, targetCol, contentWidth)
+				if g.onSpecialCell != nil && g.state.ActiveCol >= 0 && g.state.ActiveCol < len(g.columns) && g.columns[g.state.ActiveCol].ID == "species" {
+					g.onSpecialCell(g.state.ActiveRow, "species")
+				}
 			}
 			g.notifyFocusCell()
 			return true, g
@@ -2762,6 +2934,7 @@ func mainGeneLocusPriorityOptions() []Option {
 func mainKeywordCapabilities() []mainCapability {
 	return []mainCapability{
 		{ID: "phytozome", Label: "Phytozome keyword", Description: "keyword search in Phytozome species", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: true},
+		{ID: "cyp", Label: "CYP / P450 keyword", Description: "local CYP database from Dr Nelson's four categories", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true},
 		{ID: "lemna", Label: "lemna keyword", Description: "keyword search in lemna.org releases", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: false},
 		{ID: "tair", Label: "TAIR keyword", Description: "keyword search in TAIR Arabidopsis releases", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: false},
 		{ID: "ncbi", Label: "NCBI Entrez keyword", Description: "Entrez/E-utilities search across NCBI database types", SearchTypes: mainNCBISearchTypeCapabilities(), DefaultSearchTypeID: "protein", ShowsSymbolName: true, ShowsGeneLocus: true},
@@ -2822,7 +2995,7 @@ func mainKeywordSearchType(databaseID string) mainSearchTypeCapability {
 func mainKeywordSearchTypeFor(cap mainCapability, id string) mainSearchTypeCapability {
 	if len(cap.SearchTypes) == 0 {
 		return mainSearchTypeCapability{
-			ID:              "keyword",
+			ID:              firstString([]string{cap.ID}, "keyword"),
 			Label:           "Keyword",
 			RequiresSpecies: cap.RequiresSpecies,
 			ShowsSpecies:    cap.ShowsSpecies,

@@ -31,6 +31,7 @@ var keywordDisplayColumnIDsByDatabase = map[string][]string{
 	"tair":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
 	"ncbi":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "protein_id", "gene_identifier", "description", "genome"},
 	"plaza":     {"source_database", "search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "protein_id", "transcript", "gene_identifier", "genome", "uniprot", "description"},
+	"cyp":       {"source_database", "search_term", "search_type", "label_name", "gene_identifier", "sequence_id", "description", "genome", "gene_report_url"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
@@ -39,6 +40,7 @@ var keywordDetailColumnIDsByDatabase = map[string][]string{
 	"tair":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"ncbi":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "synonyms", "protein_id", "gene_identifier", "genome", "location", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"plaza":     {"source_database", "search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
+	"cyp":       {"source_database", "search_term", "search_type", "label_name", "gene_identifier", "genome", "description", "gene_report_url", "sequence_id"},
 }
 
 var keywordExportColumnIDsByDatabase = map[string][]string{

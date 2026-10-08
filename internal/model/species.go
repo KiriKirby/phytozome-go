@@ -21,6 +21,7 @@ type SpeciesCandidate struct {
 	GroupKey    string
 	ParentKey   string
 	HasChildren bool
+	Disabled    bool
 	LabelName   string
 	PhgoAliases string
 }

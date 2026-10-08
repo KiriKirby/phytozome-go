@@ -1012,3 +1012,12 @@ Priority 4 (low / optional)
 ---
 End of agent notes.
 
+## CYP / P450 database integration
+
+- The runtime CYP connector is `internal/cyp` and consumes a separately published `p450phgo.pgd` bbolt file. It never builds the database from Dr Nelson web pages.
+- The application downloads/validates the PGD on first CYP selection, stores it beside the executable, and falls back to Phytozome on failure. `PHGO_CYP_PGD_URL` overrides the published raw asset for testing.
+- PGD generation scripts, source analysis, schema documentation, and releases belong in the independent `phytozome-go-p450phgo` repository; the runtime repository keeps only the reader and integration docs.
+- The published repository is https://github.com/KiriKirby/phytozome-go-p450phgo and its release manifest carries the database URL, byte length, and SHA-256. The runtime checks this manifest whenever CYP is selected, reuses an exact local copy, and atomically replaces an outdated copy.
+- CYP audit status (2026-10-08): all 167 Dr Nelson resource files (40 animals, 59 plants, 61 fungi, 7 bacteria) were downloaded and Office-normalized, with one audit Markdown file per resource in the independent repository. The formal PGD intentionally contains only reviewed structured records (currently the 15 CAld5H/CYP84 Table S2 relationships); unreviewed DOC/XLSX and aggregate bacterial/public collections are indexed as disabled species and must not enter search through generic binary/string scanning. The builder's legacy printable-byte collector is no longer used for published records.
+- In CYP keyword Custom/Set-remaining modes, the row Species column is an action-only cell: inactive blank rows render empty, active rows without a choice render `[ set species... ]`, and keyboard text/paste/delete cannot edit it. Space or Enter opens the selector. Closing the selector without choosing after selecting Set all or Set remaining restores the mode to Custom. Category-prefix help belongs inside the CYP species selector, not on the main keyword page.
+

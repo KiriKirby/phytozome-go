@@ -31,6 +31,22 @@ func TestMainKeywordRowsNormalizeExecutionRows(t *testing.T) {
 	}
 }
 
+func TestMainKeywordRowsNormalizeDisplayPreservesCYPSpecies(t *testing.T) {
+	const speciesKey = "Oryza sativa\x00Oryza sativa\x000\x00local"
+	rows := []MainKeywordRow{{SearchTerm: "CYP84A6", SpeciesKey: speciesKey, SpeciesLabel: "  Oryza\t sativa  "}}
+	got := MainKeywordRowsForDisplay(rows)
+	if len(got) != 2 {
+		t.Fatalf("expected populated row plus trailing row, got %#v", got)
+	}
+	if got[0].SpeciesKey != speciesKey || got[0].SpeciesLabel != "Oryza sativa" {
+		t.Fatalf("CYP species lost during display normalization: %#v", got[0])
+	}
+	exec := MainKeywordRowsForExecution(got)
+	if len(exec) != 1 || exec[0].SpeciesLabel != "Oryza sativa" || exec[0].SpeciesKey != speciesKey {
+		t.Fatalf("CYP species lost before execution: %#v", exec)
+	}
+}
+
 func TestMainBlastRowsNormalizeDisplayRows(t *testing.T) {
 	rows := []MainBlastRow{
 		{FASTA: " MEP NTM ", SymbolName: "~"},
@@ -735,6 +751,86 @@ func TestRunMainInterfacePageBuildsWithoutTerminalPanic(t *testing.T) {
 	_, err := RunMainInterfacePage(MainInterfacePage{State: DefaultMainInterfaceState()})
 	if err != nil {
 		t.Fatalf("RunMainInterfacePage returned error: %v", err)
+	}
+}
+
+func TestMainInterfaceCtrlEnterWorksWhenRootHasFocus(t *testing.T) {
+	oldNewApp, oldRunApp := newApp, runApp
+	defer func() { newApp = oldNewApp; runApp = oldRunApp }()
+	newApp = func() *tview.Application { return tview.NewApplication() }
+	runApp = func(app *tview.Application) error {
+		handler := app.GetInputCapture()
+		if handler == nil {
+			t.Fatal("missing input capture")
+		}
+		event := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)
+		if got := handler(event); got != nil {
+			t.Fatal("Ctrl+Enter was not consumed")
+		}
+		app.Stop()
+		return nil
+	}
+	state := DefaultMainInterfaceState()
+	state.Keyword.Rows = []MainKeywordRow{{SearchTerm: "CYP84"}}
+	state.Keyword.DatabaseID = "phytozome"
+	state.Keyword.SpeciesLabel = "Arabidopsis"
+	state.Keyword.SpeciesKey = "key"
+	result, err := RunMainInterfacePage(MainInterfacePage{State: state})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != MainActionKeywordSearch {
+		t.Fatalf("action=%q", result.Action)
+	}
+}
+
+func TestCYPKeywordSpeciesColumnModesAndValidation(t *testing.T) {
+	cap := mainKeywordSearchType("cyp")
+	if cap.ID != "cyp" {
+		t.Fatalf("CYP search type ID=%q", cap.ID)
+	}
+	rows := []MainKeywordRow{{SearchTerm: "CYP73", SpeciesLabel: "Arabidopsis thaliana"}}
+	custom := newKeywordGridEditor(&rows, &GridEditorState{}, nil, cap, "custom")
+	if !containsString(columnIDs(custom.columns), "species") {
+		t.Fatal("custom mode must show species column")
+	}
+	var speciesCol gridColumn
+	for _, column := range custom.columns {
+		if column.ID == "species" {
+			speciesCol = column
+		}
+	}
+	if !speciesCol.ReadOnly {
+		t.Fatal("CYP species column must be read-only")
+	}
+	if got := speciesCol.Get(0); got != "Arabidopsis thaliana" {
+		t.Fatalf("selected species cell=%q", got)
+	}
+	blankRows := []MainKeywordRow{{}}
+	blankGrid := newKeywordGridEditor(&blankRows, &GridEditorState{}, nil, cap, "custom")
+	for _, column := range blankGrid.columns {
+		if column.ID == "species" && column.Get(0) != "" {
+			t.Fatalf("inactive row species=%q, want empty", column.Get(0))
+		}
+	}
+	activeRows := []MainKeywordRow{{SearchTerm: "CYP73"}}
+	activeGrid := newKeywordGridEditor(&activeRows, &GridEditorState{}, nil, cap, "custom")
+	for _, column := range activeGrid.columns {
+		if column.ID == "species" && column.Get(0) != "[ set species... ]" {
+			t.Fatalf("active row species=%q", column.Get(0))
+		}
+	}
+	all := newKeywordGridEditor(&rows, &GridEditorState{}, nil, cap, "all")
+	if containsString(columnIDs(all.columns), "species") {
+		t.Fatal("set-all mode must hide species column")
+	}
+	issues := MainKeywordValidationIssues(MainKeywordState{DatabaseID: "cyp", SearchTypeID: "cyp", SpeciesMode: "custom", Rows: []MainKeywordRow{{SearchTerm: "CYP73"}}})
+	if len(issues) == 0 {
+		t.Fatal("first custom row without species must be rejected")
+	}
+	issues = MainKeywordValidationIssues(MainKeywordState{DatabaseID: "cyp", SearchTypeID: "cyp", SpeciesMode: "custom", Rows: []MainKeywordRow{{SearchTerm: "CYP73", SpeciesLabel: "Arabidopsis"}, {SearchTerm: "CYP84"}}})
+	if len(issues) != 0 {
+		t.Fatalf("later blank species should inherit: %v", issues)
 	}
 }
 

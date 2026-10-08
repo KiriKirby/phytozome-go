@@ -4288,6 +4288,7 @@ func keywordExtraDetailHidden(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "plaza_fasta", "plaza_fasta_header", "plaza_protein_sequence",
 		"ncbi_fasta", "ncbi_fasta_header", "ncbi_protein_sequence",
+		"cyp_fasta", "cyp_fasta_header", "cyp_sequence",
 		"protein_sequence", "sequence", "peptide_sequence", "fasta_sequence", "attr_translation":
 		return true
 	default:
@@ -4299,8 +4300,8 @@ func keywordInlineDetailFASTA(row model.KeywordResultRow) string {
 	if row.ExtraColumns == nil {
 		return ""
 	}
-	header := firstNonEmptyText(strings.TrimSpace(row.ExtraColumns["plaza_fasta_header"]), strings.TrimSpace(row.ExtraColumns["ncbi_fasta_header"]))
-	if raw := firstNonEmptyText(strings.TrimSpace(row.ExtraColumns["plaza_fasta"]), strings.TrimSpace(row.ExtraColumns["ncbi_fasta"])); raw != "" {
+	header := firstNonEmptyText(strings.TrimSpace(row.ExtraColumns["plaza_fasta_header"]), strings.TrimSpace(row.ExtraColumns["ncbi_fasta_header"]), strings.TrimSpace(row.ExtraColumns["cyp_fasta_header"]))
+	if raw := firstNonEmptyText(strings.TrimSpace(row.ExtraColumns["plaza_fasta"]), strings.TrimSpace(row.ExtraColumns["ncbi_fasta"]), strings.TrimSpace(row.ExtraColumns["cyp_fasta"])); raw != "" {
 		rawHeader, sequence := splitDetailFASTA(raw)
 		if rawHeader != "" {
 			header = rawHeader
@@ -4309,7 +4310,7 @@ func keywordInlineDetailFASTA(row model.KeywordResultRow) string {
 			return formatInlineDetailFASTA(header, sequence)
 		}
 	}
-	for _, key := range []string{"plaza_protein_sequence", "ncbi_protein_sequence", "protein_sequence", "sequence", "peptide_sequence", "fasta_sequence", "attr_translation"} {
+	for _, key := range []string{"plaza_protein_sequence", "ncbi_protein_sequence", "cyp_sequence", "protein_sequence", "sequence", "peptide_sequence", "fasta_sequence", "attr_translation"} {
 		value := strings.TrimSpace(row.ExtraColumns[key])
 		if value == "" {
 			continue
@@ -6875,6 +6876,10 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 			Value: func(row model.KeywordResultRow) string {
 				return strings.TrimSpace(row.UniProt)
 			},
+		},
+		"sequence_id": {
+			ID: "sequence_id", Header: ColumnCompactHeader("sequence_id", options), Sortable: true,
+			Value: func(row model.KeywordResultRow) string { return strings.TrimSpace(row.SequenceID) },
 		},
 	}
 	for _, id := range []string{

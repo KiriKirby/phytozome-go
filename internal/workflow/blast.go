@@ -27,6 +27,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/blastplus"
+	"github.com/KiriKirby/phytozome-go/internal/cyp"
 	"github.com/KiriKirby/phytozome-go/internal/export"
 	"github.com/KiriKirby/phytozome-go/internal/fastautil"
 	"github.com/KiriKirby/phytozome-go/internal/interpro"
@@ -1449,6 +1450,8 @@ func (w *BlastWizard) dataSourceForDatabase(database string) (source.DataSource,
 		return phytozome.NewClient(w.httpClient), nil
 	case "lemna":
 		return lemna.NewClient(w.httpClient), nil
+	case "cyp":
+		return cyp.NewClient(w.httpClient), nil
 	case "tair":
 		return tair.NewClient(w.httpClient), nil
 	case "ncbi":
@@ -2224,7 +2227,15 @@ keywordInputLoop:
 				continue
 			}
 			autoIdentifyLabels := false
-			manualLabels, labelErr := w.prompt.KeywordLabelNames(len(keywords), prompt.ErrBackToQueryInput)
+			var manualLabels []string
+			var labelErr error
+			if strings.EqualFold(sourceDatabaseName(w.source), "cyp") {
+				// CYP PGD rows already contain their authoritative symbol.  The
+				// generic label prompt/global symbol DB is not applicable here.
+				autoIdentifyLabels = true
+			} else {
+				manualLabels, labelErr = w.prompt.KeywordLabelNames(len(keywords), prompt.ErrBackToQueryInput)
+			}
 			identifications := manualKeywordLabelIdentifications(manualLabels, len(keywords))
 			if errors.Is(labelErr, prompt.ErrAutoIdentifyRequested) {
 				autoIdentifyLabels = true
@@ -10289,6 +10300,12 @@ func aliasRankRequestFromKeywordSearchTerm(taskTimestamp string, itemIndex int, 
 }
 
 func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup) ([]keywordLabelIdentification, error) {
+	// CYP records already carry the authoritative symbol from the local PGD.
+	// Do not ask the unrelated global symbol-name database to reinterpret it;
+	// that database does not contain every Dr. Nelson CYP family.
+	if strings.EqualFold(sourceDatabaseName(w.source), "cyp") {
+		return autoIdentifyCYPKeywordLabels(groups), nil
+	}
 	if !w.suppressTaskModals {
 		if err := w.ensureSymbolNameDatabase(ctx, prompt.ErrBackToQueryInput); err != nil {
 			return nil, err
@@ -10315,6 +10332,26 @@ func (w *BlastWizard) autoIdentifyKeywordLabelsWithProgress(ctx context.Context,
 		notifyaudio.PlayDone()
 	}
 	return identifications, err
+}
+
+func autoIdentifyCYPKeywordLabels(groups []model.KeywordSearchGroup) []keywordLabelIdentification {
+	out := make([]keywordLabelIdentification, len(groups))
+	for i, group := range groups {
+		label := strings.TrimSpace(group.LabelName)
+		if label == "" {
+			for _, row := range group.Rows {
+				label = firstNonEmpty(strings.TrimSpace(row.LabelName), strings.TrimSpace(row.GeneIdentifier), strings.TrimSpace(row.SequenceID))
+				if label != "" {
+					break
+				}
+			}
+		}
+		if label == "" {
+			label = strings.TrimSpace(group.SearchTerm)
+		}
+		out[i] = keywordLabelIdentification{ItemIndex: i, Aliases: []string{label}, SourceType: "CYP database symbol"}
+	}
+	return out
 }
 
 func (w *BlastWizard) autoIdentifyLemnaKeywordLabelsWithProgress(ctx context.Context, selected model.SpeciesCandidate, groups []model.KeywordSearchGroup) []keywordLabelIdentification {
@@ -12062,6 +12099,7 @@ func inlineKeywordProteinSequenceData(row model.KeywordResultRow) model.ProteinS
 	raw := firstNonEmpty(
 		strings.TrimSpace(keywordExtraColumn(row, "plaza_fasta")),
 		strings.TrimSpace(keywordExtraColumn(row, "ncbi_fasta")),
+		strings.TrimSpace(keywordExtraColumn(row, "cyp_fasta")),
 	)
 	if raw != "" {
 		rawHeader, sequence := splitFastaHeaderAndSequence(raw)
@@ -12076,6 +12114,9 @@ func inlineKeywordProteinSequenceData(row model.KeywordResultRow) model.ProteinS
 		}
 	}
 	sequence := strings.TrimSpace(extractInlineKeywordSequence(row))
+	if sequence == "" {
+		sequence = strings.TrimSpace(keywordExtraColumn(row, "cyp_sequence"))
+	}
 	if sequence == "" {
 		return model.ProteinSequenceData{}
 	}

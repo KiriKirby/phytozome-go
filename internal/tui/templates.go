@@ -13637,6 +13637,11 @@ func isCtrlEnter(event *tcell.EventKey) bool {
 	switch event.Key() {
 	case tcell.KeyEnter:
 		return event.Modifiers()&tcell.ModCtrl != 0
+	case tcell.KeyF13:
+		// The bundled WezTerm maps Ctrl+Enter to this otherwise-unused key.
+		// This avoids Ctrl+J/Ctrl+M, which are indistinguishable from pasted
+		// LF/CR bytes in a terminal, and avoids CSI-u, unsupported by our tcell.
+		return event.Modifiers() == tcell.ModNone
 	default:
 		return false
 	}
