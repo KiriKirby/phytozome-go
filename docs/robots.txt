@@ -1,3 +1,0 @@
-User-agent: *
-Allow: /
-Sitemap: https://kirikirby.github.io/phytozome-go/sitemap.xml
