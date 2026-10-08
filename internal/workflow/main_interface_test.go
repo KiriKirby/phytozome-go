@@ -79,6 +79,22 @@ func TestNCBIGeneLocusPrioritySearchesLocusThenSearchTerm(t *testing.T) {
 	}
 }
 
+func TestCYPRowSearchUsesSpeciesLabelNotCompositeSelectorKey(t *testing.T) {
+	w := NewBlastWizard(nil)
+	src := keywordMapSource{name: "cyp", rowsByKeyword: map[string][]model.KeywordResultRow{"CYP84A6": {{LabelName: "CYP84A6"}}}}
+	key := mainInterfaceSpeciesKey(model.SpeciesCandidate{JBrowseName: "Oryza sativa", GenomeLabel: "Oryza sativa", ReleaseDate: "local"})
+	groups, err := w.searchCYPKeywordRows(context.Background(), src, []tui.MainKeywordRow{{SearchTerm: "CYP84A6", SpeciesKey: key, SpeciesLabel: "Oryza sativa"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || len(groups[0].Rows) != 1 || groups[0].Rows[0].LabelName != "CYP84A6" {
+		t.Fatalf("CYP row search did not resolve selected species: %#v", groups)
+	}
+	if got := groups[0].Rows[0].Genome; got != "Oryza sativa" {
+		t.Fatalf("CYP connector received composite key instead of species label: %q", got)
+	}
+}
+
 func TestNCBIGeneLocusPrioritySkipKeepsOtherKeywordResults(t *testing.T) {
 	w := NewBlastWizard(nil)
 	w.source = keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{

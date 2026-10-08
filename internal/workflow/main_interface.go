@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KiriKirby/phytozome-go/internal/cyp"
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/ncbi"
@@ -137,6 +138,7 @@ func (w *BlastWizard) mainInterfaceSpeciesOptionsLoader(parent context.Context) 
 				Label:       mainInterfaceSpeciesShortLabel(candidate),
 				Description: mainInterfaceSpeciesDescription(candidate),
 				SearchText:  mainInterfaceSpeciesSearchText(candidate),
+				Disabled:    candidate.Disabled,
 			})
 		}
 		return options, nil
@@ -195,6 +197,12 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 	w.setBlastProgramContext("")
 	selected, err := w.mainInterfaceSelectedSpecies(ctx, src, ModeKeyword, state.Keyword.SpeciesKey, state.Keyword.SpeciesLabel, state.Keyword.SearchTypeID)
 	if err != nil {
+		if strings.EqualFold(state.Keyword.DatabaseID, "cyp") {
+			state.Keyword.DatabaseID = "phytozome"
+			state.Keyword.SearchTypeID = "keyword"
+			state.Keyword.SpeciesKey, state.Keyword.SpeciesLabel = "", ""
+			return mainInterfaceStateUpdate{state: state}
+		}
 		return err
 	}
 	rows, rowIndexes := mainKeywordRowsForWorkflow(state.Keyword.Rows)
@@ -208,6 +216,34 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 		keywords = append(keywords, row.SearchTerm)
 		manualLabels = append(manualLabels, row.SymbolName)
 		manualGeneLoci = append(manualGeneLoci, row.GeneLocus)
+	}
+	if strings.EqualFold(src.Name(), "cyp") {
+		lastKey, lastLabel := "", ""
+		for i := range rows {
+			if state.Keyword.SpeciesMode == "all" || (state.Keyword.SpeciesMode == "fallback" && strings.TrimSpace(rows[i].SpeciesLabel) == "") {
+				rows[i].SpeciesKey = state.Keyword.FallbackSpeciesKey
+				rows[i].SpeciesLabel = state.Keyword.FallbackSpeciesLabel
+			}
+			if strings.TrimSpace(rows[i].SpeciesKey) == "" {
+				if state.Keyword.SpeciesMode == "custom" && lastKey != "" {
+					rows[i].SpeciesKey = lastKey
+					rows[i].SpeciesLabel = lastLabel
+				} else {
+					return w.showInfo("CYP species", fmt.Sprintf("Row %d has no species. Set a row species or choose a fallback species.", i+1), prompt.ErrBackToQueryInput)
+				}
+			}
+			lastKey, lastLabel = rows[i].SpeciesKey, rows[i].SpeciesLabel
+			selectedForRow := selected
+			if strings.TrimSpace(rows[i].SpeciesKey) != "" {
+				selectedForRow = model.SpeciesCandidate{JBrowseName: rows[i].SpeciesKey, GenomeLabel: rows[i].SpeciesLabel}
+			}
+			_ = selectedForRow
+		}
+		groups, searchErr := w.searchCYPKeywordRows(ctx, src, rows, wide)
+		if searchErr != nil {
+			return searchErr
+		}
+		return w.executeMainKeywordRows(ctx, selected, keywords, manualLabels, manualGeneLoci, wide, false, false, groups)
 	}
 	needsLabelAuto := mainKeywordMissingSymbolIndexes(state.Keyword.Rows, rowIndexes)
 	needsGeneLocusAuto := []int(nil)
@@ -284,6 +320,67 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 		return mainInterfaceStateUpdate{state: state}
 	}
 	return w.executeMainKeywordRows(ctx, selected, keywords, manualLabels, manualGeneLoci, wide, false, false, preloadedGroups)
+}
+
+func (w *BlastWizard) searchCYPKeywordRows(ctx context.Context, src source.DataSource, rows []tui.MainKeywordRow, wide bool) ([]model.KeywordSearchGroup, error) {
+	_ = wide
+	results := make([]keywordSearchResult, len(rows))
+	workers := 4
+	if len(rows) < workers {
+		workers = len(rows)
+	}
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	for n := 0; n < workers; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := ctx.Err(); err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+					continue
+				}
+				// SpeciesKey is a UI identity composed of several candidate fields;
+				// CYP's local index is keyed by the displayed species name. Passing the
+				// composite key made every row miss and the recovery dialog reported
+				// the synthetic "All CYP species" selection.
+				speciesName := strings.TrimSpace(rows[i].SpeciesLabel)
+				if speciesName == "" {
+					speciesName = strings.TrimSpace(rows[i].SpeciesKey)
+				}
+				species := model.SpeciesCandidate{JBrowseName: speciesName, GenomeLabel: speciesName}
+				started := time.Now()
+				got, err := src.SearchKeywordRows(ctx, species, rows[i].SearchTerm)
+				results[i] = keywordSearchResult{index: i, started: started, ended: time.Now(), rows: got, err: err}
+				if err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					errMu.Unlock()
+				}
+			}
+		}()
+	}
+	for i := range rows {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	out := make([]model.KeywordSearchGroup, len(rows))
+	for i, r := range rows {
+		out[i] = model.KeywordSearchGroup{SearchTerm: r.SearchTerm, Rows: results[i].rows, SearchStartedAt: results[i].started, SearchEndedAt: results[i].ended, SearchDurationMS: results[i].ended.Sub(results[i].started).Milliseconds()}
+	}
+	return out, nil
 }
 
 func (w *BlastWizard) loadMainKeywordGroupsForAutoIdentify(ctx context.Context, selected model.SpeciesCandidate, keywords []string, wide bool) ([]model.KeywordSearchGroup, error) {
@@ -1083,6 +1180,9 @@ func (w *BlastWizard) mainInterfaceSelectedSpecies(ctx context.Context, src sour
 	if err != nil {
 		return model.SpeciesCandidate{}, err
 	}
+	if strings.EqualFold(src.Name(), "cyp") && mode == ModeKeyword {
+		return model.SpeciesCandidate{JBrowseName: "all", GenomeLabel: "All CYP species"}, nil
+	}
 	key = strings.TrimSpace(key)
 	if key != "" {
 		for _, candidate := range candidates {
@@ -1156,6 +1256,8 @@ func (w *BlastWizard) mainInterfaceDataSource(database string) (source.DataSourc
 		return phytozome.NewClient(w.httpClient), nil
 	case "lemna":
 		return lemna.NewClient(w.httpClient), nil
+	case "cyp":
+		return cyp.NewClient(w.httpClient), nil
 	case "tair":
 		return tair.NewClient(w.httpClient), nil
 	case "ncbi":
