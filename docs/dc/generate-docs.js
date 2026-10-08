@@ -89,9 +89,9 @@ const sidebar = () => `<p><b><a href="usage-maintenance.html">Usage and Maintena
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>`;
 
 const page = (title, body) => {
-  const documentTitle = esc(`${title} - Phytozome~goo!`);
+  const documentTitle = esc(`PHgo - ${title}`);
   const legacyBody = body.replace(/<h2>([\s\S]*?)<\/h2>/g, '<p><b><font size="5" color="#275317">$1</font></b></p>');
-  let result = sample.replace("<title>Phytozome~goo!</title>", `<title>${documentTitle}</title>`);
+  let result = sample.replace("<title>PHgo - Phytozome~goo!</title>", `<title>${documentTitle}</title>`);
   result = result.replace(/<p><b>Usage and Maintenance<\/b><\/p>[\s\S]*?<p>Multiple Sequence Alignment<\/td>/, sidebar());
   result = result.replace(/<td><b>\s*<font size="6" color="#275317">[\s\S]*?<p align="center">\s*&nbsp;<\/td>/, `<td><b>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<font size="6" color="#275317">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t${esc(title)}</font></b>${legacyBody}<p align="center">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<font size="2">Last updated: October 2, 2026.</font></td>`);
   return result;
