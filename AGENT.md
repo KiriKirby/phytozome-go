@@ -981,6 +981,10 @@ Priority 4 (low / optional)
   `docs/dc/generate-docs.js` is the maintainable source for generated overview
   and topic pages; run `node docs/dc/generate-docs.js` after changing its topic
   data, then verify internal links and `git diff --check`.
+- Browser titles use `PHgo - <page name>`. Pages represented by the main
+  navigation use that navigation label (`DOCS`, `CONTACT`, or `TOOLS`); every
+  other content page uses its actual article or feature name; and the home page
+  is always `PHgo - Phytozome~goo!`.
 - Documentation must distinguish released behavior from planned behavior. In
   particular, system-tree computation is Windows-amd64-only, the Symbol Name
   database is installed from a prebuilt manifest/release-asset path, and no

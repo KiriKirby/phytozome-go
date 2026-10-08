@@ -42,7 +42,6 @@ or alignment viewer is the appropriate tool.
 - [Platform support and requirements](#platform-support-and-requirements)
 - [Documentation](#documentation)
 - [Development](#development)
-- [Author's Statement](#authors-statement)
 - [Citation](#citation)
 - [License and third-party components](#license-and-third-party-components)
 
@@ -374,26 +373,6 @@ Do not commit runtime caches, release archives, downloaded source assets, or
 private biological data. Keep generated build artifacts under `bin/` and user
 exports outside the source tree.
 
-## Author's Statement
-
-This software is released to everyone under the **Common Public Attribution License Version 1.0 (CPAL-1.0)**. By making the source code open, the author hopes that this software can be used, studied, modified, and improved by more people, and welcomes contributions from users and developers of every background.
-
-But open source does not mean that the author must remain silent about every user and every use of the software.
-
-The author explicitly rejects a research culture that ranks researchers in a rigid hierarchy, measures the value of research by institutional prestige and capital interests, and sacrifices the rights of ordinary workers for the benefit of the privileged. In particular, the author openly opposes and condemns those who work at RIKEN yet look down on researchers at other institutions from a position of arrogance; who stand with management and capital while suppressing or belittling the workers around them; and who act as strikebreakers against the interests of those workers.
-
-For the author's detailed statement concerning RIKEN and this political position, see the [RIKEN statement](https://kirikirby.github.io/phytozome-go/riken).
-
-If you work at RIKEN, the author asks you to look seriously at the workers around you first: researchers, technicians, administrative staff, contract workers, postdoctoral researchers, students, and everyone else whose labor keeps the research system running. Instead of standing with the privileged to defend hierarchy, stand with the workers around you to fight for better working conditions, fairer treatment, and a workplace with dignity.
-
-**Do not assume that you are superior to researchers at other institutions merely because your institution has a louder name. Science is not an appendage of capital or institutional rank, and researchers must not become instruments of capital and managerial power.**
-
-Therefore, if you embrace the position of despising other researchers on the basis of institutional rank, disregarding workers' rights, and serving as a strikebreaker for the interests of capital and management, the author states plainly: **the author does not want you to use this software, and does not want you to contribute to this project.**
-
-This statement expresses the author's personal political position, value judgments, and personal wishes regarding users and contributors. **It does not modify, restrict, or add conditions to any rights granted by CPAL-1.0. The source code remains available under the terms of CPAL-1.0.**
-
-The author is willing to maintain and develop this project together with those who respect workers, oppose hierarchy in science, and are prepared to fight collectively for better conditions for scientific labor.
-
 ## Citation
 
 If phytozome GO contributes to published work, cite the release used and the
@@ -417,6 +396,8 @@ replace the providers' required citations or terms of use.
 This repository is licensed under the
 [Common Public Attribution License 1.0 (CPAL-1.0)](LICENSE). Review the license
 before redistributing modified or bundled versions.
+
+Read the project's [statements and software license](https://kirikirby.github.io/phytozome-go/lc.html).
 
 phytozome GO interoperates with or bundles components subject to their own terms,
 including NCBI BLAST+, the MEGA-derived PHgo runtime, MUSCLE, Reactree, and
