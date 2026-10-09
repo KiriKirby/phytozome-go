@@ -37,6 +37,15 @@ func (e mainInterfaceStateUpdate) Error() string {
 
 type mainAutoIdentifyChoice string
 
+func hasNonEmptyStrings(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	mainAutoIdentifyNone  mainAutoIdentifyChoice = ""
 	mainAutoIdentifyClose mainAutoIdentifyChoice = "close"
@@ -192,6 +201,11 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 		return err
 	}
 	w.source = src
+	if client, ok := src.(*cyp.Client); ok {
+		if err := w.ensureCYPDatabaseInteractive(ctx, client, prompt.ErrBackToDatabaseSelection); err != nil {
+			return err
+		}
+	}
 	w.pendingMode = ModeKeyword
 	w.prompt.SetDatabaseContext(databaseDisplayName(src.Name()))
 	w.setBlastProgramContext("")
@@ -243,7 +257,23 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 		if searchErr != nil {
 			return searchErr
 		}
-		return w.executeMainKeywordRows(ctx, selected, keywords, manualLabels, manualGeneLoci, wide, false, false, groups)
+		autoIdentifyLabels := false
+		if missing := mainKeywordMissingSymbolIndexes(state.Keyword.Rows, rowIndexes); len(missing) > 0 {
+			choice, choiceErr := w.confirmMainAutoIdentify("Symbol name", true, "Some CYP rows have no Symbol name. Auto identify the blank Symbol name cells using the standard symbol-name database?", true)
+			if choiceErr != nil {
+				return choiceErr
+			}
+			switch choice {
+			case mainAutoIdentifyClose:
+				return prompt.ErrBackToQueryInput
+			case mainAutoIdentifyAuto:
+				autoIdentifyLabels = true
+			}
+		}
+		// CYP follows the same standard symbol-name workflow as every other
+		// database. The shared resolver/ranker runs first; the CYP PGD symbol is
+		// used only by its explicit fallback path when no ranked alias exists.
+		return w.executeMainKeywordRows(ctx, selected, keywords, manualLabels, manualGeneLoci, wide, autoIdentifyLabels, false, groups)
 	}
 	needsLabelAuto := mainKeywordMissingSymbolIndexes(state.Keyword.Rows, rowIndexes)
 	needsGeneLocusAuto := []int(nil)
@@ -257,7 +287,10 @@ func (w *BlastWizard) runMainKeywordAction(ctx context.Context, state tui.MainIn
 	if priorityDatabase == "" && state.Keyword.PLAZAGeneLocusPriority {
 		priorityDatabase = tui.GeneLocusPriorityPLAZA
 	}
-	if _, isNCBI := src.(*ncbi.Client); isNCBI && (priorityDatabase == tui.GeneLocusPriorityNCBI || priorityDatabase == tui.GeneLocusPriorityPLAZA) && ncbi.SearchTypeByID(state.Keyword.SearchTypeID).ShowsGeneLocus {
+	if _, isNCBI := src.(*ncbi.Client); isNCBI && ncbi.SearchTypeByID(state.Keyword.SearchTypeID).ShowsGeneLocus && (priorityDatabase == tui.GeneLocusPriorityNCBI || priorityDatabase == tui.GeneLocusPriorityPLAZA || hasNonEmptyStrings(manualGeneLoci)) {
+		if priorityDatabase == "" || priorityDatabase == tui.GeneLocusPriorityNone {
+			priorityDatabase = tui.GeneLocusPriorityNCBI
+		}
 		preloadedGroups, err = w.searchMainKeywordGroupsWithGeneLocusPriority(ctx, selected, keywords, manualGeneLoci, wide, priorityDatabase)
 		if err != nil {
 			return err
@@ -356,7 +389,24 @@ func (w *BlastWizard) searchCYPKeywordRows(ctx context.Context, src source.DataS
 				}
 				species := model.SpeciesCandidate{JBrowseName: speciesName, GenomeLabel: speciesName}
 				started := time.Now()
-				got, err := src.SearchKeywordRows(ctx, species, rows[i].SearchTerm)
+				searchTerm := strings.TrimSpace(rows[i].GeneLocus)
+				if searchTerm == "" {
+					searchTerm = rows[i].SearchTerm
+				}
+				got, err := src.SearchKeywordRows(ctx, species, searchTerm)
+				if err == nil && len(got) == 0 && searchTerm != strings.TrimSpace(rows[i].SearchTerm) {
+					got, err = src.SearchKeywordRows(ctx, species, rows[i].SearchTerm)
+				}
+				for rowIndex := range got {
+					if strings.TrimSpace(got[rowIndex].SearchTerm) == "" || got[rowIndex].SearchTerm == searchTerm {
+						got[rowIndex].SearchTerm = rows[i].SearchTerm
+					}
+					if strings.TrimSpace(got[rowIndex].SearchType) == "" || got[rowIndex].SearchType == "CYP keyword" {
+						if strings.TrimSpace(rows[i].GeneLocus) != "" {
+							got[rowIndex].SearchType = "CYP Gene locus priority"
+						}
+					}
+				}
 				results[i] = keywordSearchResult{index: i, started: started, ended: time.Now(), rows: got, err: err}
 				if err != nil {
 					errMu.Lock()

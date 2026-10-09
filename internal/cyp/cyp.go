@@ -28,6 +28,25 @@ type manifest struct {
 	Size        int64  `json:"size"`
 }
 
+// DatabaseStatus describes the locally installed CYP PGD and the current
+// published manifest. It is intentionally small so the workflow can decide
+// whether an explicit download/update prompt is needed before querying.
+type DatabaseStatus struct {
+	LocalPath       string
+	Ready           bool
+	UpdateAvailable bool
+	ExpectedSize    int64
+	LocalSize       int64
+	ManifestURL     string
+	DatabaseURL     string
+}
+
+type DownloadProgress struct {
+	Current int64
+	Total   int64
+	Message string
+}
+
 var _ source.DataSource = (*Client)(nil)
 
 type record struct{ ID, RecordKey, Category, Species, Symbol, Description, Sequence, SourceURL string }
@@ -59,39 +78,60 @@ func (c *Client) DatabasePath() string { return c.dbPath }
 
 var bucket = []byte("records")
 
-func (c *Client) ensureDB(x context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Client) manifestURL() string {
+	murl := strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_MANIFEST_URL"))
+	if murl == "" {
+		murl = DefaultManifestURL
+	}
+	return murl
+}
+
+func (c *Client) CheckDatabase(x context.Context) (DatabaseStatus, error) {
+	status := DatabaseStatus{LocalPath: c.dbPath, ManifestURL: c.manifestURL()}
 	u := strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_URL"))
-	expected := ""
-	expectedSize := int64(0)
+	m := manifest{}
 	if u == "" {
-		murl := strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_MANIFEST_URL"))
-		if murl == "" {
-			murl = DefaultManifestURL
-		}
-		m, e := c.fetchManifest(x, murl)
+		var e error
+		m, e = c.fetchManifest(x, status.ManifestURL)
 		if e != nil {
-			if _, statErr := os.Stat(c.dbPath); statErr == nil {
-				return validate(c.dbPath)
+			if st, statErr := os.Stat(c.dbPath); statErr == nil {
+				status.LocalSize = st.Size()
+				status.Ready = validate(c.dbPath) == nil
+				return status, nil
 			}
-			return e
+			return status, e
 		}
 		u = m.DatabaseURL
-		expected = m.SHA256
-		expectedSize = m.Size
 	}
+	status.DatabaseURL, status.ExpectedSize = u, m.Size
 	if st, e := os.Stat(c.dbPath); e == nil {
-		if expected == "" {
-			return validate(c.dbPath)
-		}
-		if st.Size() == expectedSize {
-			if sum, e := fileSHA256(c.dbPath); e == nil && strings.EqualFold(sum, expected) {
-				return validate(c.dbPath)
-			}
+		status.LocalSize = st.Size()
+		valid := validate(c.dbPath) == nil
+		if strings.TrimSpace(m.SHA256) == "" {
+			status.Ready = valid
+		} else if st.Size() == m.Size {
+			sum, sumErr := fileSHA256(c.dbPath)
+			status.Ready = valid && sumErr == nil && strings.EqualFold(sum, m.SHA256)
 		}
 	}
-	q, e := http.NewRequestWithContext(x, http.MethodGet, u, nil)
+	status.UpdateAvailable = !status.Ready
+	return status, nil
+}
+
+func (c *Client) DownloadDatabase(x context.Context, progress func(DownloadProgress)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	status, err := c.CheckDatabase(x)
+	if err != nil {
+		return err
+	}
+	if status.Ready {
+		return nil
+	}
+	if strings.TrimSpace(status.DatabaseURL) == "" {
+		return errors.New("CYP database URL is unavailable")
+	}
+	q, e := http.NewRequestWithContext(x, http.MethodGet, status.DatabaseURL, nil)
 	if e != nil {
 		return e
 	}
@@ -103,48 +143,89 @@ func (c *Client) ensureDB(x context.Context) error {
 	if r.StatusCode >= 400 {
 		return fmt.Errorf("download CYP database: %s", r.Status)
 	}
-	t, e := os.CreateTemp(filepath.Dir(c.dbPath), "p450phgo-*.pgd")
+	t, e := os.CreateTemp(filepath.Dir(c.dbPath), "p450phgo-*.part")
 	if e != nil {
 		return e
 	}
 	p := t.Name()
-	_, e = io.Copy(t, io.LimitReader(r.Body, 4<<30))
-	if e == nil {
-		e = t.Close()
+	defer func() { _ = os.Remove(p) }()
+	total := status.ExpectedSize
+	if total <= 0 {
+		total = r.ContentLength
 	}
-	if e == nil {
-		e = validate(p)
+	if progress != nil {
+		progress(DownloadProgress{Total: total, Message: "Downloading CYP database..."})
 	}
-	if e == nil && expectedSize > 0 {
-		if st, se := os.Stat(p); se != nil || st.Size() != expectedSize {
-			e = fmt.Errorf("CYP database size mismatch")
+	var current int64
+	buf := make([]byte, 256*1024)
+	for {
+		n, readErr := r.Body.Read(buf)
+		if n > 0 {
+			if _, e = t.Write(buf[:n]); e != nil {
+				return e
+			}
+			current += int64(n)
+			if progress != nil {
+				progress(DownloadProgress{Current: current, Total: total, Message: "Downloading CYP database..."})
+			}
 		}
-	}
-	if e == nil && expected != "" {
-		var sum string
-		sum, e = fileSHA256(p)
-		if e == nil && !strings.EqualFold(sum, expected) {
-			e = fmt.Errorf("CYP database checksum mismatch")
+		if readErr == io.EOF {
+			break
 		}
-	}
-	if e == nil {
-		data, readErr := os.ReadFile(p)
 		if readErr != nil {
-			e = readErr
-		} else {
-			e = appfs.WriteFileAtomic(c.dbPath, data, 0o644)
+			return readErr
 		}
 	}
-	if e != nil {
-		_ = os.Remove(p)
-	} else {
-		c.cacheMu.Lock()
-		c.cacheStamp = ""
-		c.cacheRows = nil
-		c.cacheSpecies = nil
-		c.cacheMu.Unlock()
+	if e = t.Close(); e != nil {
+		return e
 	}
-	return e
+	if e = validate(p); e != nil {
+		return e
+	}
+	if status.ExpectedSize > 0 && current != status.ExpectedSize {
+		return fmt.Errorf("CYP database size mismatch: got %d bytes, want %d", current, status.ExpectedSize)
+	}
+	if strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_URL")) == "" && status.ExpectedSize > 0 {
+		sum, sumErr := fileSHA256(p)
+		if sumErr != nil {
+			return sumErr
+		}
+		m, mErr := c.fetchManifest(x, status.ManifestURL)
+		if mErr != nil || !strings.EqualFold(sum, m.SHA256) {
+			return errors.New("CYP database checksum mismatch")
+		}
+	}
+	data, e := os.ReadFile(p)
+	if e != nil {
+		return e
+	}
+	if e = appfs.WriteFileAtomic(c.dbPath, data, 0o644); e != nil {
+		return e
+	}
+	c.cacheMu.Lock()
+	c.cacheStamp, c.cacheRows, c.cacheSpecies = "", nil, nil
+	c.cacheMu.Unlock()
+	if progress != nil {
+		progress(DownloadProgress{Current: current, Total: total, Message: "CYP database is ready."})
+	}
+	return nil
+}
+
+// EnsureDatabase is retained for non-interactive callers and tests. UI code
+// should call CheckDatabase/DownloadDatabase so installation is explicit.
+func (c *Client) EnsureDatabase(x context.Context) error {
+	status, err := c.CheckDatabase(x)
+	if err != nil {
+		return err
+	}
+	if status.Ready {
+		return nil
+	}
+	return c.DownloadDatabase(x, nil)
+}
+
+func (c *Client) ensureDB(x context.Context) error {
+	return c.EnsureDatabase(x)
 }
 
 func (c *Client) cachedRecords() ([]record, error) {
@@ -360,7 +441,7 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 		if s.JBrowseName != "" && !strings.EqualFold(s.JBrowseName, "all") && !strings.EqualFold(s.JBrowseName, r.Species) {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(r.ID+" "+r.Species+" "+r.Symbol+" "+r.Description), term) {
+		if !strings.Contains(strings.ToLower(r.ID+" "+r.RecordKey+" "+r.Species+" "+r.Symbol+" "+r.Description), term) {
 			continue
 		}
 		extra := map[string]string{"cyp_category": r.Category}
@@ -372,7 +453,7 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 		if sequenceID == "" {
 			sequenceID = r.ID
 		}
-		a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: sequenceID, ExtraColumns: extra})
+		a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneLocus: r.ID, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: sequenceID, ExtraColumns: extra})
 	}
 	return a, e
 }
@@ -386,7 +467,7 @@ func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID str
 	}
 	want := strings.TrimSpace(sequenceID)
 	if want == "" {
-		return model.ProteinSequenceData{}, errors.New("CYP sequence unavailable")
+		return model.ProteinSequenceData{}, errors.New("CYP sequence unavailable: the reviewed source does not contain a protein sequence for this record")
 	}
 	var found model.ProteinSequenceData
 	rs, err := c.cachedRecords()
@@ -406,7 +487,7 @@ func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID str
 		return model.ProteinSequenceData{}, err
 	}
 	if strings.TrimSpace(found.Sequence) == "" {
-		return model.ProteinSequenceData{}, errors.New("CYP sequence unavailable")
+		return model.ProteinSequenceData{}, errors.New("CYP sequence unavailable: the reviewed source does not contain a protein sequence for this record")
 	}
 	return found, nil
 }

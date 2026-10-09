@@ -2934,7 +2934,7 @@ func mainGeneLocusPriorityOptions() []Option {
 func mainKeywordCapabilities() []mainCapability {
 	return []mainCapability{
 		{ID: "phytozome", Label: "Phytozome keyword", Description: "keyword search in Phytozome species", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: true},
-		{ID: "cyp", Label: "CYP / P450 keyword", Description: "local CYP database from Dr Nelson's four categories", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true},
+		{ID: "cyp", Label: "CYP / P450 keyword", Description: "local CYP database from Dr Nelson's four categories", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, ShowsGeneLocus: true},
 		{ID: "lemna", Label: "lemna keyword", Description: "keyword search in lemna.org releases", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: false},
 		{ID: "tair", Label: "TAIR keyword", Description: "keyword search in TAIR Arabidopsis releases", RequiresSpecies: true, ShowsSpecies: true, ShowsSymbolName: true, SupportsWide: false},
 		{ID: "ncbi", Label: "NCBI Entrez keyword", Description: "Entrez/E-utilities search across NCBI database types", SearchTypes: mainNCBISearchTypeCapabilities(), DefaultSearchTypeID: "protein", ShowsSymbolName: true, ShowsGeneLocus: true},

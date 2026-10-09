@@ -95,6 +95,24 @@ func TestCYPRowSearchUsesSpeciesLabelNotCompositeSelectorKey(t *testing.T) {
 	}
 }
 
+func TestCYPRowSearchUsesGeneLocusBeforeSearchTerm(t *testing.T) {
+	w := NewBlastWizard(nil)
+	src := keywordMapSource{name: "cyp", rowsByKeyword: map[string][]model.KeywordResultRow{
+		"ACU45738.1": {{SourceDatabase: "cyp", LabelName: "CYP84A-like", GeneLocus: "ACU45738.1"}},
+		"wrong-term": nil,
+	}}
+	groups, err := w.searchCYPKeywordRows(context.Background(), src, []tui.MainKeywordRow{{SearchTerm: "wrong-term", GeneLocus: "ACU45738.1", SpeciesLabel: "Eucalyptus globulus"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || len(groups[0].Rows) != 1 || groups[0].Rows[0].SearchType != "CYP Gene locus priority" {
+		t.Fatalf("gene locus was not preferred: %#v", groups)
+	}
+	if groups[0].Rows[0].SearchTerm != "wrong-term" {
+		t.Fatalf("original search term was not preserved: %#v", groups[0].Rows[0])
+	}
+}
+
 func TestNCBIGeneLocusPrioritySkipKeepsOtherKeywordResults(t *testing.T) {
 	w := NewBlastWizard(nil)
 	w.source = keywordMapSource{rowsByKeyword: map[string][]model.KeywordResultRow{

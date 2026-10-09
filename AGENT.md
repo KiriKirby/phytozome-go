@@ -1025,6 +1025,7 @@ End of agent notes.
 ## CYP / P450 database integration
 
 - The runtime CYP connector is `internal/cyp` and consumes a separately published `p450phgo.pgd` bbolt file. It never builds the database from Dr Nelson web pages.
+- CYP PGD activation is interactive: the workflow checks the manifest before species/keyword search, asks whether a missing or outdated copy should be downloaded, reports byte progress, validates the Bolt database and checksum, and removes interrupted `.part` files. Non-UI callers retain `EnsureDatabase` as a safety fallback.
 - The application downloads/validates the PGD on first CYP selection, stores it beside the executable, and falls back to Phytozome on failure. `PHGO_CYP_PGD_URL` overrides the published raw asset for testing.
 - PGD generation scripts, source analysis, schema documentation, and releases belong in the independent `phytozome-go-p450phgo` repository; the runtime repository keeps only the reader and integration docs.
 - The published repository is https://github.com/KiriKirby/phytozome-go-p450phgo and its release manifest carries the database URL, byte length, and SHA-256. The runtime checks this manifest whenever CYP is selected, reuses an exact local copy, and atomically replaces an outdated copy.

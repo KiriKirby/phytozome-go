@@ -1868,6 +1868,11 @@ func (w *BlastWizard) chooseLemnaBlastExecution(cap lemna.BlastCapability, selec
 }
 
 func (w *BlastWizard) loadSpeciesCandidates(ctx context.Context) ([]model.SpeciesCandidate, error) {
+	if client, ok := w.source.(*cyp.Client); ok {
+		if err := w.ensureCYPDatabaseInteractive(ctx, client, prompt.ErrBackToDatabaseSelection); err != nil {
+			return nil, err
+		}
+	}
 	for {
 		label := fmt.Sprintf("Loading species candidates from %s...", w.source.Name())
 		candidates, err := tui.RunTaskValueContext(tui.TaskPage{
@@ -2072,6 +2077,11 @@ func (w *BlastWizard) speciesCandidatesForSource(ctx context.Context, src source
 		return copyCandidates, nil
 	}
 	w.speciesCandidatesMu.Unlock()
+	if client, ok := src.(*cyp.Client); ok {
+		if err := w.ensureCYPDatabaseInteractive(ctx, client, prompt.ErrBackToDatabaseSelection); err != nil {
+			return nil, err
+		}
+	}
 
 	candidates, err := src.FetchSpeciesCandidates(ctx)
 	if err != nil {
@@ -2079,6 +2089,64 @@ func (w *BlastWizard) speciesCandidatesForSource(ctx context.Context, src source
 	}
 	w.cacheSpeciesCandidates(src.Name(), candidates)
 	return candidates, nil
+}
+
+// ensureCYPDatabaseInteractive keeps PGD installation visible and explicit in
+// both the legacy wizard and the main interface. The data source retains a
+// non-interactive safety net for tests and non-UI callers, but normal UI
+// activation always reaches this gate first.
+func (w *BlastWizard) ensureCYPDatabaseInteractive(ctx context.Context, client *cyp.Client, cancelError error) error {
+	status, err := client.CheckDatabase(ctx)
+	if err != nil {
+		return err
+	}
+	if status.Ready {
+		return nil
+	}
+	if w.suppressTaskModals {
+		return client.DownloadDatabase(ctx, nil)
+	}
+	title := "CYP database required"
+	message := "The CYP/P450 database is not installed locally. Download it now?"
+	if status.LocalSize > 0 || status.UpdateAvailable {
+		title = "CYP database update available"
+		message = fmt.Sprintf("A newer or incomplete CYP/P450 database is available.\n\nLocal file: %s\nDownload/update it now?", status.LocalPath)
+	}
+	result, err := tui.RunActionModalPage(tui.ActionModalPage{
+		Path:         w.tuiPath("CYP", "Database"),
+		Title:        title,
+		Message:      message,
+		ConfirmText:  "Download",
+		ConfirmValue: "download",
+		Actions:      []tui.Action{{Value: "cancel", Label: tui.ButtonBack, Shortcut: tui.ShortcutBack}},
+	})
+	if err != nil {
+		return err
+	}
+	if result.Value != "download" {
+		return cancelError
+	}
+	_, err = tui.RunProgressTaskValueContext(tui.TaskPage{
+		Path:        w.tuiPath("CYP", "Database"),
+		Title:       "Downloading CYP database",
+		Description: "Downloading and validating the published p450phgo PGD.",
+		Initial:     "Preparing CYP database download...",
+		Total:       1000,
+		CancelError: cancelError,
+	}, func(taskCtx context.Context, update func(int, string)) (struct{}, error) {
+		err := client.DownloadDatabase(mergeContexts(ctx, taskCtx), func(p cyp.DownloadProgress) {
+			current := 0
+			if p.Total > 0 {
+				current = int((p.Current * 1000) / p.Total)
+				if current > 1000 {
+					current = 1000
+				}
+			}
+			update(current, p.Message)
+		})
+		return struct{}{}, err
+	})
+	return err
 }
 
 func (w *BlastWizard) selectSpecies(candidates []model.SpeciesCandidate) (model.SpeciesCandidate, error) {
@@ -2229,13 +2297,7 @@ keywordInputLoop:
 			autoIdentifyLabels := false
 			var manualLabels []string
 			var labelErr error
-			if strings.EqualFold(sourceDatabaseName(w.source), "cyp") {
-				// CYP PGD rows already contain their authoritative symbol.  The
-				// generic label prompt/global symbol DB is not applicable here.
-				autoIdentifyLabels = true
-			} else {
-				manualLabels, labelErr = w.prompt.KeywordLabelNames(len(keywords), prompt.ErrBackToQueryInput)
-			}
+			manualLabels, labelErr = w.prompt.KeywordLabelNames(len(keywords), prompt.ErrBackToQueryInput)
 			identifications := manualKeywordLabelIdentifications(manualLabels, len(keywords))
 			if errors.Is(labelErr, prompt.ErrAutoIdentifyRequested) {
 				autoIdentifyLabels = true
@@ -10258,11 +10320,28 @@ func autoIdentifyKeywordLabelIdentificationsWithSourceType(groups []model.Keywor
 	}
 	identifications := make([]keywordLabelIdentification, len(results))
 	for i, result := range results {
+		resolvedSource := sourceType
+		aliases := append([]string(nil), result.RankedAliases...)
+		if len(aliases) == 0 && sourceType == "symbolname database" {
+			// CYP rows are a last-resort source only. Keep the shared
+			// symbol-name ranking as the first layer, then use the PGD's own
+			// symbol/identifier when that library has no candidate.
+			for _, row := range groups[i].Rows {
+				if !strings.EqualFold(strings.TrimSpace(row.SourceDatabase), "cyp") {
+					continue
+				}
+				aliases = uniqueStrings(compactStrings(row.LabelName, row.Symbols, row.GeneIdentifier, row.SequenceID))
+				if len(aliases) > 0 {
+					resolvedSource = "CYP database symbol"
+					break
+				}
+			}
+		}
 		identifications[i] = keywordLabelIdentification{
 			TaskTimestamp: result.TaskTimestamp,
 			ItemIndex:     result.ItemIndex,
-			Aliases:       result.RankedAliases,
-			SourceType:    sourceType,
+			Aliases:       aliases,
+			SourceType:    resolvedSource,
 		}
 	}
 	return identifications

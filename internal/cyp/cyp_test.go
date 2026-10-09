@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	bolt "go.etcd.io/bbolt"
@@ -142,6 +143,40 @@ func TestRecordKeyResolvesDuplicateBiologicalIDs(t *testing.T) {
 		if err != nil || got.Sequence != want {
 			t.Fatalf("row %d sequence=%q err=%v want=%q", i, got.Sequence, err, want)
 		}
+	}
+}
+
+func TestGeneLocusAndMissingSequenceAreExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "local.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		value, _ := json.Marshal(record{ID: "ACU45738.1", RecordKey: "eg:CYP84A-like", Category: "plants", Species: "Eucalyptus globulus", Symbol: "CYP84A-like", Description: "reviewed Table S2 record"})
+		return b.Put([]byte("00000001"), value)
+	})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local.pgd")
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Eucalyptus globulus"}, "CYP84A-like")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+	if rows[0].GeneLocus != "ACU45738.1" {
+		t.Fatalf("GeneLocus=%q", rows[0].GeneLocus)
+	}
+	if _, err := c.FetchProteinSequence(context.Background(), 0, rows[0].SequenceID); err == nil || !strings.Contains(err.Error(), "reviewed source does not contain") {
+		t.Fatalf("missing sequence error=%v", err)
 	}
 }
 
