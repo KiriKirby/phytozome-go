@@ -61,9 +61,10 @@ func (w *BlastWizard) runNewMainInterface(ctx context.Context) error {
 	state := tui.DefaultMainInterfaceState()
 	for {
 		result, err := tui.RunMainInterfacePage(tui.MainInterfacePage{
-			Info:          w.tuiInfo,
-			State:         state,
-			SpeciesLoader: w.mainInterfaceSpeciesOptionsLoader(ctx),
+			Info:             w.tuiInfo,
+			State:            state,
+			SpeciesLoader:    w.mainInterfaceSpeciesOptionsLoader(ctx),
+			SpeciesPreflight: w.mainInterfaceSpeciesPreflight(ctx),
 		})
 		if err != nil {
 			return err
@@ -110,6 +111,22 @@ func (w *BlastWizard) runNewMainInterface(ctx context.Context) error {
 				break forAction
 			}
 		}
+	}
+}
+
+// mainInterfaceSpeciesPreflight completes CYP installation before the species
+// modal is mounted. This keeps the download/progress page and the selector as
+// separate roots, eliminating the redraw/flicker caused by overlaying them.
+func (w *BlastWizard) mainInterfaceSpeciesPreflight(parent context.Context) func(context.Context, tui.MainSpeciesRequest) error {
+	return func(ctx context.Context, request tui.MainSpeciesRequest) error {
+		if !strings.EqualFold(strings.TrimSpace(request.DatabaseID), "cyp") {
+			return nil
+		}
+		if parent != nil {
+			ctx = mergeContexts(parent, ctx)
+		}
+		client := cyp.NewClient(w.httpClient)
+		return w.ensureCYPDatabaseInteractive(ctx, client, prompt.ErrBackToDatabaseSelection)
 	}
 }
 

@@ -23,6 +23,10 @@ type MainInterfacePage struct {
 	Info          StartupInfo
 	State         MainInterfaceState
 	SpeciesLoader MainSpeciesLoader
+	// SpeciesPreflight runs before the species modal is created.  It is used
+	// for database installation/update gates so a download page never gets
+	// mounted underneath the species selector.
+	SpeciesPreflight func(context.Context, MainSpeciesRequest) error
 }
 
 type MainInterfaceResult struct {
@@ -844,6 +848,12 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		if page.SpeciesLoader == nil {
 			showModal("Species", "Species selection is not available in this build.")
 			return
+		}
+		if page.SpeciesPreflight != nil {
+			if err := page.SpeciesPreflight(context.Background(), request); err != nil {
+				showModal("CYP database", err.Error())
+				return
+			}
 		}
 		seq := speciesLoadSeq.Add(1)
 		ctx, cancel := context.WithCancel(context.Background())
