@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,27 @@ type DownloadProgress struct {
 var _ source.DataSource = (*Client)(nil)
 
 type record struct{ ID, RecordKey, Category, Species, Symbol, Description, Sequence, SourceURL string }
+
+func recordSequenceID(r record) string {
+	key := strings.TrimSpace(r.RecordKey)
+	// Older Table S2 rows used the category name as a shared RecordKey. That is
+	// not a row identity and makes every empty placeholder resolve to the first
+	// `plants` record. Use the biological ID for those legacy rows.
+	if key == "" || isCYPCategoryKey(key) {
+		return strings.TrimSpace(r.ID)
+	}
+	return key
+}
+
+func isCYPCategoryKey(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "plants", "animals", "fungi", "bacteria":
+		return true
+	default:
+		return false
+	}
+}
+
 type speciesRecord struct {
 	Name        string `json:"name"`
 	Category    string `json:"category"`
@@ -449,12 +471,14 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 			extra["cyp_sequence"] = r.Sequence
 			extra["cyp_fasta"] = ">" + r.ID + "\n" + r.Sequence
 		}
-		sequenceID := strings.TrimSpace(r.RecordKey)
-		if sequenceID == "" {
-			sequenceID = r.ID
-		}
+		sequenceID := recordSequenceID(r)
 		a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneLocus: r.ID, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: sequenceID, ExtraColumns: extra})
 	}
+	sort.SliceStable(a, func(i, j int) bool {
+		iHasSequence := strings.TrimSpace(a[i].ExtraColumns["cyp_sequence"]) != ""
+		jHasSequence := strings.TrimSpace(a[j].ExtraColumns["cyp_sequence"]) != ""
+		return iHasSequence && !jHasSequence
+	})
 	return a, e
 }
 
@@ -473,7 +497,7 @@ func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID str
 	rs, err := c.cachedRecords()
 	if err == nil {
 		for _, r := range rs {
-			if !strings.EqualFold(strings.TrimSpace(r.RecordKey), want) && !strings.EqualFold(strings.TrimSpace(r.ID), want) && !strings.EqualFold(strings.TrimSpace(r.Symbol), want) {
+			if !strings.EqualFold(recordSequenceID(r), want) && !strings.EqualFold(strings.TrimSpace(r.RecordKey), want) && !strings.EqualFold(strings.TrimSpace(r.ID), want) && !strings.EqualFold(strings.TrimSpace(r.Symbol), want) {
 				continue
 			}
 			if strings.TrimSpace(r.Sequence) == "" {

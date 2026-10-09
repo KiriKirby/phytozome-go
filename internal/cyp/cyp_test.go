@@ -215,3 +215,51 @@ func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyTableS2KeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "table-s2.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		rows := []record{
+			{ID: "Bradi3g30590.1", RecordKey: "plants", Category: "plants", Species: "Brachypodium distachyon", Symbol: "CYP84A5", SourceURL: "user-provided-table-s2"},
+			{ID: "Bradi3g30590.1", RecordKey: "brachypodium-distachyon:block-0100:Bradi3g30590.1", Category: "plants", Species: "Brachypodium distachyon", Symbol: "CYP84A5", Sequence: "M" + strings.Repeat("A", 536), SourceURL: "reviewed-resource"},
+		}
+		for i, r := range rows {
+			value, _ := json.Marshal(r)
+			if e := b.Put([]byte(fmt.Sprintf("%08d", i)), value); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Brachypodium distachyon"}, "Bradi3g30590.1")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+	if rows[0].SequenceID == "Bradi3g30590.1" || rows[0].ExtraColumns["cyp_sequence"] == "" {
+		t.Fatalf("real sequence was not ranked first: %#v", rows)
+	}
+	if rows[1].SequenceID != "Bradi3g30590.1" {
+		t.Fatalf("legacy placeholder sequence id=%q", rows[1].SequenceID)
+	}
+	got, err := c.FetchProteinSequence(context.Background(), 0, rows[0].SequenceID)
+	if err != nil || len(got.Sequence) != 537 {
+		t.Fatalf("sequence len=%d err=%v", len(got.Sequence), err)
+	}
+}
