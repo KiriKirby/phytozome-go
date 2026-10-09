@@ -54,9 +54,9 @@ type record struct{ ID, RecordKey, Category, Species, Symbol, Description, Seque
 
 func recordSequenceID(r record) string {
 	key := strings.TrimSpace(r.RecordKey)
-	// Older Table S2 rows used the category name as a shared RecordKey. That is
-	// not a row identity and makes every empty placeholder resolve to the first
-	// `plants` record. Use the biological ID for those legacy rows.
+	// Older PGD rows may have used a category name as a shared RecordKey. That
+	// is not a row identity and can make an empty legacy row resolve to another
+	// record. Use the biological ID for those legacy rows.
 	if key == "" || isCYPCategoryKey(key) {
 		return strings.TrimSpace(r.ID)
 	}

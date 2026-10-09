@@ -158,7 +158,7 @@ func TestGeneLocusAndMissingSequenceAreExplicit(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		value, _ := json.Marshal(record{ID: "ACU45738.1", RecordKey: "eg:CYP84A-like", Category: "plants", Species: "Eucalyptus globulus", Symbol: "CYP84A-like", Description: "reviewed Table S2 record"})
+		value, _ := json.Marshal(record{ID: "ACU45738.1", RecordKey: "eg:CYP84A-like", Category: "plants", Species: "Eucalyptus globulus", Symbol: "CYP84A-like", Description: "missing-sequence test fixture"})
 		return b.Put([]byte("00000001"), value)
 	})
 	_ = db.Close()
@@ -216,9 +216,9 @@ func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
 	}
 }
 
-func TestLegacyTableS2KeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
+func TestLegacyCategoryKeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "table-s2.pgd")
+	path := filepath.Join(dir, "legacy-key.pgd")
 	db, err := bolt.Open(path, 0o644, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -229,14 +229,22 @@ func TestLegacyTableS2KeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
 			return e
 		}
 		rows := []record{
-			{ID: "Bradi3g30590.1", RecordKey: "plants", Category: "plants", Species: "Brachypodium distachyon", Symbol: "CYP84A5", SourceURL: "user-provided-table-s2"},
-			{ID: "Bradi3g30590.1", RecordKey: "brachypodium-distachyon:block-0100:Bradi3g30590.1", Category: "plants", Species: "Brachypodium distachyon", Symbol: "CYP84A5", Sequence: "M" + strings.Repeat("A", 536), SourceURL: "reviewed-resource"},
+			{ID: "model-empty", RecordKey: "plants", Category: "plants", Species: "test species", Symbol: "CYP-test", SourceURL: "test-fixture"},
+			{ID: "model-empty", RecordKey: "test:block-0100:model-empty", Category: "plants", Species: "test species", Symbol: "CYP-test", Sequence: "M" + strings.Repeat("A", 536), SourceURL: "reviewed-resource"},
 		}
 		for i, r := range rows {
 			value, _ := json.Marshal(r)
 			if e := b.Put([]byte(fmt.Sprintf("%08d", i)), value); e != nil {
 				return e
 			}
+		}
+		sb, e := tx.CreateBucket([]byte("species"))
+		if e != nil {
+			return e
+		}
+		value, _ := json.Marshal(speciesRecord{Name: "test species", Category: "plants", Selectable: true})
+		if e := sb.Put([]byte("test species"), value); e != nil {
+			return e
 		}
 		return nil
 	})
@@ -248,14 +256,15 @@ func TestLegacyTableS2KeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
 	}
 	c := NewClient(http.DefaultClient)
 	c.dbPath = path
-	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Brachypodium distachyon"}, "Bradi3g30590.1")
+	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local-test.pgd")
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "test species"}, "model-empty")
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
-	if rows[0].SequenceID == "Bradi3g30590.1" || rows[0].ExtraColumns["cyp_sequence"] == "" {
+	if rows[0].SequenceID == "model-empty" || rows[0].ExtraColumns["cyp_sequence"] == "" {
 		t.Fatalf("real sequence was not ranked first: %#v", rows)
 	}
-	if rows[1].SequenceID != "Bradi3g30590.1" {
+	if rows[1].SequenceID != "model-empty" {
 		t.Fatalf("legacy placeholder sequence id=%q", rows[1].SequenceID)
 	}
 	got, err := c.FetchProteinSequence(context.Background(), 0, rows[0].SequenceID)
