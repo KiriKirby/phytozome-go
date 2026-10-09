@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Using the Software on Windows</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,9 +76,19 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
@@ -88,8 +98,8 @@
 																Using the Software on Windows</font></b>
       <p><b><font size="5" color="#275317">Install and start</font></b></p><p>Download the Windows release archive from the project's GitHub Releases page, extract the complete archive to a local disk, and start <b>phytozome-go.exe</b>. Do not run the program from inside the archive: the application keeps its cache and bundled components beside the executable.</p><p>Choose a location with ample free space. Reserve at least 50 GB when you expect to install the Symbol Name database, source downloads, local BLAST databases, or tree artifacts. A fast local SSD is preferred for large local searches. You may right-click <b>phytozome-go.exe</b> and create a shortcut, then place that shortcut on the Desktop or Start menu; keep the application folder intact.</p>
       <p><b><font size="5" color="#275317">First launch</font></b></p><p>The packaged helper initializes the application-local <b>.cache</b> directory, checks for a newer packaged release, and can offer the prebuilt Symbol Name database. It then starts the terminal user interface (TUI). Security software may ask for permission for the terminal runtime or a browser preview; allow only the files from the extracted release folder.</p>
-      <p><b><font size="5" color="#275317">Network access</font></b></p><p>Updates, connector downloads, release metadata, and optional databases use their official remote services. In regions where GitHub or a source provider is inaccessible, including some networks in mainland China, use a lawful and reliable network route that can reach those services before retrying. The program never needs you to disable certificate validation.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+      <p><b><font size="5" color="#275317">Network access</font></b></p><p>Updates, connector downloads, release metadata, and optional databases use their official remote services. In regions where GitHub or a source provider is inaccessible, including some networks in mainland China, use a lawful and reliable network route that can reach those services before retrying. The program never needs you to disable certificate validation.</p><p><b><font size="5" color="#275317">First-run checklist</font></b></p><ol><li>Extract the entire release archive; do not copy only the launcher.</li><li>Place the folder on a writable local SSD with sufficient free space.</li><li>Start <b>phytozome-go.exe</b> and let startup tab <code>[0]</code> finish update/cache checks.</li><li>If offered, install the Symbol Name database; declining postpones it until a feature needs it.</li><li>Confirm that the main Keyword, BLAST, and Explore tabs appear.</li></ol><p><b><font size="5" color="#275317">Files that must stay together</font></b></p><p>The launcher, <code>core.bin</code>, <code>phgohelper.bin</code>, bundled WezTerm files, and on Windows the PHgo tree runtime belong to one installation. Missing <code>mega-phgo-runtime.bin</code> or <code>muscleWin64.bin</code> disables system-tree work even if MEGA is installed elsewhere.</p><p><b><font size="5" color="#275317">If startup fails</font></b></p><p>Re-extract a clean official archive, check available disk space, retain the exact helper message, and retry. Do not run from inside the ZIP and do not solve a runtime-file error by copying an unrelated executable into the folder.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

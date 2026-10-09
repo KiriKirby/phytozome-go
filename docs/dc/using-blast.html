@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Using BLAST</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Using BLAST</font></b><p><b><font size="5" color="#275317">BLAST workflow</font></b></p><ol><li>Supply one or more sequence sources: FASTA, a sequence, supported report/source URLs, or rows transferred from Keyword Search.</li><li>Choose the target source, species/release, compatible program, and options.</li><li>Run the shown online path when available or accept the local BLAST+ fallback when required.</li><li>Review each query run, select hit rows, and export or send them to Canvas.</li></ol><p><b><font size="5" color="#275317">Query labels and hit labels</font></b></p><p>A label selected for a query source is query metadata. Each BLAST hit has its own label and label-acquisition type; it is not automatically given the query label. Keyword-to-BLAST transfer retains reusable query metadata and sequences, but does not treat raw source aliases and synonyms as new hit-label candidates.</p><p><b><font size="5" color="#275317">Reliable execution</font></b></p><p>Local execution downloads only the FASTA needed by the selected release, builds/reuses a matching local database, runs BLAST+, parses results, and reports each stage. Cancellation waits for the associated task to finish before returning the TUI to normal control.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Using BLAST</font></b><p><b><font size="5" color="#275317">BLAST workflow</font></b></p><ol><li>Supply one or more sequence sources: FASTA, a sequence, supported report/source URLs, or rows transferred from Keyword Search.</li><li>Choose the target source, species/release, compatible program, and options.</li><li>Run the shown online path when available or accept the local BLAST+ fallback when required.</li><li>Review each query run, select hit rows, and export or send them to Canvas.</li></ol><p><b><font size="5" color="#275317">Query labels and hit labels</font></b></p><p>A label selected for a query source is query metadata. Each BLAST hit has its own label and label-acquisition type; it is not automatically given the query label. Keyword-to-BLAST transfer retains reusable query metadata and sequences, but does not treat raw source aliases and synonyms as new hit-label candidates.</p><p><b><font size="5" color="#275317">Reliable execution</font></b></p><p>Local execution downloads only the FASTA needed by the selected release, builds/reuses a matching local database, runs BLAST+, parses results, and reports each stage. Cancellation waits for the associated task to finish before returning the TUI to normal control.</p><p><b><font size="5" color="#275317">Complete BLAST procedure</font></b></p><ol><li>Open BLAST, choose target source and species/release.</li><li>Choose the program matching query and database molecule types.</li><li>Paste sequence/FASTA/URL rows or open a file.</li><li>Review/identify query Symbol names.</li><li>Configure external references and optional Family BLAST.</li><li>Run; follow online/local progress and recovery prompts.</li><li>Review each query table separately, filter when available, select hits, then export or add to Canvas.</li></ol><p><b><font size="5" color="#275317">Defaults passed to execution</font></b></p><p>Core requests use the selected program and database identifiers; current standard request construction uses E-value <code>-1</code> for provider/default behavior and comparison matrix <code>BLOSUM62</code> where applicable. Provider capabilities may expose a narrower surface.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

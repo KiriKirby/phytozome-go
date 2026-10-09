@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Canvas</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Canvas</font></b><p><b><font size="5" color="#275317">Sequence workspace</font></b></p><p>Canvas combines selected keyword rows, BLAST hits, and imported FASTA into a curated table. It keeps each row's source, identifiers, sequence availability, selection state, and optional display name visible before downstream tree or alignment work.</p><p><b><font size="5" color="#275317">Selection and names</font></b></p><p>Canvas has one selected-row set shared by tree and MSA. A display-name edit changes the visible name, not the source label. Tree/MSA previews use a separate coordinate prefix for row identity, so duplicate visible names are allowed without hidden suffixes. Rows without a usable sequence are clearly unavailable for sequence operations.</p><p><b><font size="5" color="#275317">Export and snapshots</font></b></p><p>Canvas can save FASTA, text/structured output, and a session snapshot. It offers original headers, PHgo Canvas headers, PHgo Lite, minimal ID-only, and display-name-only modes. An all-rows option explicitly includes unchecked rows; otherwise FASTA export is selected rows only.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Canvas</font></b><p><b><font size="5" color="#275317">What Canvas is</font></b></p><p>Canvas is the sequence curation workspace between search results and tree/MSA analysis. A Canvas item may come from Keyword Search, BLAST, or imported FASTA. Its rows retain their source metadata rather than being flattened into anonymous sequences.</p><p><b><font size="5" color="#275317">Selection states</font></b></p><table border="1" width="100%"><tr><th>State</th><th>Meaning</th><th>Tree/MSA behavior</th></tr><tr><td>Green</td><td>Selected in Canvas.</td><td>Sent to both tree and MSA.</td></tr><tr><td>Yellow</td><td>Unchecked by an MSA <b>Apply</b> operation.</td><td>Excluded from both tools, but distinguished from an ordinary unchecked row.</td></tr><tr><td>Red</td><td>Ordinary unchecked row.</td><td>Excluded from both tools.</td></tr></table><p>Tree and MSA deliberately share one selection set. Changing selection is a computation change: the next tree refresh reruns the runtime instead of merely changing labels.</p><p><b><font size="5" color="#275317">Names and coordinates</font></b></p><p><b>display_name</b> is the editable name used by tree/MSA previews. It is not the source gene symbol and does not need to be unique. PHgo keeps the row coordinate separately as <code>[Canvas item, row]</code>, for example <code>[1,13]</code>. MSA always draws that prefix in the left ID list; Reactree shows it only when its <b>Coord</b> viewer switch is on. Neither the coordinate nor MSA's display-only residue ratio is written into <b>display_name</b>.</p><p><b><font size="5" color="#275317">FASTA export procedure</font></b></p><ol><li>Select the rows to export, or enable the explicit all-rows switch.</li><li>Open Export and choose a destination folder.</li><li>Choose the header mode according to whether the file will be round-tripped through Canvas or consumed by another program.</li><li>Keep the session or spreadsheet beside simplified FASTA if provenance matters.</li></ol><p>With all-rows off, normal FASTA export includes selected rows only and filters rows that do not have an export-ready sequence. This is separate from tree input selection: PHgo does not silently drop a selected tree row merely because the ordinary FASTA exporter cannot resolve it.</p><p><b><font size="5" color="#275317">Snapshots</font></b></p><p>A <code>.pgo</code> snapshot preserves Canvas rows, selections, display names, durable tree/MSA state, payloads, and available computation artifacts. It does not preserve open panels, focus, scroll positions, menus, or browser viewport geometry. The first explicit tree refresh after reopening a snapshot always performs a full computation.</p><p><b><font size="5" color="#275317">Hands-on Canvas workflow</font></b></p><ol><li>Add selected Keyword/BLAST rows or choose New canvas and import FASTA.</li><li>Use the left list to switch Canvas items.</li><li>Review sequence readiness and edit <code>display_name</code> where needed.</li><li>Set green checkboxes for the shared tree/MSA set.</li><li>Export FASTA, save PGO, or open tree settings and Refresh.</li></ol><p><b><font size="5" color="#275317">Import definition</font></b></p><p>Imported FASTA creates Canvas FASTA rows. A PHgo Canvas header restores source identity, raw row/title and locked display name; generic headers retain only what can be parsed honestly.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

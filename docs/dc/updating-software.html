@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Updating the Software</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Updating the Software</font></b><p><b><font size="5" color="#275317">How update checks work</font></b></p><p>At packaged startup, the helper can check the project's GitHub Release metadata for a newer bundle appropriate to the current platform. Development builds and explicitly suppressed checks do not behave as release-update checks. An available update is presented for consent; it is not silently installed.</p><p><b><font size="5" color="#275317">What happens when you accept</font></b></p><p>The updater stages the new archive, waits for the running bundle to release its files, preserves user output, verifies key launcher files, replaces the package, and relaunches. A failed verification retains a diagnostic for the next launch instead of claiming success. Do not terminate the updater while it is replacing files.</p><p><b><font size="5" color="#275317">Choose safely</font></b></p><p>Accept a release only from the project's official GitHub Releases page. If you decline, the installed version remains usable. Back up sessions and exported results before a major update; runtime caches can be recreated and should not be copied as a substitute for exports.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Updating the Software</font></b><p><b><font size="5" color="#275317">How update checks work</font></b></p><p>At packaged startup, the helper can check the project's GitHub Release metadata for a newer bundle appropriate to the current platform. Development builds and explicitly suppressed checks do not behave as release-update checks. An available update is presented for consent; it is not silently installed.</p><p><b><font size="5" color="#275317">What happens when you accept</font></b></p><p>The updater stages the new archive, waits for the running bundle to release its files, preserves user output, verifies key launcher files, replaces the package, and relaunches. A failed verification retains a diagnostic for the next launch instead of claiming success. Do not terminate the updater while it is replacing files.</p><p><b><font size="5" color="#275317">Choose safely</font></b></p><p>Accept a release only from the project's official GitHub Releases page. If you decline, the installed version remains usable. Back up sessions and exported results before a major update; runtime caches can be recreated and should not be copied as a substitute for exports.</p><p><b><font size="5" color="#275317">Safe update procedure</font></b></p><ol><li>Export important tables and save <code>.pgo</code> sessions.</li><li>At startup, read the offered installed/new version information.</li><li>Accept only when the bundle comes from the official GitHub release.</li><li>Let the detached updater finish replacement and relaunch.</li><li>After relaunch, verify the version and open one saved session.</li></ol><p><b><font size="5" color="#275317">Preserved and replaced data</font></b></p><p>The updater preserves user <code>output/</code> and the application-local Symbol Name database. Managed tools and bundled runtimes come from the new release; they are not carried forward blindly. A verification failure means the update did not complete—keep the diagnostic and restart rather than manually mixing two releases.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

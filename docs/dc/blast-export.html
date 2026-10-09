@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - BLAST Export</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																BLAST Export</font></b><p><b><font size="5" color="#275317">Export scope</font></b></p><p>BLAST export can ask whether to export the current table or all tables when the workflow originally contained more than one query. This protects multi-run evidence even when only one table is currently visible. Exports include the query metadata required to interpret the hits.</p><p><b><font size="5" color="#275317">Formats</font></b></p><p>Use the output page for spreadsheet, FASTA, PDF report, and session snapshot options supported by the current workflow. The system folder picker selects the destination; a requested subfolder is placed inside that destination. FASTA export uses whitespace-safe headers and keeps the detailed identifiers/provenance in companion structured output.</p><p><b><font size="5" color="#275317">Reproducibility</font></b></p><p>Save a session for a durable record of work in progress and keep the selected release, program, query input, options, and exported table together when reporting a result.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																BLAST Export</font></b><p><b><font size="5" color="#275317">Export scope</font></b></p><p>BLAST export can ask whether to export the current table or all tables when the workflow originally contained more than one query. This protects multi-run evidence even when only one table is currently visible. Exports include the query metadata required to interpret the hits.</p><p><b><font size="5" color="#275317">Formats</font></b></p><p>Use the output page for spreadsheet, FASTA, PDF report, and session snapshot options supported by the current workflow. The system folder picker selects the destination; a requested subfolder is placed inside that destination. FASTA export uses whitespace-safe headers and keeps the detailed identifiers/provenance in companion structured output.</p><p><b><font size="5" color="#275317">Reproducibility</font></b></p><p>Save a session for a durable record of work in progress and keep the selected release, program, query input, options, and exported table together when reporting a result.</p><p><b><font size="5" color="#275317">Current versus all</font></b></p><p>Current table exports the active query/family unit. All tables exports every retained query run, including runs hidden by navigation. Ctrl+D may preselect all scope but still opens the confirmation modal.</p><p><b><font size="5" color="#275317">FASTA content</font></b></p><p>Family output may prepend all available query records unless <b>Prepend only first query</b> is enabled, then appends selected hit sequences. Header mode applies at the final writer boundary. Keep XLSX/PDF beside simplified FASTA to retain query-to-hit provenance.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

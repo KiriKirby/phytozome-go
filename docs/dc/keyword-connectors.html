@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Keyword Search Connector Documentation</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Keyword Search Connector Documentation</font></b><p><b><font size="5" color="#275317">Connector contract</font></b></p><p>Connectors isolate each provider's acquisition and parsing logic from the shared workflow. The result model records source database, release/species context, biological identifiers, structured metadata, and authentic row-level source URLs only when the source supplied them. The program does not manufacture a gene report URL from an identifier.</p><table border="1" width="100%"><tr><th>Connector</th><th>Documented source behavior</th></tr><tr><td>Phytozome</td><td>Provider-specific retrieval is isolated under the Phytozome source connector.</td></tr><tr><td>CYP/P450</td><td>Downloads and verifies the independently published <code>p450phgo.pgd</code>, then performs species selection and keyword search entirely locally. Category prefixes <code>a:</code>, <code>p:</code>, <code>f:</code>, and <code>b:</code> restrict a query.</td></tr><tr><td>Lemna</td><td>Release download directories are authoritative for available releases and downloadable GFF3, AHRD, and FASTA assets.</td></tr><tr><td>TAIR</td><td>Versioned workflows use only the selected release's configured official assets; a local miss is not replaced with another release.</td></tr><tr><td>NCBI</td><td>Uses the selected NCBI search type; eligible rows can use explicit Gene locus priority.</td></tr><tr><td>PLAZA</td><td>Uses public versioned FTP data for locus resolution and preserves <code>plaza_*</code> provenance fields.</td></tr></table><p>Connector availability depends on each provider and network. Cache reuse and request coalescing reduce duplicate work but do not change a provider's access terms or rate limits.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Keyword Search Connector Documentation</font></b><p><b><font size="5" color="#275317">Connector contract</font></b></p><p>Connectors isolate each provider's acquisition and parsing logic from the shared workflow. The result model records source database, release/species context, biological identifiers, structured metadata, and authentic row-level source URLs only when the source supplied them. The program does not manufacture a gene report URL from an identifier.</p><table border="1" width="100%"><tr><th>Connector</th><th>Documented source behavior</th></tr><tr><td>Phytozome</td><td>Provider-specific retrieval is isolated under the Phytozome source connector.</td></tr><tr><td>CYP/P450</td><td>Downloads and verifies the independently published <code>p450phgo.pgd</code>, then performs species selection and keyword search entirely locally. Category prefixes <code>a:</code>, <code>p:</code>, <code>f:</code>, and <code>b:</code> restrict a query.</td></tr><tr><td>Lemna</td><td>Release download directories are authoritative for available releases and downloadable GFF3, AHRD, and FASTA assets.</td></tr><tr><td>TAIR</td><td>Versioned workflows use only the selected release's configured official assets; a local miss is not replaced with another release.</td></tr><tr><td>NCBI</td><td>Uses the selected NCBI search type; eligible rows can use explicit Gene locus priority.</td></tr><tr><td>PLAZA</td><td>Uses public versioned FTP data for locus resolution and preserves <code>plaza_*</code> provenance fields.</td></tr></table><p>Connector availability depends on each provider and network. Cache reuse and request coalescing reduce duplicate work but do not change a provider's access terms or rate limits.</p><p><b><font size="5" color="#275317">How to read connector provenance</font></b></p><p>Every connector normalizes results into shared rows but retains source-specific fields. Phytozome uses its provider interfaces; lemna uses release GFF3/AHRD and FASTA; TAIR is strictly release-bound; NCBI uses the selected Entrez database; PLAZA priority uses public versioned FTP; CYP uses a validated local PGD.</p><p><b><font size="5" color="#275317">Do not infer missing data</font></b></p><p>Blank sequence, accession, or row URL means the source path did not supply it. <code>gene_report_url</code> is authentic only when explicitly obtained; download URLs belong in provenance fields and are not substituted as gene pages.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

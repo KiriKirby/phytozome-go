@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Cross-Database Enhancer</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Cross-Database Enhancer</font></b><p><b><font size="5" color="#275317">Purpose</font></b></p><p>The Cross-Database Enhancer enriches workflow context using structured, source-backed fields already obtained for the selected result path. It is designed to make source, sequence, and provenance differences visible when comparing databases.</p><p><b><font size="5" color="#275317">Boundaries</font></b></p><p>Enhancement does not invent report links, convert identifiers between biological classes without source evidence, or use a second database as a hidden fallback for a selected release. Fields such as geneid, protein_id, and transcript are displayed according to what they biologically represent.</p><p><b><font size="5" color="#275317">Review before reuse</font></b></p><p>Use row details and exported provenance to verify an enhanced result. A source-specific field may be absent because the selected release does not publish it; absence is preferable to a cross-release guess.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Cross-Database Enhancer</font></b><p><b><font size="5" color="#275317">Purpose</font></b></p><p>The Cross-Database Enhancer enriches workflow context using structured, source-backed fields already obtained for the selected result path. It is designed to make source, sequence, and provenance differences visible when comparing databases.</p><p><b><font size="5" color="#275317">Boundaries</font></b></p><p>Enhancement does not invent report links, convert identifiers between biological classes without source evidence, or use a second database as a hidden fallback for a selected release. Fields such as geneid, protein_id, and transcript are displayed according to what they biologically represent.</p><p><b><font size="5" color="#275317">Review before reuse</font></b></p><p>Use row details and exported provenance to verify an enhanced result. A source-specific field may be absent because the selected release does not publish it; absence is preferable to a cross-release guess.</p><p><b><font size="5" color="#275317">Use enrichment safely</font></b></p><ol><li>Enable only references needed for the review.</li><li>Wait for accession prefetch, UniProt lookup, and InterPro query/hit stages.</li><li>Read blank as unavailable, not negative evidence.</li><li>Open row details to compare original, UniProt, and InterPro field groups.</li></ol><p>Enrichment does not replace original source identifiers and does not create cross-release source records. Cached negative results prevent repeated calls during the same work.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

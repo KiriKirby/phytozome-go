@@ -98,6 +98,53 @@ func TestManifestFailureUsesValidLocalDatabase(t *testing.T) {
 	}
 }
 
+func TestRecordKeyResolvesDuplicateBiologicalIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "duplicates.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		for i, r := range []record{
+			{ID: "CYP51G1", RecordKey: "potato:cyp51g1:block-0001", Category: "plants", Species: "potato", Symbol: "CYP51G1", Sequence: "MAAAAA"},
+			{ID: "CYP51G1", RecordKey: "potato:cyp51g1:block-0002", Category: "plants", Species: "potato", Symbol: "CYP51G1", Sequence: "MBBBBB"},
+		} {
+			value, _ := json.Marshal(r)
+			if e := b.Put([]byte(fmt.Sprintf("%08d", i)), value); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local-test.pgd")
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "potato"}, "CYP51G1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].SequenceID == rows[1].SequenceID {
+		t.Fatalf("rows=%#v", rows)
+	}
+	for i, want := range []string{"MAAAAA", "MBBBBB"} {
+		got, err := c.FetchProteinSequence(context.Background(), 0, rows[i].SequenceID)
+		if err != nil || got.Sequence != want {
+			t.Fatalf("row %d sequence=%q err=%v want=%q", i, got.Sequence, err, want)
+		}
+	}
+}
+
 func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "p450phgo.pgd", "p450phgo.pgd"))
 	if err != nil {

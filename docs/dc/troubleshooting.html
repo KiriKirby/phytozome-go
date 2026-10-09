@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<title>PHgo - Documentation Center Template</title>
+<title>PHgo - Troubleshooting Software Issues</title>
 <link rel="icon" type="image/x-icon" href="../favicon.ico">
 <link rel="shortcut icon" href="../favicon.ico">
 </head>
@@ -76,17 +76,27 @@
 										<p><a href="blast-export.html">Export</a></p>
 										<p><a href="blast-connectors.html">Blast Connector Documentation</a></p>
 										<hr noshade color="#275317" size="1" align="right" width="80%">
+										<p><b><a href="workflow-reference.html">Workflow Reference</a></b></p>
+										<p><a href="glossary.html">Field, State, and File Glossary</a></p>
+										<p><a href="main-interface-data-sources.html">Main Interface and Data Sources</a></p>
+										<p><a href="input-formats.html">Input Formats and Batch Rules</a></p>
+										<p><a href="result-table-controls.html">Result Tables and Keyboard Controls</a></p>
+										<p><a href="blast-analysis-controls.html">External References, Family BLAST, and Filtering</a></p>
+										<p><a href="exports-cache-recovery.html">Exports, Reports, Cache, and Recovery</a></p>
+										<hr noshade color="#275317" size="1" align="right" width="80%">
 										<p><b><a href="explore.html">Explore</a></b></p>
+										<p><a href="standalone-tree-viewer.html">Standalone Tree Viewer</a></p>
 										<p><a href="sessions.html">Sessions</a></p>
 										<p><a href="canvas.html">Canvas</a></p>
+										<p><a href="phgo-fasta-headers.html">PHgo FASTA Header Formats</a></p>
 										<p><a href="phylogenetic-trees.html">Phylogenetic Trees</a></p>
 										<p><a href="multiple-sequence-alignment.html">Multiple Sequence Alignment</a></p></td>
 										<td width="70%" align="center" valign="top">&nbsp;<table border="0" width="95%" cellspacing="0" cellpadding="0" height="100%">
 											<tr>
 												<td><b>
 																<font size="6" color="#275317">
-																Troubleshooting Software Issues</font></b><p><b><font size="5" color="#275317">Start with the complete diagnostic</font></b></p><p>phytozome GO does not publish a fixed numeric error-code catalogue. Keep the exact message, the selected source and release, the action being performed, and whether the problem occurs again after restart. The following diagnostic classes cover the supported recovery paths.</p><table border="1" width="100%"><tr><th>Diagnostic class</th><th>Meaning and recovery</th></tr><tr><td>Update or package verification</td><td>Download or replacement was incomplete. Restart, retry with free disk space, and obtain the release only from GitHub Releases.</td></tr><tr><td>Symbol Name database validation</td><td>A manifest, part, checksum, decompression, or record validation failed. Retry the database installation; do not use partial files.</td></tr><tr><td>Connector or source download</td><td>The provider is unreachable, changed, rate-limited, or returned invalid data. Check network access, retry later, and retain the exact source URL/message.</td></tr><tr><td>BLAST+ unavailable or command failed</td><td>Install/repair the prompted component, confirm free cache space, then rerun. Local BLAST must use the selected release's matching FASTA.</td></tr><tr><td>PHgo runtime unavailable</td><td>System-tree computation requires the packaged Windows amd64 runtime and its owned MUSCLE binary. Re-extract the complete Windows bundle; on Macintosh/Linux use the stated platform boundary.</td></tr><tr><td>Unknown message</td><td>Record the full text and workflow context. Do not guess at or fabricate an error code; report it with the version and reproducible steps.</td></tr></table><p><b><font size="5" color="#275317">Safe reset</font></b></p><p>Export sessions and results first. The application cache may be regenerated, but deleting it removes downloaded databases and prepared local assets. Do not delete exported output merely to clear a runtime cache.</p><p align="center">
-																<font size="2">Last updated: October 2, 2026.</font></td>
+																Troubleshooting Software Issues</font></b><p><b><font size="5" color="#275317">Start with the complete diagnostic</font></b></p><p>phytozome GO does not publish a fixed numeric error-code catalogue. Keep the exact message, the selected source and release, the action being performed, and whether the problem occurs again after restart. The following diagnostic classes cover the supported recovery paths.</p><table border="1" width="100%"><tr><th>Diagnostic class</th><th>Meaning and recovery</th></tr><tr><td>Update or package verification</td><td>Download or replacement was incomplete. Restart, retry with free disk space, and obtain the release only from GitHub Releases.</td></tr><tr><td>Symbol Name database validation</td><td>A manifest, part, checksum, decompression, or record validation failed. Retry the database installation; do not use partial files.</td></tr><tr><td>Connector or source download</td><td>The provider is unreachable, changed, rate-limited, or returned invalid data. Check network access, retry later, and retain the exact source URL/message.</td></tr><tr><td>BLAST+ unavailable or command failed</td><td>Install/repair the prompted component, confirm free cache space, then rerun. Local BLAST must use the selected release's matching FASTA.</td></tr><tr><td>PHgo runtime unavailable</td><td>System-tree computation requires the packaged Windows amd64 runtime and its owned MUSCLE binary. Re-extract the complete Windows bundle; on Macintosh/Linux use the stated platform boundary.</td></tr><tr><td>Unknown message</td><td>Record the full text and workflow context. Do not guess at or fabricate an error code; report it with the version and reproducible steps.</td></tr></table><p><b><font size="5" color="#275317">Safe reset</font></b></p><p>Export sessions and results first. The application cache may be regenerated, but deleting it removes downloaded databases and prepared local assets. Do not delete exported output merely to clear a runtime cache.</p><p><b><font size="5" color="#275317">Information to collect</font></b></p><ul><li>PHgo version and operating system.</li><li>Selected source, species/release, mode, and program.</li><li>The exact error text—not a paraphrase.</li><li>Whether Retry reproduces it and whether other sources work.</li><li>For runtime failures, the relevant artifact/log names when available.</li></ul><p><b><font size="5" color="#275317">Recovery order</font></b></p><ol><li>Use the modal's Retry for transient provider/network failure.</li><li>Use Skip only when losing the current batch item is acceptable.</li><li>Use Back to correct source, species, input, or settings.</li><li>Cancel long work through its modal so workers unwind cleanly.</li><li>Re-extract the official bundle for missing packaged files.</li></ol><p>There is no public numeric error-code catalogue. A source returning no records is different from a transport/parser error and should not be reported as a crash.</p><p align="center">
+																<font size="2">Last updated: October 9, 2026.</font></td>
 											</tr>
 										</table>
 										</td>

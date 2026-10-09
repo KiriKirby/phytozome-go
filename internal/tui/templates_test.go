@@ -241,7 +241,7 @@ func TestButtonRowWrapsOnlyWhenLeftAndPrimaryGroupsOverlap(t *testing.T) {
 func TestButtonRowPrimaryLabelSkipsLeftPrimaryButtons(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonOpenFile, Shortcut: ShortcutOpenFile, Visible: true, Primary: true, LeftPrimary: true},
-		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+Enter", Visible: true, Primary: true},
+		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+R", Visible: true, Primary: true},
 	)
 
 	row.setPrimaryLabel(ButtonSkip)
@@ -257,7 +257,7 @@ func TestButtonRowPrimaryLabelSkipsLeftPrimaryButtons(t *testing.T) {
 func TestButtonRowPrimaryButtonPrefersNonLeftPrimary(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonOpenFile, Shortcut: ShortcutOpenFile, Visible: true, Primary: true, LeftPrimary: true},
-		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+Enter", Visible: true, Primary: true},
+		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+R", Visible: true, Primary: true},
 	)
 
 	button := row.primaryButton()
@@ -273,7 +273,7 @@ func TestButtonRowLeftPrimaryStaysLeftOfMainPrimary(t *testing.T) {
 	row := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Visible: true},
 		buttonSpec{Label: ButtonOpenFile, Shortcut: ShortcutOpenFile, Visible: true, Primary: true, LeftPrimary: true},
-		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+Enter", Visible: true, Primary: true},
+		buttonSpec{Label: ButtonApply, Shortcut: "Ctrl+R", Visible: true, Primary: true},
 	)
 
 	positions := row.buttonPositions(100)
@@ -1974,10 +1974,10 @@ func TestFamilyBlastCustomizeModalChooseGroupOverlayLeavesExtraRows(t *testing.T
 	}
 }
 
-func TestFamilyBlastCustomizeModalCtrlEnterAppliesFromListFocus(t *testing.T) {
+func TestFamilyBlastCustomizeModalCtrlRunAppliesFromListFocus(t *testing.T) {
 	for _, event := range []*tcell.EventKey{
-		tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl),
-		tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl),
+		tcell.NewEventKey(tcell.KeyCtrlR, 0, 0),
+		tcell.NewEventKey(tcell.KeyCtrlR, 0, 0),
 	} {
 		app := newApp()
 		var result FamilyBlastResult
@@ -1998,10 +1998,10 @@ func TestFamilyBlastCustomizeModalCtrlEnterAppliesFromListFocus(t *testing.T) {
 		capture(event)
 
 		if len(result.CustomGroups) != 1 || result.CustomGroups[0].Name != "PAL" {
-			t.Fatalf("Ctrl+Enter event %v should apply custom groups, got %#v", event.Key(), result.CustomGroups)
+			t.Fatalf("Ctrl+R event %v should apply custom groups, got %#v", event.Key(), result.CustomGroups)
 		}
 		if result.Nav != "" {
-			t.Fatalf("Ctrl+Enter event %v should apply without navigation, got nav %q", event.Key(), result.Nav)
+			t.Fatalf("Ctrl+R event %v should apply without navigation, got nav %q", event.Key(), result.Nav)
 		}
 	}
 }
@@ -2071,24 +2071,12 @@ func TestFamilyBlastCustomizeSubModalRestoresParentSelection(t *testing.T) {
 	}
 }
 
-func TestCtrlEnterShortcutRequiresCtrlModifiedEnter(t *testing.T) {
-	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)) {
-		t.Fatal("Ctrl+Enter should match KeyEnter with Ctrl modifier")
+func TestCtrlRunShortcutRequiresCtrlR(t *testing.T) {
+	if !shortcutMatchesEvent("Ctrl+R", tcell.NewEventKey(tcell.KeyCtrlR, 0, 0)) {
+		t.Fatal("Ctrl+R should match the Ctrl-R transport")
 	}
-	if !shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyF13, 0, tcell.ModNone)) {
-		t.Fatal("bundled-terminal F13 transport should match Ctrl+Enter")
-	}
-	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
-		t.Fatal("Ctrl+Enter must not match Ctrl+J, which is emitted by multiline paste")
-	}
-	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, 0)) {
-		t.Fatal("Ctrl+Enter should not match plain Enter")
-	}
-	if isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlJ, 0, 0)) {
-		t.Fatal("KeyCtrlJ must not be treated as Ctrl+Enter")
-	}
-	if isCtrlEnter(tcell.NewEventKey(tcell.KeyCtrlM, 0, 0)) {
-		t.Fatal("KeyCtrlM must not be treated as Ctrl+Enter")
+	if shortcutMatchesEvent("Ctrl+R", tcell.NewEventKey(tcell.KeyRune, 'r', 0)) {
+		t.Fatal("Ctrl+R should not match plain r")
 	}
 }
 

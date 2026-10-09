@@ -59,7 +59,7 @@ The saved sketch is only a visual reference for the rough structure described by
   - BLAST: Clear content, Paste, Run BLAST.
   - Explore: Start.
   - Existing shortcuts are reused where they do not conflict with the new focus rule: Clear content uses `Ctrl+N`, Paste uses `Ctrl+V`, and Wide search uses `Ctrl+W`.
-  - The tab's main action uses `Ctrl+Enter`: Search on Keyword, Run BLAST on BLAST, and Start on Explore.
+  - The tab's main action uses `Ctrl+R`: Search on Keyword, Run BLAST on BLAST, and Start on Explore.
   - Focused module buttons are activated with `Space` or `Enter`.
 
 ## Shortcut Help

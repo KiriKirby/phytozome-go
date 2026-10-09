@@ -123,7 +123,7 @@ Current implementation:
 - Pasting into Symbol name remains line-oriented and fills downward in that current column.
 - Up/Down use wrapped visual-line movement first, then move to the previous/next logical row only from the top or bottom visual line.
 - Manual FASTA editing supports explicit in-cell newlines with plain `Enter`.
-- `Ctrl+Enter` is reserved for the tab's main action and must not be consumed by the FASTA editor.
+- `Ctrl+R` is reserved for the tab's main action and must not be consumed by the FASTA editor.
 - The drawn caret cell is reverse-highlighted in addition to using the terminal cursor, so the insertion point remains visible in wrapped FASTA cells.
 
 ## Button Bar
@@ -161,7 +161,7 @@ Button shortcuts:
 
 - Button shortcuts should reuse the current application's existing button shortcuts wherever possible.
 - Do not invent new shortcuts when an equivalent legacy action already has a stable shortcut.
-- The main Run BLAST action uses `Ctrl+Enter` in the new main interface.
+- The main Run BLAST action uses `Ctrl+R` in the new main interface.
 - Shortcut help remains reserved for shortcuts without visible button equivalents.
 
 ## Auto-Identification Before Execution

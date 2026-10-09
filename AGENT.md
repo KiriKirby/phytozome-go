@@ -953,7 +953,7 @@ Priority 4 (low / optional)
 
 ## Output behavior
 
-- TUI shortcut safety: multiline bracketed paste may deliver embedded line breaks as `Ctrl+J`/line-feed events. `Ctrl+J` must never be treated as `Ctrl+Enter` or any submit action. Clear/new-group actions use `Ctrl+Shift+N`; do not introduce bare `Ctrl+N` or `Ctrl+M` shortcuts that can collide with terminal paste/edit control characters.
+- TUI shortcut safety: multiline bracketed paste may deliver embedded line breaks as `Ctrl+J`/line-feed events. `Ctrl+J` must never be treated as `Ctrl+R` or any submit action. Clear/new-group actions use `Ctrl+Shift+N`; do not introduce bare `Ctrl+N` or `Ctrl+M` shortcuts that can collide with terminal paste/edit control characters.
 
 - The website's `docs/wt.html` FASTA Header Tools includes a Batch FASTA Record Filter task. It takes one case-insensitive header substring per line and can either remove every matching FASTA record or retain only matching records; record parsing must preserve complete records and support normal adjacent FASTA entries as well as entries separated by blank lines.
 
@@ -981,6 +981,16 @@ Priority 4 (low / optional)
   `docs/dc/generate-docs.js` is the maintainable source for generated overview
   and topic pages; run `node docs/dc/generate-docs.js` after changing its topic
   data, then verify internal links and `git diff --check`.
+- The Documentation Center must explain controls from implemented code rather
+  than merely name features. Keep the Canvas PHgo FASTA header grammar and MSA
+  image-export defaults/advanced-layout DSL documented as dedicated user-facing
+  reference material whenever their generators, parsers, or UI controls change.
+- Treat Documentation Center coverage as a code-to-doc matrix: every main tab,
+  enabled data source, accepted input form, review-table action, analysis switch,
+  export format, cache boundary, recovery path, and Explore tool needs a usable
+  user-facing explanation. Long literal identifiers inside legacy-width tables
+  must use fixed column sizing plus explicit wrapping so they cannot widen the
+  760-pixel page.
 - Browser titles use `PHgo - <page name>`. Pages represented by the main
   navigation use that navigation label (`DOCS`, `CONTACT`, or `TOOLS`); every
   other content page uses its actual article or feature name; and the home page
@@ -1018,6 +1028,6 @@ End of agent notes.
 - The application downloads/validates the PGD on first CYP selection, stores it beside the executable, and falls back to Phytozome on failure. `PHGO_CYP_PGD_URL` overrides the published raw asset for testing.
 - PGD generation scripts, source analysis, schema documentation, and releases belong in the independent `phytozome-go-p450phgo` repository; the runtime repository keeps only the reader and integration docs.
 - The published repository is https://github.com/KiriKirby/phytozome-go-p450phgo and its release manifest carries the database URL, byte length, and SHA-256. The runtime checks this manifest whenever CYP is selected, reuses an exact local copy, and atomically replaces an outdated copy.
-- CYP audit status (2026-10-08): all 167 Dr Nelson resource files (40 animals, 59 plants, 61 fungi, 7 bacteria) were downloaded and Office-normalized, with one audit Markdown file per resource in the independent repository. The formal PGD intentionally contains only reviewed structured records (currently the 15 CAld5H/CYP84 Table S2 relationships); unreviewed DOC/XLSX and aggregate bacterial/public collections are indexed as disabled species and must not enter search through generic binary/string scanning. The builder's legacy printable-byte collector is no longer used for published records.
+- CYP plant rebuild status (2026-10-09): all 59 Dr Nelson plant resources are complete in page order using only resource-specific reviewed CSVs, contributing 18,172 records and 18,013 literal source sequences. Together with the existing 15 CAld5H/CYP84 Table S2 relationships, the formal PGD target is 18,187 records. The plant release gate is satisfied; every non-plant resource remains disabled until independently reviewed. Do not restore category-wide regex/string/FASTA inference as a release input.
 - In CYP keyword Custom/Set-remaining modes, the row Species column is an action-only cell: inactive blank rows render empty, active rows without a choice render `[ set species... ]`, and keyboard text/paste/delete cannot edit it. Space or Enter opens the selector. Closing the selector without choosing after selecting Set all or Set remaining restores the mode to Custom. Category-prefix help belongs inside the CYP species selector, not on the main keyword page.
 

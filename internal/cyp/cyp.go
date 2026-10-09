@@ -30,7 +30,7 @@ type manifest struct {
 
 var _ source.DataSource = (*Client)(nil)
 
-type record struct{ ID, Category, Species, Symbol, Description, Sequence, SourceURL string }
+type record struct{ ID, RecordKey, Category, Species, Symbol, Description, Sequence, SourceURL string }
 type speciesRecord struct {
 	Name        string `json:"name"`
 	Category    string `json:"category"`
@@ -38,9 +38,13 @@ type speciesRecord struct {
 	Description string `json:"description"`
 }
 type Client struct {
-	httpClient *http.Client
-	mu         sync.Mutex
-	dbPath     string
+	httpClient   *http.Client
+	mu           sync.Mutex
+	dbPath       string
+	cacheMu      sync.RWMutex
+	cacheStamp   string
+	cacheRows    []record
+	cacheSpecies []speciesRecord
 }
 
 func NewClient(h *http.Client) *Client {
@@ -133,8 +137,66 @@ func (c *Client) ensureDB(x context.Context) error {
 	}
 	if e != nil {
 		_ = os.Remove(p)
+	} else {
+		c.cacheMu.Lock()
+		c.cacheStamp = ""
+		c.cacheRows = nil
+		c.cacheSpecies = nil
+		c.cacheMu.Unlock()
 	}
 	return e
+}
+
+func (c *Client) cachedRecords() ([]record, error) {
+	st, err := os.Stat(c.dbPath)
+	if err != nil {
+		return nil, err
+	}
+	stamp := fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+	c.cacheMu.RLock()
+	if c.cacheStamp == stamp && c.cacheRows != nil {
+		rows := append([]record(nil), c.cacheRows...)
+		c.cacheMu.RUnlock()
+		return rows, nil
+	}
+	c.cacheMu.RUnlock()
+	var rows []record
+	if err := read(c.dbPath, func(v []record) error { rows = v; return nil }); err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	if c.cacheStamp != stamp {
+		c.cacheStamp, c.cacheRows = stamp, append([]record(nil), rows...)
+	}
+	rows = append([]record(nil), c.cacheRows...)
+	c.cacheMu.Unlock()
+	return rows, nil
+}
+
+func (c *Client) cachedSpecies() ([]speciesRecord, error) {
+	st, err := os.Stat(c.dbPath)
+	if err != nil {
+		return nil, err
+	}
+	stamp := fmt.Sprintf("%d:%d", st.Size(), st.ModTime().UnixNano())
+	c.cacheMu.RLock()
+	if c.cacheStamp == stamp && c.cacheSpecies != nil {
+		items := append([]speciesRecord(nil), c.cacheSpecies...)
+		c.cacheMu.RUnlock()
+		return items, nil
+	}
+	c.cacheMu.RUnlock()
+	var items []speciesRecord
+	if err := readSpecies(c.dbPath, func(v []speciesRecord) error { items = v; return nil }); err != nil {
+		return nil, err
+	}
+	c.cacheMu.Lock()
+	if c.cacheStamp != stamp {
+		c.cacheStamp, c.cacheSpecies = stamp, append([]speciesRecord(nil), items...)
+	}
+	items = append([]speciesRecord(nil), c.cacheSpecies...)
+	c.cacheMu.Unlock()
+	return items, nil
 }
 func (c *Client) fetchManifest(x context.Context, u string) (manifest, error) {
 	var m manifest
@@ -214,17 +276,21 @@ func (c *Client) FetchSpeciesCandidates(x context.Context) ([]model.SpeciesCandi
 		return nil, e
 	}
 	var a []model.SpeciesCandidate
-	if e := readSpecies(c.dbPath, func(ss []speciesRecord) error {
+	if ss, e := c.cachedSpecies(); e == nil {
 		for _, s := range ss {
 			if strings.TrimSpace(s.Name) != "" {
 				a = append(a, model.SpeciesCandidate{JBrowseName: s.Name, GenomeLabel: s.Name, SearchAlias: s.Description, GroupKey: s.Category, Disabled: !s.Selectable})
 			}
 		}
-		return nil
-	}); e == nil && len(a) > 0 {
+		if len(a) > 0 {
+			return a, nil
+		}
+	}
+	if len(a) > 0 {
 		return a, nil
 	}
-	e := read(c.dbPath, func(rs []record) error {
+	rs, e := c.cachedRecords()
+	if e == nil {
 		s := map[string]bool{}
 		for _, r := range rs {
 			if r.Species != "" && !s[r.Species] {
@@ -232,8 +298,7 @@ func (c *Client) FetchSpeciesCandidates(x context.Context) ([]model.SpeciesCandi
 				a = append(a, model.SpeciesCandidate{JBrowseName: r.Species, GenomeLabel: r.Species, SearchAlias: r.Species, GroupKey: r.Category})
 			}
 		}
-		return nil
-	})
+	}
 	return a, e
 }
 func readSpecies(p string, fn func([]speciesRecord) error) error {
@@ -284,26 +349,31 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 		}
 	}
 	var a []model.KeywordResultRow
-	e := read(c.dbPath, func(rs []record) error {
-		for _, r := range rs {
-			if category != "" && !strings.EqualFold(category, r.Category) {
-				continue
-			}
-			if s.JBrowseName != "" && !strings.EqualFold(s.JBrowseName, "all") && !strings.EqualFold(s.JBrowseName, r.Species) {
-				continue
-			}
-			if !strings.Contains(strings.ToLower(r.ID+" "+r.Species+" "+r.Symbol+" "+r.Description), term) {
-				continue
-			}
-			extra := map[string]string{"cyp_category": r.Category}
-			if strings.TrimSpace(r.Sequence) != "" {
-				extra["cyp_sequence"] = r.Sequence
-				extra["cyp_fasta"] = ">" + r.ID + "\n" + r.Sequence
-			}
-			a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: r.ID, ExtraColumns: extra})
+	rs, e := c.cachedRecords()
+	if e != nil {
+		return nil, e
+	}
+	for _, r := range rs {
+		if category != "" && !strings.EqualFold(category, r.Category) {
+			continue
 		}
-		return nil
-	})
+		if s.JBrowseName != "" && !strings.EqualFold(s.JBrowseName, "all") && !strings.EqualFold(s.JBrowseName, r.Species) {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(r.ID+" "+r.Species+" "+r.Symbol+" "+r.Description), term) {
+			continue
+		}
+		extra := map[string]string{"cyp_category": r.Category}
+		if strings.TrimSpace(r.Sequence) != "" {
+			extra["cyp_sequence"] = r.Sequence
+			extra["cyp_fasta"] = ">" + r.ID + "\n" + r.Sequence
+		}
+		sequenceID := strings.TrimSpace(r.RecordKey)
+		if sequenceID == "" {
+			sequenceID = r.ID
+		}
+		a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: sequenceID, ExtraColumns: extra})
+	}
 	return a, e
 }
 
@@ -319,19 +389,19 @@ func (c *Client) FetchProteinSequence(ctx context.Context, _ int, sequenceID str
 		return model.ProteinSequenceData{}, errors.New("CYP sequence unavailable")
 	}
 	var found model.ProteinSequenceData
-	err := read(c.dbPath, func(rs []record) error {
+	rs, err := c.cachedRecords()
+	if err == nil {
 		for _, r := range rs {
-			if !strings.EqualFold(strings.TrimSpace(r.ID), want) && !strings.EqualFold(strings.TrimSpace(r.Symbol), want) {
+			if !strings.EqualFold(strings.TrimSpace(r.RecordKey), want) && !strings.EqualFold(strings.TrimSpace(r.ID), want) && !strings.EqualFold(strings.TrimSpace(r.Symbol), want) {
 				continue
 			}
 			if strings.TrimSpace(r.Sequence) == "" {
 				continue
 			}
 			found = model.ProteinSequenceData{Sequence: strings.TrimSpace(r.Sequence), OriginalHeader: ">" + r.ID}
-			return nil
+			break
 		}
-		return nil
-	})
+	}
 	if err != nil {
 		return model.ProteinSequenceData{}, err
 	}

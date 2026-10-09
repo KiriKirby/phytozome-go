@@ -2991,7 +2991,7 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 	body.AddItem(areaFrame, 0, 1, false)
 	body.AddItem(pasteStatus.view, 1, 0, false)
 	primaryLabel := inputConfirmText(page.ConfirmText, page.SkipWhenEmpty, page.EmptyText, area.GetText())
-	primaryShortcut := "Ctrl+Enter"
+	primaryShortcut := "Ctrl+R"
 	if page.ConfirmOnEnter {
 		primaryShortcut = "Enter"
 	}
@@ -3046,7 +3046,7 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 	if page.AllowOpenFile {
 		hints = append(hints, fmt.Sprintf("%s opens a system file picker.", ShortcutOpenFile))
 	}
-	mainHint := "Ctrl+Enter uses the main action button. Enter inserts a new line. Paste (Ctrl+V) reads plain text from the clipboard."
+	mainHint := "Ctrl+R runs the main action. Enter inserts a new line. Paste (Ctrl+V) reads plain text from the clipboard."
 	if page.ConfirmOnEnter {
 		mainHint = "Enter uses the main action button. Paste (Ctrl+V) reads plain text from the clipboard."
 	}
@@ -3068,7 +3068,7 @@ func RunMultiLinePage(page MultiLinePage) (MultiLineResult, error) {
 		if page.ConfirmOnEnter {
 			return event != nil && event.Key() == tcell.KeyEnter
 		}
-		return isCtrlEnter(event)
+		return shortcutMatchesEvent("Ctrl+R", event)
 	}, Action: confirm}))
 
 	if err := runApp(app); err != nil {
@@ -5162,9 +5162,9 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			{Label: ButtonClose, Shortcut: ShortcutBack, Action: closeInputModal, Visible: true},
 			{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: true},
 			{Label: ButtonOpenFile, Shortcut: ShortcutOpenFile, Action: openFile, Visible: true, Primary: true, LeftPrimary: true},
-		}, true, "Apply", "Ctrl+Enter", func(NavAction) {}, confirmInput)
+		}, true, "Apply", "Ctrl+R", func(NavAction) {}, confirmInput)
 		addButtonRow(box, buttons)
-		addHints(box, []string{"Space/Enter opens the guide tree editor button. Ctrl+Enter applies this text. Ctrl+F opens a system file picker."})
+		addHints(box, []string{"Space/Enter opens the guide tree editor button. Ctrl+R applies this text. Ctrl+F opens a system file picker."})
 		closeModal = closeInputModal
 		modalOpen = true
 		modalText = nil
@@ -8532,7 +8532,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	body.AddItem(contentRow, 0, 1, true)
 	actionButtons := closeOnlyModalButtons([]buttonSpec{
 		buttonSpec{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
-		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+R", Action: func() {
+		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+Shift+R", Action: func() {
 			result.Settings = captureSettings()
 			result.Nav = NavRefresh
 			app.Stop()
@@ -8540,7 +8540,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		buttonSpec{Label: "Customize groups", Shortcut: "Ctrl+G", Action: customizeGroups, Visible: true, Primary: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), ShortcutApply, func() { closeWithNav(NavBack) }, confirm)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Up/Down moves through options. Space toggles a checkbox. Ctrl+G opens the group editor. Ctrl+R refreshes the preview after changing grouping or merging rules. Enter applies. F1 opens help."})
+	addHints(body, []string{"Up/Down moves through options. Space toggles a checkbox. Ctrl+Shift+R refreshes the preview after changing grouping or merging rules. Ctrl+G opens the group editor. Enter applies. F1 opens help."})
 
 	buttonHeight := 1
 	if actionButtons != nil {
@@ -9636,10 +9636,10 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: showSelectedAliases, Visible: true},
 		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: removeOrDeleteSelected, Visible: true},
 		buttonSpec{Label: "Add to group", Shortcut: "Enter", Action: addSelectedUngroupedToGroup, Visible: true},
-		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+Enter", Action: confirm, Visible: true, Primary: true},
+		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+R", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+Shift+N creates a group. Ctrl+Enter applies."})
+	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+Shift+N creates a group. Ctrl+R applies."})
 
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
 	refreshGroupedList()
@@ -13630,7 +13630,7 @@ func navCapture(app *tview.Application, allowBack bool, allowHome bool, nav func
 	}
 }
 
-func isCtrlEnter(event *tcell.EventKey) bool {
+func isLegacyCtrlModifiedEnter(event *tcell.EventKey) bool {
 	if event == nil {
 		return false
 	}
@@ -13638,13 +13638,20 @@ func isCtrlEnter(event *tcell.EventKey) bool {
 	case tcell.KeyEnter:
 		return event.Modifiers()&tcell.ModCtrl != 0
 	case tcell.KeyF13:
-		// The bundled WezTerm maps Ctrl+Enter to this otherwise-unused key.
+		// Legacy compatibility for saved/custom shortcut definitions that use
+		// a control-modified Enter transport. Primary actions use Ctrl+R.
 		// This avoids Ctrl+J/Ctrl+M, which are indistinguishable from pasted
 		// LF/CR bytes in a terminal, and avoids CSI-u, unsupported by our tcell.
 		return event.Modifiers() == tcell.ModNone
 	default:
 		return false
 	}
+}
+
+// isCtrlRun is the canonical primary-action shortcut. Ctrl+R intentionally
+// uses the normal rune transport so it works consistently across terminals.
+func isCtrlRun(event *tcell.EventKey) bool {
+	return shortcutMatchesEvent("Ctrl+R", event)
 }
 
 func selectionKey(event *tcell.EventKey) bool {
@@ -13958,7 +13965,7 @@ func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
 		return !wantCtrl && !wantShift && event.Key() == tcell.KeyEscape
 	case "enter":
 		if wantCtrl {
-			return isCtrlEnter(event)
+			return isLegacyCtrlModifiedEnter(event)
 		}
 		return event.Key() == tcell.KeyEnter && ((event.Modifiers()&tcell.ModCtrl) != 0) == wantCtrl && ((event.Modifiers()&tcell.ModShift) != 0) == wantShift
 	case "space":

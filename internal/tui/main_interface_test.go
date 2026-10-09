@@ -270,16 +270,16 @@ func TestMainBlastFastaCellEnterInsertsNewline(t *testing.T) {
 	}
 }
 
-func TestMainBlastFastaCellCtrlEnterReservedForPrimaryAction(t *testing.T) {
+func TestMainBlastFastaCellCtrlRunReservedForPrimaryAction(t *testing.T) {
 	rows := []MainBlastRow{{FASTA: ">q1"}}
 	state := GridEditorState{ActiveRow: 0, ActiveCol: 0}
 	grid := newBlastGridEditor(&rows, &state, nil, mainBlastCapability("phytozome"))
 	grid.setCaret(3)
 	if grid.HandleKey(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl), nil) {
-		t.Fatal("Ctrl+Enter should not be consumed by the FASTA grid")
+		t.Fatal("Ctrl+R should not be consumed by the FASTA grid")
 	}
 	if rows[0].FASTA != ">q1" {
-		t.Fatalf("Ctrl+Enter changed FASTA: %#v", rows[0].FASTA)
+		t.Fatalf("Ctrl+R changed FASTA: %#v", rows[0].FASTA)
 	}
 }
 
@@ -754,7 +754,7 @@ func TestRunMainInterfacePageBuildsWithoutTerminalPanic(t *testing.T) {
 	}
 }
 
-func TestMainInterfaceCtrlEnterWorksWhenRootHasFocus(t *testing.T) {
+func TestMainInterfaceCtrlRunWorksWhenRootHasFocus(t *testing.T) {
 	oldNewApp, oldRunApp := newApp, runApp
 	defer func() { newApp = oldNewApp; runApp = oldRunApp }()
 	newApp = func() *tview.Application { return tview.NewApplication() }
@@ -763,9 +763,9 @@ func TestMainInterfaceCtrlEnterWorksWhenRootHasFocus(t *testing.T) {
 		if handler == nil {
 			t.Fatal("missing input capture")
 		}
-		event := tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)
+		event := tcell.NewEventKey(tcell.KeyCtrlR, 0, 0)
 		if got := handler(event); got != nil {
-			t.Fatal("Ctrl+Enter was not consumed")
+			t.Fatal("Ctrl+R was not consumed")
 		}
 		app.Stop()
 		return nil

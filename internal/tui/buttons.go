@@ -63,7 +63,9 @@ const (
 	ShortcutExportAll   = "Ctrl+D"
 	ShortcutPreview     = "Ctrl+P"
 	ShortcutBlast       = "Ctrl+B"
-	ShortcutRetry       = "Ctrl+R"
-	ShortcutWideSearch  = "Ctrl+W"
-	ShortcutHelp        = "F1"
+	// Ctrl+R is reserved for the current page's Run/primary action.
+	// Retry remains available without shadowing Run.
+	ShortcutRetry      = "Ctrl+Shift+R"
+	ShortcutWideSearch = "Ctrl+W"
+	ShortcutHelp       = "F1"
 )

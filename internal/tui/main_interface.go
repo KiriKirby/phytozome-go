@@ -820,15 +820,15 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		}
 		switch state.ActiveTab {
 		case "blast":
-			buttons = append(buttons, buttonSpec{Label: ButtonRunBLAST, Shortcut: "Ctrl+Enter", Action: validateBlastAndStop, Visible: true, Primary: true})
+			buttons = append(buttons, buttonSpec{Label: ButtonRunBLAST, Shortcut: "Ctrl+R", Action: validateBlastAndStop, Visible: true, Primary: true})
 		case "explore":
-			buttons = append(buttons, buttonSpec{Label: ButtonStart, Shortcut: "Ctrl+Enter", Action: func() { stopWith(MainActionExploreTool) }, Visible: true, Primary: true})
+			buttons = append(buttons, buttonSpec{Label: ButtonStart, Shortcut: "Ctrl+R", Action: func() { stopWith(MainActionExploreTool) }, Visible: true, Primary: true})
 		default:
 			searchType := mainKeywordSearchType(state.Keyword.DatabaseID)
 			if searchType.SupportsWide {
 				buttons = append(buttons, buttonSpec{Label: ButtonWideSearch, Shortcut: ShortcutWideSearch, Action: func() { validateKeywordAndStop(MainActionKeywordWideSearch) }, Visible: true, Primary: true})
 			}
-			buttons = append(buttons, buttonSpec{Label: ButtonSearch, Shortcut: "Ctrl+Enter", Action: func() { validateKeywordAndStop(MainActionKeywordSearch) }, Visible: true, Primary: true})
+			buttons = append(buttons, buttonSpec{Label: ButtonSearch, Shortcut: "Ctrl+R", Action: func() { validateKeywordAndStop(MainActionKeywordSearch) }, Visible: true, Primary: true})
 		}
 		actionRow.buttons = buttons
 		if body != nil {
@@ -1136,7 +1136,7 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		actionRow = buttonRow()
 		rebuildActionButtons()
 		addButtonRow(body, actionRow)
-		addHints(body, []string{"PgUp/PgDn tabs | Tab modules | Arrows move/select | Space/Enter activates | Ctrl+Enter runs"})
+		addHints(body, []string{"PgUp/PgDn tabs | Tab modules | Arrows move/select | Space/Enter activates | Ctrl+R runs"})
 		root = pageFrame(productName(page.Info)+" > Main", body)
 		setPageRoot(app, root)
 		focusCurrentModule()
@@ -1172,7 +1172,7 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		}
 		if app.GetFocus() != nil {
 			switch {
-			case shortcutMatchesEvent("Ctrl+Enter", event):
+			case shortcutMatchesEvent("Ctrl+R", event):
 				switch state.ActiveTab {
 				case "blast":
 					validateBlastAndStop()

@@ -17,7 +17,8 @@ directly from a search result or a bookmark.
 | Getting Started | `getting-started.html` | TUI introduction, home page, multiple tabs |
 | Keyword Search | `keyword-search.html` | workflow, results table, export, connectors |
 | BLAST | `blast.html` | workflow, modes, family merger, cross-database enhancer, results table, export, connectors |
-| Explore | `explore.html` | sessions, canvas, phylogenetic trees, multiple sequence alignment |
+| Workflow Reference | `workflow-reference.html` | field/state/file glossary, main interface and data sources, input formats, result-table controls, BLAST analysis controls, exports/cache/recovery |
+| Explore | `explore.html` | sessions, canvas, PHgo FASTA headers, phylogenetic trees, multiple sequence alignment |
 
 ## Writing contract
 
