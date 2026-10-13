@@ -1,6 +1,6 @@
 # CYP / P450 database
 
-Selecting `CYP / P450 keyword` checks the independent `phytozome-go-p450phgo` release repository for `p450phgo.pgd`. If the file is missing or outdated, PHgo asks for confirmation and shows a byte-level download/validation progress dialog before replacing the local copy. Only the final `p450phgo.pgd` is retained; interrupted `.part` files are removed. If the download or validation fails, the workflow returns to the default Phytozome database.
+Selecting `CYP / P450 keyword` checks the independent `cypgo` release repository for `cypgo.pgd`. If the file is missing or outdated, PHgo asks for confirmation and shows a byte-level download/validation progress dialog before replacing the local copy. Only the final `cypgo.pgd` is retained; interrupted `.part` files are removed. If the download or validation fails, the workflow returns to the default Phytozome database.
 
 The published database is deliberately conservative. Every Dr Nelson resource (40 animal, 59 plant, 61 fungal and 7 bacterial resources) has a downloaded source and an audit record in the generator repository. A resource is not searchable until its own parser establishes the species-to-record relationship; disabled species remain visible so missing coverage is explicit. The current release contains the reviewed CAld5H/CYP84 Table S2 relationships and does not promote generic binary-string matches.
 

@@ -51,15 +51,15 @@ func TestDownloadValidateSpeciesAndCategorySearch(t *testing.T) {
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/manifest.json":
-			fmt.Fprintf(w, `{"database_url":%q,"sha256":%q,"size":%d}`, server.URL+"/p450phgo.pgd", sum, len(data))
-		case "/p450phgo.pgd":
+			fmt.Fprintf(w, `{"database_url":%q,"sha256":%q,"size":%d}`, server.URL+"/cypgo.pgd", sum, len(data))
+		case "/cypgo.pgd":
 			_, _ = w.Write(data)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	t.Setenv("PHGO_CYP_PGD_MANIFEST_URL", server.URL+"/manifest.json")
+	t.Setenv("PHGO_CYPGO_MANIFEST_URL", server.URL+"/manifest.json")
 	c := NewClient(server.Client())
 	c.dbPath = filepath.Join(dir, "installed.pgd")
 	species, err := c.FetchSpeciesCandidates(context.Background())
@@ -91,7 +91,7 @@ func TestManifestFailureUsesValidLocalDatabase(t *testing.T) {
 	testPGD(t, path)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "offline", 503) }))
 	defer server.Close()
-	t.Setenv("PHGO_CYP_PGD_MANIFEST_URL", server.URL)
+	t.Setenv("PHGO_CYPGO_MANIFEST_URL", server.URL)
 	c := NewClient(server.Client())
 	c.dbPath = path
 	if _, err := c.FetchSpeciesCandidates(context.Background()); err != nil {
@@ -128,7 +128,7 @@ func TestRecordKeyResolvesDuplicateBiologicalIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local-test.pgd")
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
 	c := NewClient(http.DefaultClient)
 	c.dbPath = path
 	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "potato"}, "CYP51G1")
@@ -165,7 +165,7 @@ func TestGeneLocusAndMissingSequenceAreExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local.pgd")
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local.pgd")
 	c := NewClient(http.DefaultClient)
 	c.dbPath = path
 	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Eucalyptus globulus"}, "CYP84A-like")
@@ -181,7 +181,7 @@ func TestGeneLocusAndMissingSequenceAreExplicit(t *testing.T) {
 }
 
 func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "p450phgo.pgd", "p450phgo.pgd"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "cypgo", "cypgo.pgd"))
 	if err != nil {
 		t.Skip("published PGD repository checkout is not available")
 	}
@@ -256,7 +256,7 @@ func TestLegacyCategoryKeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
 	}
 	c := NewClient(http.DefaultClient)
 	c.dbPath = path
-	t.Setenv("PHGO_CYP_PGD_URL", "https://example.invalid/local-test.pgd")
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
 	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "test species"}, "model-empty")
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows=%#v err=%v", rows, err)

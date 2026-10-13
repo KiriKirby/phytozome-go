@@ -20,8 +20,12 @@ import (
 	"time"
 )
 
-const DatabaseFileName = "p450phgo.pgd"
-const DefaultManifestURL = "https://raw.githubusercontent.com/KiriKirby/phytozome-go-p450phgo/main/manifest.json"
+const DatabaseFileName = "cypgo.pgd"
+const DefaultManifestURL = "https://raw.githubusercontent.com/KiriKirby/cypgo/main/manifest.json"
+
+const legacyDatabaseFileName = "p450phgo.pgd"
+const legacyManifestEnv = "PHGO_CYP_PGD_MANIFEST_URL"
+const legacyDatabaseEnv = "PHGO_CYP_PGD_URL"
 
 type manifest struct {
 	DatabaseURL string `json:"database_url"`
@@ -93,7 +97,13 @@ func NewClient(h *http.Client) *Client {
 		h = &http.Client{Timeout: 60 * time.Second}
 	}
 	r, _ := appfs.ApplicationDir()
-	return &Client{httpClient: h, dbPath: filepath.Join(r, DatabaseFileName)}
+	dbPath := filepath.Join(r, DatabaseFileName)
+	legacyPath := filepath.Join(r, legacyDatabaseFileName)
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		// Preserve an already-downloaded database across the cypgo rename.
+		_ = os.Rename(legacyPath, dbPath)
+	}
+	return &Client{httpClient: h, dbPath: dbPath}
 }
 func (c *Client) Name() string         { return "cyp" }
 func (c *Client) DatabasePath() string { return c.dbPath }
@@ -101,7 +111,10 @@ func (c *Client) DatabasePath() string { return c.dbPath }
 var bucket = []byte("records")
 
 func (c *Client) manifestURL() string {
-	murl := strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_MANIFEST_URL"))
+	murl := strings.TrimSpace(os.Getenv("PHGO_CYPGO_MANIFEST_URL"))
+	if murl == "" {
+		murl = strings.TrimSpace(os.Getenv(legacyManifestEnv))
+	}
 	if murl == "" {
 		murl = DefaultManifestURL
 	}
@@ -110,7 +123,7 @@ func (c *Client) manifestURL() string {
 
 func (c *Client) CheckDatabase(x context.Context) (DatabaseStatus, error) {
 	status := DatabaseStatus{LocalPath: c.dbPath, ManifestURL: c.manifestURL()}
-	u := strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_URL"))
+	u := databaseURLOverride()
 	m := manifest{}
 	if u == "" {
 		var e error
@@ -165,7 +178,7 @@ func (c *Client) DownloadDatabase(x context.Context, progress func(DownloadProgr
 	if r.StatusCode >= 400 {
 		return fmt.Errorf("download CYP database: %s", r.Status)
 	}
-	t, e := os.CreateTemp(filepath.Dir(c.dbPath), "p450phgo-*.part")
+	t, e := os.CreateTemp(filepath.Dir(c.dbPath), "cypgo-*.part")
 	if e != nil {
 		return e
 	}
@@ -207,7 +220,7 @@ func (c *Client) DownloadDatabase(x context.Context, progress func(DownloadProgr
 	if status.ExpectedSize > 0 && current != status.ExpectedSize {
 		return fmt.Errorf("CYP database size mismatch: got %d bytes, want %d", current, status.ExpectedSize)
 	}
-	if strings.TrimSpace(os.Getenv("PHGO_CYP_PGD_URL")) == "" && status.ExpectedSize > 0 {
+	if databaseURLOverride() == "" && status.ExpectedSize > 0 {
 		sum, sumErr := fileSHA256(p)
 		if sumErr != nil {
 			return sumErr
@@ -231,6 +244,14 @@ func (c *Client) DownloadDatabase(x context.Context, progress func(DownloadProgr
 		progress(DownloadProgress{Current: current, Total: total, Message: "CYP database is ready."})
 	}
 	return nil
+}
+
+func databaseURLOverride() string {
+	u := strings.TrimSpace(os.Getenv("PHGO_CYPGO_URL"))
+	if u == "" {
+		u = strings.TrimSpace(os.Getenv(legacyDatabaseEnv))
+	}
+	return u
 }
 
 // EnsureDatabase is retained for non-interactive callers and tests. UI code

@@ -37,6 +37,7 @@ blast_results_*.xlsx
 blast_peptides_*.txt
 /mega-phgo-runtime.bin
 /muscleWin64.bin
-/p450phgo.pgd/
-/p450phgo.pgd
+/cypgo/
+/cypgo.pgd
+/.cache-*.html
 /mega-phgo-runtime*.nwk
