@@ -884,7 +884,7 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 		modalBody.AddItem(inputFrame, 0, 0, true)
 		modalBody.AddItem(results, 0, 1, false)
 		if request.DatabaseID == "cyp" {
-			modalBody.AddItem(hintView("Category filter: a:/A: animals, p:/P: plants, f:/F: fungi, b:/B: bacteria; add a space before the search term."), 1, 0, false)
+			modalBody.AddItem(hintView("Category filter: a:/A: animals, p:/P: plants, f:/F: fungi, b:/B: bacteria, r:/R: protists; add a space before the search term."), 1, 0, false)
 		}
 		modalBody.AddItem(status, 1, 0, false)
 

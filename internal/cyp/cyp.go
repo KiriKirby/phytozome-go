@@ -69,7 +69,7 @@ func recordSequenceID(r record) string {
 
 func isCYPCategoryKey(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "plants", "animals", "fungi", "bacteria":
+	case "plants", "animals", "fungi", "bacteria", "protists":
 		return true
 	default:
 		return false
@@ -467,6 +467,8 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 			category = "fungi"
 		case "b", "bacteria":
 			category = "bacteria"
+		case "r", "protist", "protists":
+			category = "protists"
 		}
 		if category != "" {
 			term = strings.Join(parts[1:], " ")

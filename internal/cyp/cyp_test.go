@@ -85,6 +85,36 @@ func TestDownloadValidateSpeciesAndCategorySearch(t *testing.T) {
 	}
 }
 
+func TestProtistCategoryPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "protist.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		v, _ := json.Marshal(record{ID: "CYP710C1", RecordKey: "bibliod:block-1", Category: "protists", Species: "Trypanosoma cruzi", Symbol: "CYP710C1", Sequence: "MPEPTIDE"})
+		return b.Put([]byte("00000000"), v)
+	})
+	if closeErr := db.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "all"}, "r: CYP710")
+	if err != nil || len(rows) != 1 || rows[0].Genome != "Trypanosoma cruzi" {
+		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+}
+
 func TestManifestFailureUsesValidLocalDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "installed.pgd")
