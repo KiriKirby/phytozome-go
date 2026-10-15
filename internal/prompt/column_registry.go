@@ -31,7 +31,7 @@ var keywordDisplayColumnIDsByDatabase = map[string][]string{
 	"tair":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "gene_identifier", "protein_id", "transcript", "description", "genome"},
 	"ncbi":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "protein_id", "gene_identifier", "description", "genome"},
 	"plaza":     {"source_database", "search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "protein_id", "transcript", "gene_identifier", "genome", "uniprot", "description"},
-	"cyp":       {"source_database", "search_term", "search_type", "label_name", "gene_identifier", "sequence_id", "description", "genome", "gene_report_url"},
+	"cyp":       {"source_database", "search_term", "search_type", "cyp_match_method", "cyp_matched_search_term", "label_name", "gene_identifier", "sequence_id", "description", "genome", "gene_report_url"},
 }
 
 var keywordDetailColumnIDsByDatabase = map[string][]string{
@@ -40,7 +40,7 @@ var keywordDetailColumnIDsByDatabase = map[string][]string{
 	"tair":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"ncbi":      {"search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "synonyms", "protein_id", "gene_identifier", "genome", "location", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
 	"plaza":     {"source_database", "search_term", "search_type", "gene_locus", "label_name", "labelname_type", "phgo_alias", "alias", "symbols", "synonyms", "protein_id", "transcript", "gene_identifier", "genome", "location", "uniprot", "description", "comments", "auto_define", "gene_report_url", "sequence_header_label", "sequence_id"},
-	"cyp":       {"source_database", "search_term", "search_type", "label_name", "gene_identifier", "genome", "description", "gene_report_url", "sequence_id"},
+	"cyp":       {"source_database", "search_term", "search_type", "cyp_match_method", "cyp_matched_search_term", "label_name", "gene_identifier", "genome", "description", "gene_report_url", "sequence_id"},
 }
 
 var keywordExportColumnIDsByDatabase = map[string][]string{
@@ -301,6 +301,8 @@ var columnMetadataByID = map[string]columnMetadata{
 	"row":                              {CompactHeader: "row", DetailLabel: "row", ExportHeader: "row"},
 	"search_tern":                      {CompactHeader: "search_tern", DetailLabel: "search_term", ExportHeader: "search_term"},
 	"search_type":                      {CompactHeader: "search_type", DetailLabel: "search_type", ExportHeader: "search_type"},
+	"cyp_match_method":                 {CompactHeader: "CYP match method", DetailLabel: "CYP match method", ExportHeader: "CYP match method"},
+	"cyp_matched_search_term":          {CompactHeader: "matched CYP term", DetailLabel: "matched CYP search term", ExportHeader: "matched CYP search term"},
 	"label_name":                       {CompactHeader: "label_name", DetailLabel: "label_name", ExportHeader: "label_name"},
 	"labelname_type":                   {CompactHeader: "labelname_type", DetailLabel: "labelname_type", ExportHeader: "labelname_type"},
 	"phgo_alias":                       {CompactHeader: "phgo_alias", DetailLabel: "phgo_alias", ExportHeader: "phgo_alias"},
@@ -452,6 +454,16 @@ var columnMetadataByID = map[string]columnMetadata{
 }
 
 var supplementalColumnHelpText = map[string]string{
+	"cyp_match_method": columnHelp(
+		"How the CYP result was selected: a complete CYP-name query, a right-truncated CYP-name fallback after longer terms returned no rows, or an exact Gene locus priority match. The method is recorded per row so fallback results remain auditable.",
+		"该 CYP 结果的命中方式：完整 CYP 名称查询、较长搜索词无结果后从右侧逐字符截短得到的回退命中，或 Gene locus 优先路径的精确命中。该方式逐行记录，便于审计回退结果。",
+		"この CYP 結果が、完全な CYP 名クエリ、長い語で結果がない場合の右端一文字ずつの短縮 fallback、または Gene locus 優先経路の完全一致のどれで選ばれたかを示します。fallback を監査できるよう行ごとに記録されます。",
+	),
+	"cyp_matched_search_term": columnHelp(
+		"The actual search term that produced this CYP result set. It equals the trimmed full query for a full-query hit, the first successful right-truncated prefix for fallback, or the exact Gene locus used by the priority path.",
+		"实际产生该 CYP 结果集的搜索词。完整查询命中时等于去除首尾空白后的完整词；回退时是从右侧逐字符截短后首次成功的前缀；Gene locus 优先时则是实际精确命中的 locus。",
+		"この CYP 結果集合を実際に生成した検索語です。完全クエリで一致した場合は trim 後の全文、fallback では右端から一文字ずつ短縮して最初に成功した prefix、Gene locus 優先では完全一致した locus が入ります。",
+	),
 	"row": columnHelp(
 		"Stable 1-based row number generated when the table is exported or rendered. It is not source-database biology; it is an audit handle that lets the UI, exported files, and PDF report refer to the same row unambiguously.",
 		"导出或渲染表格时生成的稳定 1-based 行号。它不是源数据库中的生物学字段，而是一个审计定位编号，用来让界面、导出文件和 PDF report 无歧义地指向同一行。",
@@ -934,7 +946,7 @@ func KeywordExportColumnIDs(database string, includeProteinID bool, extraHeaders
 	if !includeProteinID {
 		base = filteredColumnIDs(base, "protein_id")
 	}
-	return append(base, copyColumnIDs(extraHeaders)...)
+	return mergeUniqueColumnIDs(base, copyColumnIDs(extraHeaders))
 }
 
 func KeywordReportColumnIDs(database string, includeProteinID bool, observedExtraHeaders []string) []string {

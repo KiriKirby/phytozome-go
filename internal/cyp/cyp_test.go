@@ -115,6 +115,113 @@ func TestProtistCategoryPrefix(t *testing.T) {
 	}
 }
 
+func TestWebsiteStyleNameFallbackReturnsAllRowsAtFirstSuccessfulLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fallback.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		rows := []record{
+			{ID: "id-1", Category: "plants", Species: "Test plant", Symbol: "CYP84A1"},
+			{ID: "id-2", Category: "plants", Species: "Test plant", Symbol: "CYP84A2"},
+			{ID: "id-3", Category: "plants", Species: "Test plant", Symbol: "CYP84B1"},
+		}
+		for i, row := range rows {
+			value, _ := json.Marshal(row)
+			if e := b.Put([]byte(fmt.Sprintf("%08d", i)), value); e != nil {
+				return e
+			}
+		}
+		return nil
+	})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Test plant"}, "CYP84A9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].LabelName != "CYP84A1" || rows[1].LabelName != "CYP84A2" {
+		t.Fatalf("fallback rows=%#v", rows)
+	}
+	for _, row := range rows {
+		if row.SearchType != "CYP name right-truncation fallback" || row.ExtraColumns["cyp_match_method"] != "right-truncated CYP name fallback" || row.ExtraColumns["cyp_matched_search_term"] != "CYP84A" {
+			t.Fatalf("fallback metadata=%#v", row)
+		}
+	}
+}
+
+func TestWebsiteStyleNameFallbackRemovesUnicodeCharacters(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unicode.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		value, _ := json.Marshal(record{ID: "unicode", Category: "plants", Species: "Test plant", Symbol: "CYP😀"})
+		return b.Put([]byte("00000000"), value)
+	})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "Test plant"}, "CYP😀x")
+	if err != nil || len(rows) != 1 || rows[0].ExtraColumns["cyp_matched_search_term"] != "CYP😀" {
+		t.Fatalf("unicode fallback rows=%#v err=%v", rows, err)
+	}
+}
+
+func TestGeneLocusSearchIsExactAndDoesNotRightTruncate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "locus.pgd")
+	db, err := bolt.Open(path, 0o644, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, e := tx.CreateBucket(bucket)
+		if e != nil {
+			return e
+		}
+		value, _ := json.Marshal(record{ID: "ACU45738.1", Category: "plants", Species: "Eucalyptus globulus", Symbol: "CYP84A-like"})
+		return b.Put([]byte("00000000"), value)
+	})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
+	c := NewClient(http.DefaultClient)
+	c.dbPath = path
+	rows, err := c.SearchKeywordRowsByGeneLocus(context.Background(), model.SpeciesCandidate{JBrowseName: "Eucalyptus globulus"}, "ACU45738.9")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("missed locus rows=%#v err=%v", rows, err)
+	}
+	rows, err = c.SearchKeywordRowsByGeneLocus(context.Background(), model.SpeciesCandidate{JBrowseName: "Eucalyptus globulus"}, "acu45738.1")
+	if err != nil || len(rows) != 1 || rows[0].ExtraColumns["cyp_match_method"] != "exact Gene locus" {
+		t.Fatalf("exact locus rows=%#v err=%v", rows, err)
+	}
+}
+
 func TestManifestFailureUsesValidLocalDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "installed.pgd")
@@ -246,7 +353,7 @@ func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
 	}
 }
 
-func TestLegacyCategoryKeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
+func TestLegacyCategoryKeyUsesIDAndKeepsDatabaseOrder(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "legacy-key.pgd")
 	db, err := bolt.Open(path, 0o644, nil)
@@ -287,17 +394,17 @@ func TestLegacyCategoryKeyUsesIDAndRealSequenceRanksFirst(t *testing.T) {
 	c := NewClient(http.DefaultClient)
 	c.dbPath = path
 	t.Setenv("PHGO_CYPGO_URL", "https://example.invalid/local-test.pgd")
-	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "test species"}, "model-empty")
+	rows, err := c.SearchKeywordRows(context.Background(), model.SpeciesCandidate{JBrowseName: "test species"}, "CYP-test")
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows=%#v err=%v", rows, err)
 	}
-	if rows[0].SequenceID == "model-empty" || rows[0].ExtraColumns["cyp_sequence"] == "" {
-		t.Fatalf("real sequence was not ranked first: %#v", rows)
+	if rows[0].SequenceID != "model-empty" {
+		t.Fatalf("legacy placeholder sequence id=%q", rows[0].SequenceID)
 	}
-	if rows[1].SequenceID != "model-empty" {
-		t.Fatalf("legacy placeholder sequence id=%q", rows[1].SequenceID)
+	if rows[1].SequenceID == "model-empty" || rows[1].ExtraColumns["cyp_sequence"] == "" {
+		t.Fatalf("reviewed sequence row was not preserved in database order: %#v", rows)
 	}
-	got, err := c.FetchProteinSequence(context.Background(), 0, rows[0].SequenceID)
+	got, err := c.FetchProteinSequence(context.Background(), 0, rows[1].SequenceID)
 	if err != nil || len(got.Sequence) != 537 {
 		t.Fatalf("sequence len=%d err=%v", len(got.Sequence), err)
 	}

@@ -407,21 +407,43 @@ func (w *BlastWizard) searchCYPKeywordRows(ctx context.Context, src source.DataS
 				species := model.SpeciesCandidate{JBrowseName: speciesName, GenomeLabel: speciesName}
 				started := time.Now()
 				searchTerm := strings.TrimSpace(rows[i].GeneLocus)
+				usedGeneLocus := searchTerm != ""
 				if searchTerm == "" {
 					searchTerm = rows[i].SearchTerm
 				}
-				got, err := src.SearchKeywordRows(ctx, species, searchTerm)
-				if err == nil && len(got) == 0 && searchTerm != strings.TrimSpace(rows[i].SearchTerm) {
+				var got []model.KeywordResultRow
+				var err error
+				if locusSearcher, ok := src.(interface {
+					SearchKeywordRowsByGeneLocus(context.Context, model.SpeciesCandidate, string) ([]model.KeywordResultRow, error)
+				}); ok && usedGeneLocus {
+					got, err = locusSearcher.SearchKeywordRowsByGeneLocus(ctx, species, searchTerm)
+				} else {
+					got, err = src.SearchKeywordRows(ctx, species, searchTerm)
+				}
+				if err == nil && usedGeneLocus {
+					exact := got[:0]
+					for _, resultRow := range got {
+						if strings.EqualFold(strings.TrimSpace(resultRow.GeneLocus), searchTerm) || strings.EqualFold(strings.TrimSpace(resultRow.GeneIdentifier), searchTerm) {
+							exact = append(exact, resultRow)
+						}
+					}
+					got = exact
+				}
+				if err == nil && len(got) == 0 && usedGeneLocus {
 					got, err = src.SearchKeywordRows(ctx, species, rows[i].SearchTerm)
+					usedGeneLocus = false
 				}
 				for rowIndex := range got {
 					if strings.TrimSpace(got[rowIndex].SearchTerm) == "" || got[rowIndex].SearchTerm == searchTerm {
 						got[rowIndex].SearchTerm = rows[i].SearchTerm
 					}
-					if strings.TrimSpace(got[rowIndex].SearchType) == "" || got[rowIndex].SearchType == "CYP keyword" {
-						if strings.TrimSpace(rows[i].GeneLocus) != "" {
-							got[rowIndex].SearchType = "CYP Gene locus priority"
+					if usedGeneLocus {
+						got[rowIndex].SearchType = "CYP Gene locus exact"
+						if got[rowIndex].ExtraColumns == nil {
+							got[rowIndex].ExtraColumns = make(map[string]string)
 						}
+						got[rowIndex].ExtraColumns["cyp_match_method"] = "exact Gene locus"
+						got[rowIndex].ExtraColumns["cyp_matched_search_term"] = searchTerm
 					}
 				}
 				results[i] = keywordSearchResult{index: i, started: started, ended: time.Now(), rows: got, err: err}

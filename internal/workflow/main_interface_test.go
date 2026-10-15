@@ -105,11 +105,29 @@ func TestCYPRowSearchUsesGeneLocusBeforeSearchTerm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || len(groups[0].Rows) != 1 || groups[0].Rows[0].SearchType != "CYP Gene locus priority" {
+	if len(groups) != 1 || len(groups[0].Rows) != 1 || groups[0].Rows[0].SearchType != "CYP Gene locus exact" {
 		t.Fatalf("gene locus was not preferred: %#v", groups)
 	}
 	if groups[0].Rows[0].SearchTerm != "wrong-term" {
 		t.Fatalf("original search term was not preserved: %#v", groups[0].Rows[0])
+	}
+}
+
+func TestCYPRowSearchRejectsNonExactGeneLocusFallback(t *testing.T) {
+	w := NewBlastWizard(nil)
+	src := keywordMapSource{name: "cyp", rowsByKeyword: map[string][]model.KeywordResultRow{
+		"missing-locus": {{SourceDatabase: "cyp", LabelName: "wrong", GeneLocus: "another-locus"}},
+		"CYP84A":        {{SourceDatabase: "cyp", LabelName: "CYP84A1", GeneLocus: "ACU45738.1"}},
+	}}
+	groups, err := w.searchCYPKeywordRows(context.Background(), src, []tui.MainKeywordRow{{SearchTerm: "CYP84A", GeneLocus: "missing-locus", SpeciesLabel: "Eucalyptus globulus"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || len(groups[0].Rows) != 1 || groups[0].Rows[0].LabelName != "CYP84A1" {
+		t.Fatalf("ordinary CYP fallback rows=%#v", groups)
+	}
+	if groups[0].Rows[0].SearchType == "CYP Gene locus exact" {
+		t.Fatalf("non-exact locus was incorrectly retained: %#v", groups[0].Rows[0])
 	}
 }
 

@@ -137,6 +137,23 @@ func TestPLAZAKeywordSchemasRetainNCBICompatibleFields(t *testing.T) {
 	}
 }
 
+func TestCYPKeywordSchemasExposeMatchProvenance(t *testing.T) {
+	for name, ids := range map[string][]string{
+		"display": KeywordDisplayColumnIDs("cyp"),
+		"detail":  KeywordDetailColumnIDs("cyp"),
+		"export":  KeywordExportColumnIDs("cyp", true, []string{"cyp_match_method", "cyp_matched_search_term"}),
+	} {
+		for _, required := range []string{"cyp_match_method", "cyp_matched_search_term"} {
+			if !slices.Contains(ids, required) {
+				t.Fatalf("CYP %s schema missing %q: %#v", name, required, ids)
+			}
+			if strings.Count(strings.Join(ids, ","), required) != 1 {
+				t.Fatalf("CYP %s schema duplicates %q: %#v", name, required, ids)
+			}
+		}
+	}
+}
+
 func TestNCBIKeywordDatabaseKeyForSearchTypePrefersSpecializedBuckets(t *testing.T) {
 	for _, tc := range []struct {
 		searchType string

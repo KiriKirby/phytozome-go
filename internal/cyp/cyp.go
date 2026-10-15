@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -454,55 +453,147 @@ func (c *Client) SearchKeywordRows(x context.Context, s model.SpeciesCandidate, 
 	if e := c.ensureDB(x); e != nil {
 		return nil, e
 	}
-	term := strings.ToLower(strings.TrimSpace(k))
-	category := ""
-	parts := strings.Fields(term)
-	if len(parts) > 1 {
-		switch strings.TrimSuffix(parts[0], ":") {
-		case "a", "animals":
-			category = "animals"
-		case "p", "plants":
-			category = "plants"
-		case "f", "fungi", "fungal":
-			category = "fungi"
-		case "b", "bacteria":
-			category = "bacteria"
-		case "r", "protist", "protists":
-			category = "protists"
-		}
-		if category != "" {
-			term = strings.Join(parts[1:], " ")
-		}
+	category, term := splitCYPCategoryQuery(k)
+	queryRunes := []rune(term)
+	if len(queryRunes) == 0 {
+		return nil, nil
 	}
-	var a []model.KeywordResultRow
 	rs, e := c.cachedRecords()
 	if e != nil {
 		return nil, e
 	}
+
+	// Match the static CYPgo website: search only the displayed CYP name
+	// (Symbol, falling back to ID), try the complete trimmed query first, then
+	// remove one Unicode character from the right until the first non-empty
+	// result level is found. Compute the best level in one database scan rather
+	// than rescanning all records once per shortened query.
+	bestLength := 0
+	matchedRecords := make([]record, 0)
 	for _, r := range rs {
-		if category != "" && !strings.EqualFold(category, r.Category) {
+		if !cypRecordInScope(r, s, category) {
 			continue
 		}
-		if s.JBrowseName != "" && !strings.EqualFold(s.JBrowseName, "all") && !strings.EqualFold(s.JBrowseName, r.Species) {
+		matchLength := longestCYPQueryPrefixMatch(displayedCYPName(r), queryRunes, bestLength)
+		if matchLength == 0 || matchLength < bestLength {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(r.ID+" "+r.RecordKey+" "+r.Species+" "+r.Symbol+" "+r.Description), term) {
-			continue
+		if matchLength > bestLength {
+			bestLength = matchLength
+			matchedRecords = matchedRecords[:0]
 		}
-		extra := map[string]string{"cyp_category": r.Category}
+		matchedRecords = append(matchedRecords, r)
+	}
+	if bestLength == 0 {
+		return nil, nil
+	}
+	matchedTerm := string(queryRunes[:bestLength])
+	searchType := "CYP name full-query match"
+	matchMethod := "full CYP name query"
+	if bestLength < len(queryRunes) {
+		searchType = "CYP name right-truncation fallback"
+		matchMethod = "right-truncated CYP name fallback"
+	}
+	return buildCYPKeywordRows(matchedRecords, k, matchedTerm, searchType, matchMethod), nil
+}
+
+// SearchKeywordRowsByGeneLocus keeps PHgo's Gene locus priority separate from
+// website-style CYP-name fallback. A missed locus must return no rows so the
+// workflow can safely try the row's ordinary CYP search term next.
+func (c *Client) SearchKeywordRowsByGeneLocus(x context.Context, s model.SpeciesCandidate, locus string) ([]model.KeywordResultRow, error) {
+	if e := c.ensureDB(x); e != nil {
+		return nil, e
+	}
+	term := strings.TrimSpace(locus)
+	if term == "" {
+		return nil, nil
+	}
+	rs, err := c.cachedRecords()
+	if err != nil {
+		return nil, err
+	}
+	matched := make([]record, 0)
+	for _, r := range rs {
+		if cypRecordInScope(r, s, "") && strings.EqualFold(strings.TrimSpace(r.ID), term) {
+			matched = append(matched, r)
+		}
+	}
+	return buildCYPKeywordRows(matched, locus, term, "CYP Gene locus exact", "exact Gene locus"), nil
+}
+
+func splitCYPCategoryQuery(query string) (string, string) {
+	term := strings.TrimSpace(query)
+	parts := strings.Fields(term)
+	if len(parts) <= 1 {
+		return "", term
+	}
+	category := ""
+	switch strings.ToLower(strings.TrimSuffix(parts[0], ":")) {
+	case "a", "animals":
+		category = "animals"
+	case "p", "plants":
+		category = "plants"
+	case "f", "fungi", "fungal":
+		category = "fungi"
+	case "b", "bacteria":
+		category = "bacteria"
+	case "r", "protist", "protists":
+		category = "protists"
+	}
+	if category == "" {
+		return "", term
+	}
+	return category, strings.Join(parts[1:], " ")
+}
+
+func cypRecordInScope(r record, species model.SpeciesCandidate, category string) bool {
+	if category != "" && !strings.EqualFold(category, r.Category) {
+		return false
+	}
+	return species.JBrowseName == "" || strings.EqualFold(species.JBrowseName, "all") || strings.EqualFold(species.JBrowseName, r.Species)
+}
+
+func displayedCYPName(r record) string {
+	if symbol := strings.TrimSpace(r.Symbol); symbol != "" {
+		return symbol
+	}
+	return strings.TrimSpace(r.ID)
+}
+
+func longestCYPQueryPrefixMatch(name string, queryRunes []rune, minimum int) int {
+	lowerName := strings.ToLower(name)
+	lowest := minimum
+	if lowest < 1 {
+		lowest = 1
+	}
+	for length := len(queryRunes); length >= lowest; length-- {
+		if strings.Contains(lowerName, strings.ToLower(string(queryRunes[:length]))) {
+			return length
+		}
+	}
+	return 0
+}
+
+func buildCYPKeywordRows(records []record, originalTerm string, matchedTerm string, searchType string, matchMethod string) []model.KeywordResultRow {
+	rows := make([]model.KeywordResultRow, 0, len(records))
+	for _, r := range records {
+		extra := map[string]string{
+			"cyp_category":            r.Category,
+			"cyp_match_method":        matchMethod,
+			"cyp_matched_search_term": matchedTerm,
+		}
 		if strings.TrimSpace(r.Sequence) != "" {
 			extra["cyp_sequence"] = r.Sequence
 			extra["cyp_fasta"] = ">" + r.ID + "\n" + r.Sequence
 		}
-		sequenceID := recordSequenceID(r)
-		a = append(a, model.KeywordResultRow{SourceDatabase: "cyp", SearchTerm: k, SearchType: "CYP keyword", LabelName: r.Symbol, GeneLocus: r.ID, GeneIdentifier: r.ID, Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL, SequenceID: sequenceID, ExtraColumns: extra})
+		rows = append(rows, model.KeywordResultRow{
+			SourceDatabase: "cyp", SearchTerm: originalTerm, SearchType: searchType,
+			LabelName: displayedCYPName(r), GeneLocus: r.ID, GeneIdentifier: r.ID,
+			Genome: r.Species, Description: r.Description, GeneReportURL: r.SourceURL,
+			SequenceID: recordSequenceID(r), ExtraColumns: extra,
+		})
 	}
-	sort.SliceStable(a, func(i, j int) bool {
-		iHasSequence := strings.TrimSpace(a[i].ExtraColumns["cyp_sequence"]) != ""
-		jHasSequence := strings.TrimSpace(a[j].ExtraColumns["cyp_sequence"]) != ""
-		return iHasSequence && !jHasSequence
-	})
-	return a, e
+	return rows
 }
 
 // FetchProteinSequence resolves a sequence from the local PGD only.  CYP has

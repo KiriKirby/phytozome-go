@@ -6882,6 +6882,20 @@ func keywordDisplayColumns(rows []model.KeywordResultRow) []tableColumnValue[mod
 			Value: func(row model.KeywordResultRow) string { return strings.TrimSpace(row.SequenceID) },
 		},
 	}
+	for _, id := range []string{"cyp_match_method", "cyp_matched_search_term"} {
+		columnID := id
+		defByID[columnID] = tableColumnValue[model.KeywordResultRow]{
+			ID:       columnID,
+			Header:   ColumnCompactHeader(columnID, options),
+			Sortable: true,
+			Value: func(row model.KeywordResultRow) string {
+				if row.ExtraColumns == nil {
+					return ""
+				}
+				return strings.TrimSpace(row.ExtraColumns[columnID])
+			},
+		}
+	}
 	for _, id := range []string{
 		"ncbi_assembly_accession", "ncbi_assembly_name", "ncbi_assembly_level", "ncbi_assembly_status", "ncbi_ftp_path",
 		"ncbi_bioproject_accession", "ncbi_biosample_accession", "ncbi_sample_name", "ncbi_isolation_source", "ncbi_host",
