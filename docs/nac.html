@@ -7,6 +7,19 @@
 
 <body bgcolor="#FFFFFF">
 
+<p>phytozome GO v2026.10.17</p>
+<p>CYP search parity update</p>
+<p>- Match CYP keyword searches against the displayed CYP name, consistent with the CYPgo website.</p>
+<p>- Try the complete query first, then remove one Unicode character from the right until the first result level is found.</p>
+<p>- Return every result at the successful fallback level in PGD order.</p>
+<p>- Show the match method and actual matched CYP search term in result tables, details, and exports.</p>
+<p>- Keep Gene locus priority as a separate exact-ID lookup so a missed locus cannot become a broad truncated-name match.</p>
+<p>Validation:</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- go build ./...</p>
+<p>- full Windows, Linux, macOS Intel, and macOS Apple Silicon package validation</p>
+<p>&nbsp;</p>
 <p>phytozome GO v2026.10.16</p>
 <p>CYP database integration update:</p>
 <p>- Enable reviewed CYP species across supported categories.</p>
