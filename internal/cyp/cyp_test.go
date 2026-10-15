@@ -317,7 +317,7 @@ func TestGeneLocusAndMissingSequenceAreExplicit(t *testing.T) {
 	}
 }
 
-func TestPublishedTableS2RecordsSearchByEverySpecies(t *testing.T) {
+func TestPublishedReviewedPlantRecordsSearchByEverySpecies(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "..", "cypgo", "cypgo.pgd"))
 	if err != nil {
 		t.Skip("published PGD repository checkout is not available")
