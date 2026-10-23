@@ -12,6 +12,7 @@ this.createFeatures=null;
 this.searchBox=null;
 this.caseSensitive=null;
 this.searchDescription=null;
+this.phgoTailMapMode=null;
 }, 1);
 
 Clazz.newMeth(C$, '$init$', function () {
@@ -19,6 +20,7 @@ this.createFeatures=Clazz.new_($I$(2));
 this.searchBox=Clazz.new_($I$(3).c$$S,[this.getCacheKey$()]);
 this.caseSensitive=Clazz.new_($I$(4));
 this.searchDescription=Clazz.new_($I$(4));
+this.phgoTailMapMode=Clazz.new_($I$(4));
 }, 1);
 
 Clazz.newMeth(C$, 'c$', function () {
@@ -129,6 +131,7 @@ this.b$['jalview.jbgui.GFinder'].textfield_keyPressed$java_awt_event_KeyEvent.ap
 this.caseSensitive.setHorizontalAlignment$I(2);
 this.caseSensitive.setText$S($I$(7).getString$S("label.match_case"));
 this.searchDescription.setText$S($I$(7).getString$S("label.include_description"));
+this.phgoTailMapMode.setText$S("Prefix-anchored range mapping");
 actionsPanel.add$java_awt_Component$O(findNext, null);
 actionsPanel.add$java_awt_Component$O(findAll, null);
 actionsPanel.add$java_awt_Component$O(this.createFeatures, null);
@@ -147,11 +150,12 @@ jPanel4.add$java_awt_Component$O(this.searchBox.getComponent$(), "North");
 var optionsPanel=Clazz.new_($I$(8));
 var optionsGridLayout=Clazz.new_($I$(9));
 optionsGridLayout.setHgap$I(0);
-optionsGridLayout.setRows$I(2);
+optionsGridLayout.setRows$I(3);
 optionsGridLayout.setVgap$I(2);
 optionsPanel.setLayout$java_awt_LayoutManager(optionsGridLayout);
 optionsPanel.add$java_awt_Component$O(this.caseSensitive, null);
 optionsPanel.add$java_awt_Component$O(this.searchDescription, null);
+optionsPanel.add$java_awt_Component$O(this.phgoTailMapMode, null);
 jPanel4.add$java_awt_Component$O(optionsPanel, "West");
 }, p$1);
 

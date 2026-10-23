@@ -1925,6 +1925,158 @@
     return "";
   }
 
+  // Return every visible feature colour covering one alignment column, in
+  // Jalview's renderer order.  getResidueColour() intentionally collapses
+  // overlapping features to one colour, which is correct for residue
+  // shading but loses user-defined multi-feature overlays in an export.
+  function featureCellColours(seqCanvas, alignPanel, seq, column, exportSettings) {
+    if (!exportSettings.showFeatures) return [];
+    const residueCharacter = sequenceCharAt(seq, column);
+    if (!residueCharacter || residueCharacter === "-" || residueCharacter === "." || /^\s$/.test(residueCharacter)) return [];
+    const renderer = featureRenderer(seqCanvas, alignPanel, true);
+    if (!renderer || !seq) return [];
+    const residue = (() => {
+      try {
+        if (typeof seq.findPosition$I === "function") return Number(seq.findPosition$I(column));
+      } catch (_error) {}
+      return column + 1;
+    })();
+    if (!Number.isFinite(residue)) return [];
+    const features = featureListForSequence(seq);
+    if (!features.length) return [];
+    let order = null;
+    try {
+      order = javaListToArray(callValue(renderer, ["getRenderOrder$"]), 5000);
+    } catch (_error) {
+      order = null;
+    }
+    const rank = new Map((order || []).map((type, index) => [String(type), index]));
+    const candidates = features.map((feature, index) => ({ feature, index }))
+      .filter(({ feature }) => {
+        const begin = Number(primitiveValue(callValue(feature, ["getBegin$"])));
+        const end = Number(primitiveValue(callValue(feature, ["getEnd$"])));
+        if (!Number.isFinite(begin) || !Number.isFinite(end) || residue < begin || residue > end) return false;
+        const type = String(primitiveValue(callValue(feature, ["getType$"])) || "");
+        try {
+          if (typeof renderer.showFeatureOfType$S === "function" && !renderer.showFeatureOfType$S(type)) return false;
+          if (typeof renderer.featureGroupNotShown$jalview_datamodel_SequenceFeature === "function" && renderer.featureGroupNotShown$jalview_datamodel_SequenceFeature(feature)) return false;
+          if (typeof renderer.isVisible$jalview_datamodel_SequenceFeature === "function" && !renderer.isVisible$jalview_datamodel_SequenceFeature(feature)) return false;
+        } catch (_error) {
+          return false;
+        }
+        return true;
+      })
+      .sort((left, right) => {
+        const lt = String(primitiveValue(callValue(left.feature, ["getType$"])) || "");
+        const rt = String(primitiveValue(callValue(right.feature, ["getType$"])) || "");
+        return (rank.get(lt) ?? Number.MAX_SAFE_INTEGER) - (rank.get(rt) ?? Number.MAX_SAFE_INTEGER) || left.index - right.index;
+      });
+    return candidates.map(({ feature }) => {
+      const type = String(primitiveValue(callValue(feature, ["getType$"])) || "");
+      let colour = null;
+      try {
+        const style = typeof renderer.getFeatureStyle$S === "function" ? renderer.getFeatureStyle$S(type) : null;
+        if (style && typeof renderer.getColor$jalview_datamodel_SequenceFeature$jalview_api_FeatureColourI === "function") {
+          colour = renderer.getColor$jalview_datamodel_SequenceFeature$jalview_api_FeatureColourI(feature, style);
+        } else if (typeof renderer.getColour$jalview_datamodel_SequenceFeature === "function") {
+          colour = renderer.getColour$jalview_datamodel_SequenceFeature(feature);
+        }
+      } catch (_error) {
+        colour = null;
+      }
+      return javaColorToHex(colour, "");
+    }).filter(colorIsVisibleCellFill);
+  }
+
+  function visibleFeaturePaint(renderer, feature) {
+    if (!renderer || !feature) return null;
+    const type = String(primitiveValue(callValue(feature, ["getType$"])) || "").trim();
+    try {
+      if (typeof renderer.showFeatureOfType$S === "function" && !renderer.showFeatureOfType$S(type)) return null;
+      if (typeof renderer.featureGroupNotShown$jalview_datamodel_SequenceFeature === "function" && renderer.featureGroupNotShown$jalview_datamodel_SequenceFeature(feature)) return null;
+      if (typeof renderer.isVisible$jalview_datamodel_SequenceFeature === "function" && !renderer.isVisible$jalview_datamodel_SequenceFeature(feature)) return null;
+      const style = typeof renderer.getFeatureStyle$S === "function" ? renderer.getFeatureStyle$S(type) : null;
+      let colour = null;
+      if (style && typeof renderer.getColor$jalview_datamodel_SequenceFeature$jalview_api_FeatureColourI === "function") {
+        colour = renderer.getColor$jalview_datamodel_SequenceFeature$jalview_api_FeatureColourI(feature, style);
+      } else if (typeof renderer.getColour$jalview_datamodel_SequenceFeature === "function") {
+        colour = renderer.getColour$jalview_datamodel_SequenceFeature(feature);
+      }
+      const hex = javaColorToHex(colour, "");
+      if (!colorIsVisibleCellFill(hex)) return null;
+      return {
+        name: type || String(primitiveValue(callValue(feature, ["getDescription$"])) || "feature").trim() || "feature",
+        colour: hex
+      };
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function featureAlignmentSpan(seq, feature) {
+    const begin = Number(primitiveValue(callValue(feature, ["getBegin$"])));
+    const end = Number(primitiveValue(callValue(feature, ["getEnd$"])));
+    if (!Number.isFinite(begin) || !Number.isFinite(end)) return null;
+    try {
+      if (typeof seq.findIndex$I === "function") {
+        const start = Number(seq.findIndex$I(begin)) - 1;
+        const finish = Number(seq.findIndex$I(end)) - 1;
+        if (Number.isFinite(start) && Number.isFinite(finish)) return { start: Math.min(start, finish), end: Math.max(start, finish) };
+      }
+    } catch (_error) {}
+    return { start: Math.min(begin, end) - 1, end: Math.max(begin, end) - 1 };
+  }
+
+  function collectFeatureLegendEntries(seqCanvas, alignPanel, alignment, renderedBlocks, exportSettings) {
+    if (!exportSettings.showFeatures) return [];
+    const renderer = featureRenderer(seqCanvas, alignPanel, true);
+    if (!renderer) return [];
+    const order = javaListToArray(callValue(renderer, ["getRenderOrder$"]), 5000).map(String);
+    const rank = new Map(order.map((type, index) => [type, index]));
+    const seen = new Set();
+    const entries = [];
+    for (const entry of renderedBlocks) {
+      const start = Math.max(0, Math.floor(Number(entry.block.columnStartBoundary) || 0));
+      const visibleCount = Math.max(0, Math.floor(Number(entry.block.visibleColumnCount) || 0));
+      const endExclusive = Math.max(start, Math.floor(Number(entry.block.columnEndBoundary) || (start + visibleCount)));
+      for (const index of entry.indexes) {
+        const seq = alignment.getSequenceAt$I(index);
+        for (const feature of featureListForSequence(seq)) {
+          const span = featureAlignmentSpan(seq, feature);
+          if (!span || span.end < start || span.start >= endExclusive) continue;
+          const paint = visibleFeaturePaint(renderer, feature);
+          if (!paint) continue;
+          const key = paint.name;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push({ ...paint, order: rank.get(paint.name) ?? Number.MAX_SAFE_INTEGER, firstSeen: entries.length });
+        }
+      }
+    }
+    return entries.sort((left, right) => left.order - right.order || left.firstSeen - right.firstSeen);
+  }
+
+  function layoutFeatureLegend(entries, _availableWidth, measureText, fontSize) {
+    if (!Array.isArray(entries) || entries.length === 0) return { width: 0, height: 0, items: [] };
+    const padding = 10;
+    const rowHeight = Math.max(18, Math.ceil(fontSize * 1.55));
+    const swatch = Math.max(10, Math.min(14, Math.round(fontSize)));
+    const gap = 7;
+    let maxItemWidth = 0;
+    const items = entries.map((entry, index) => {
+      const textWidth = Math.max(1, Number(measureText(entry.name)) || entry.name.length * fontSize * 0.62);
+      const itemWidth = swatch + gap + textWidth;
+      maxItemWidth = Math.max(maxItemWidth, itemWidth);
+      return { ...entry, x: padding, y: index * rowHeight, swatch, rowHeight };
+    });
+    return {
+      width: Math.ceil(padding * 2 + maxItemWidth),
+      height: Math.ceil(padding * 2 + items.length * rowHeight),
+      items,
+      padding
+    };
+  }
+
   function booleanFormatValue(value, fallback) {
     const normalized = primitiveValue(value);
     return typeof normalized === "boolean" ? normalized : fallback;
@@ -2008,6 +2160,16 @@
     return { showBoxes, showText, textFill };
   }
 
+  function featureTextColour(featureColours, fallback) {
+    const colour = String(featureColours && featureColours.length ? featureColours[featureColours.length - 1] : "").toLowerCase();
+    const match = colour.match(/^#([0-9a-f]{6})$/);
+    if (!match) return fallback;
+    const red = Number.parseInt(match[1].slice(0, 2), 16);
+    const green = Number.parseInt(match[1].slice(2, 4), 16);
+    const blue = Number.parseInt(match[1].slice(4, 6), 16);
+    return (red * 299 + green * 587 + blue * 114) < 150000 ? "#ffffff" : "#111111";
+  }
+
   function viewportTextColour(viewport) {
     try {
       if (viewport && typeof viewport.getTextColour$ === "function") return javaColorToHex(viewport.getTextColour$(), "#111111");
@@ -2040,6 +2202,7 @@
       `y="${numberAttr(y)}"`,
       opts.anchor ? `text-anchor="${escapeXML(opts.anchor)}"` : "",
       opts.fill ? `fill="${escapeXML(opts.fill)}"` : "",
+      opts.fontWeight ? `font-weight="${escapeXML(opts.fontWeight)}"` : "",
       opts.className ? `class="${escapeXML(opts.className)}"` : ""
     ].filter(Boolean).join(" ");
     parts.push(`<text ${attrs}>${escapeXML(text)}</text>`);
@@ -2114,8 +2277,10 @@
     const blocks = Array.isArray(layout && layout.blocks) ? layout.blocks : [];
     if (blocks.length === 0) throw new Error("No layout blocks to render.");
     const alignmentHeight = Number(primitiveValue(callValue(alignment, ["getHeight$"]))) || alignmentSequences(frame).length;
-    const renderedBlocks = blocks.map((block) => ({ block, indexes: blockRowsToIndexes(block, alignmentHeight) }));
-    if (renderedBlocks.every((entry) => entry.indexes.length === 0)) {
+    const renderedBlocks = blocks
+      .map((block) => ({ block, indexes: blockRowsToIndexes(block, alignmentHeight) }))
+      .filter((entry) => entry.indexes.length > 0);
+    if (renderedBlocks.length === 0) {
       throw new Error("No renderable MSA rows in the export layout.");
     }
     const charWidthBefore = Number(primitiveValue(callValue(viewport, ["getCharWidth$"]))) || exportSettings.cellWidth;
@@ -2165,10 +2330,15 @@
     const leftLabelWidth = Math.ceil(Math.max(96, maxLabelTextWidth + leftLabelPadding));
     const maxBlockColumns = Math.max(1, ...renderedBlocks.map((entry) => Number(entry.block.alignmentWidthForNumbering || entry.block.visibleColumnCount || 0)));
     const gridWidth = maxBlockColumns * charWidth;
-    const width = Math.ceil(margin * 2 + leftLabelWidth + gridWidth + rightNumberWidth);
+    const msaWidth = Math.ceil(margin * 2 + leftLabelWidth + gridWidth + rightNumberWidth);
+    const featureLegendEntries = collectFeatureLegendEntries(seqCanvas, alignPanel, alignment, renderedBlocks, exportSettings);
+    const measureLegendText = (text) => fontMetrics && typeof fontMetrics.stringWidth$S === "function" ? fontMetrics.stringWidth$S(text) : String(text).length * 7;
+    const featureLegend = layoutFeatureLegend(featureLegendEntries, msaWidth - margin * 2, measureLegendText, viewportFontSpec(viewport).size);
+    const width = Math.max(msaWidth, Math.ceil(margin * 2 + featureLegend.width));
+    const featureLegendGap = featureLegend.height > 0 ? 14 : 0;
     const height = Math.ceil(margin * 2 + renderedBlocks.reduce((sum, entry) => {
       return sum + topNumberHeight + entry.indexes.length * charHeight + blockGap;
-    }, 0) - blockGap);
+    }, 0) - blockGap + featureLegendGap + featureLegend.height);
     const bridge = window.__PHGOJalviewBridgeAPI || {};
     const previousExportSettings = bridge.__msaexporRenderSettings;
     const previousExportActive = window.__PHGO_MSAEXPOR_RENDER_ACTIVE__;
@@ -2217,8 +2387,12 @@
             if (format.showBoxes && colorIsVisibleCellFill(fill)) {
               addSVGRect(parts, cellX, rowY, charWidth, charHeight, { fill });
             }
+            const featureColours = featureCellColours(seqCanvas, alignPanel, seq, col, exportSettings);
+            for (const featureFill of featureColours) {
+              addSVGRect(parts, cellX, rowY, charWidth, charHeight, { fill: featureFill });
+            }
             if (format.showText && (renderGaps || (ch !== "-" && ch !== "."))) {
-              addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: format.textFill, className: "msaexpor-residue" });
+              addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: featureTextColour(featureColours, format.textFill), className: "msaexpor-residue" });
             }
           }
           if (exportSettings.showRightResidueNumbers) {
@@ -2234,6 +2408,28 @@
           addGroupOutlines(parts, alignment, indexes, start, endExclusive, gridX, rowStartY, charWidth, charHeight);
         }
         y += topNumberHeight + indexes.length * charHeight + blockGap;
+      }
+      if (featureLegend.height > 0) {
+        const legendX = margin;
+        const legendY = y - blockGap + featureLegendGap;
+        addSVGRect(parts, legendX, legendY, featureLegend.width, featureLegend.height, {
+          fill: "none",
+          stroke: "#000000",
+          strokeWidth: 1
+        });
+        for (const item of featureLegend.items) {
+          const itemY = legendY + featureLegend.padding + item.y;
+          const swatchY = itemY + Math.max(0, (item.rowHeight - item.swatch) / 2);
+          addSVGRect(parts, legendX + item.x, swatchY, item.swatch, item.swatch, {
+            fill: item.colour,
+            stroke: "#333333",
+            strokeWidth: 0.6
+          });
+          addSVGText(parts, item.name, legendX + item.x + item.swatch + 7, itemY + item.rowHeight - Math.max(3, Math.floor(item.rowHeight / 5)), {
+            fill: textFill,
+            className: "msaexpor-feature-legend-label"
+          });
+        }
       }
     } finally {
       bridge.__msaexporRenderSettings = previousExportSettings;
@@ -2829,6 +3025,12 @@
   // be regression-tested without a running SwingJS desktop.
   window.PHGOJalviewBridge = {
     init,
-    testHooks: { residueFormatStyle }
+    testHooks: {
+      residueFormatStyle,
+      featureCellColours,
+      featureTextColour,
+      collectFeatureLegendEntries,
+      layoutFeatureLegend
+    }
   };
 })();

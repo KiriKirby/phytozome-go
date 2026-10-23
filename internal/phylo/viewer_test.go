@@ -410,7 +410,9 @@ func TestMSAExporNativeVectorBridgeRenderingContract(t *testing.T) {
 		`function rowLengthStatsFromText(value)`,
 		`function buildMSAExportLabel(taxonID, name, index, sequenceValue, settings)`,
 		`function exportLabelForSequence(taxonID, name, index, sequenceValue, settings)`,
-		`const renderedBlocks = blocks.map((block) => ({ block, indexes: blockRowsToIndexes(block, alignmentHeight) }));`,
+		`const renderedBlocks = blocks`,
+		`.map((block) => ({ block, indexes: blockRowsToIndexes(block, alignmentHeight) }))`,
+		`.filter((entry) => entry.indexes.length > 0);`,
 		`const label = exportRowLabel(seq, index, exportSettings);`,
 		`let maxLabelTextWidth = 72;`,
 		`const leftLabelPadding = Math.max(24, Math.ceil(charWidth * 3));`,
@@ -427,7 +429,16 @@ func TestMSAExporNativeVectorBridgeRenderingContract(t *testing.T) {
 		`const fill = format.showBoxes ? residueCellColour(seqCanvas, alignPanel, viewport, seq, col, exportSettings) : "";`,
 		`if (format.showBoxes && colorIsVisibleCellFill(fill)) {`,
 		`if (format.showText && (renderGaps || (ch !== "-" && ch !== "."))) {`,
-		`addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: format.textFill, className: "msaexpor-residue" });`,
+		`const featureColours = featureCellColours(seqCanvas, alignPanel, seq, col, exportSettings);`,
+		`for (const featureFill of featureColours) {`,
+		`addSVGText(parts, ch, cellX + charWidth / 2, baseline, { anchor: "middle", fill: featureTextColour(featureColours, format.textFill), className: "msaexpor-residue" });`,
+		`const featureLegendEntries = collectFeatureLegendEntries(seqCanvas, alignPanel, alignment, renderedBlocks, exportSettings);`,
+		`const featureLegend = layoutFeatureLegend(featureLegendEntries, msaWidth - margin * 2, measureLegendText, viewportFontSpec(viewport).size);`,
+		`const width = Math.max(msaWidth, Math.ceil(margin * 2 + featureLegend.width));`,
+		`addSVGRect(parts, legendX, legendY, featureLegend.width, featureLegend.height, {`,
+		`fill: "none"`,
+		`stroke: "#000000"`,
+		`className: "msaexpor-feature-legend-label"`,
 		`addGroupOutlines(parts, alignment, indexes, start, endExclusive, gridX, rowStartY, charWidth, charHeight);`,
 		`bridge.__msaexporRenderSettings = previousExportSettings;`,
 		`if (typeof previousExportActive !== "undefined") {`,
@@ -455,6 +466,8 @@ func TestMSAExporNativeVectorBridgeRenderingContract(t *testing.T) {
 		`collectResidueStyleForSequence`,
 		`collectMSAStyle`,
 		`residue_colors`,
+		`msaexpor-feature-legend-title`,
+		`addSVGText(parts, "Features"`,
 		`canvas.toDataURL("image/png")`,
 		`<image href=`,
 	} {
@@ -489,6 +502,105 @@ func TestPHGOJalviewBridgeFormatJavaScriptUnitTests(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "phgo bridge format tests passed") {
 		t.Fatalf("PHgo bridge format JavaScript tests did not report success: %s", output)
+	}
+}
+
+func TestVendoredJalviewFinderMotifJavaScriptUnitTests(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not available")
+	}
+	cmd := exec.Command("node", "viewer_assets/assets/jalviewjs/swingjs/j2s/jalview/analysis/Finder.test.mjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("vendored Jalview Finder motif JavaScript tests failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Finder PHgo motif tests passed") {
+		t.Fatalf("vendored Jalview Finder motif JavaScript tests did not report success: %s", output)
+	}
+}
+
+func TestVendoredJalviewGUIFinderFeatureIntegrationJavaScriptUnitTests(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not available")
+	}
+	cmd := exec.Command("node", "viewer_assets/assets/jalviewjs/swingjs/j2s/jalview/gui/Finder.test.mjs")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("vendored Jalview GUI Finder feature integration tests failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), "Jalview GUI Finder feature integration tests passed") {
+		t.Fatalf("vendored Jalview GUI Finder feature integration tests did not report success: %s", output)
+	}
+}
+
+func TestVendoredJalviewFinderMotifSearchContract(t *testing.T) {
+	body, err := viewerAsset("assets/jalviewjs/swingjs/j2s/jalview/analysis/Finder.js")
+	if err != nil {
+		t.Fatalf("vendored Jalview Finder asset missing: %v", err)
+	}
+	js := string(body)
+	for _, want := range []string{
+		`parsePhgoMotif$S`,
+		`findPhgoMotifMatch$OA$S$I$I`,
+		`recordPhgoColumnMatch$jalview_datamodel_SequenceI$I$I`,
+		`setPhgoTailMapMode$Z`,
+		`buildPhgoTailAnchors$jalview_api_AlignViewportI$OA$Z`,
+		`matchPhgoTokenAt$O$S$I`,
+		`seq, column, column`,
+		`for (var candidateLength=tokens.length; candidateLength > 0; candidateLength--)`,
+		`var prefix=tokens.slice(0, candidateLength);`,
+		`candidateAnchors.push({start:fullStart, end:fullEnd, prefixLength:candidateLength, sourceSequenceIndex:sourceIndex})`,
+		`mapPhgoTokensToColumns$OA$S`,
+		`mapPhgoAnchoredTokensToColumns$OA$S$I`,
+		`buildPhgoTailMappedColumns$jalview_api_AlignViewportI$OA$OA$Z`,
+		`mappedColumns=mappedRows[mappedRowIndex].columns`,
+		`installPhgoColumnResultBridge$jalview_datamodel_SearchResults`,
+		`__phgoFeatureableNativeRanges`,
+		`__phgoGapOnlyNativeRanges`,
+		`__phgoCanCreateFeatureForMatch`,
+		`results.getSize$=function ()`,
+		`results.isEmpty$=function ()`,
+		`if (c == "X" || c == "x")`,
+		`if (c == "-" || c == "－" || c == "−")`,
+		`else if (c == "［") close="］";`,
+		`replace(/[／、]/g, "/")`,
+		`this.columnIndex=endColumn + 1;`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Fatalf("vendored Jalview Finder motif search missing contract fragment %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`expandPhgoMotif$S`,
+		`AlignSeq.extractGaps`,
+		`$I$(6).extractGaps`,
+	} {
+		if strings.Contains(js, forbidden) {
+			t.Fatalf("vendored Jalview Finder motif search contains obsolete fragment %q", forbidden)
+		}
+	}
+	for _, asset := range []string{
+		"assets/jalviewjs/swingjs/j2s/jalview/gui/Finder.js",
+		"assets/jalviewjs/swingjs/j2s/jalview/appletgui/Finder.js",
+	} {
+		finderUI, readErr := viewerAsset(asset)
+		if readErr != nil {
+			t.Fatalf("vendored Jalview Finder UI asset %s missing: %v", asset, readErr)
+		}
+		ui := string(finderUI)
+		for _, want := range []string{
+			`hasFeatureableSearchResults$`,
+			`__phgoCanCreateFeatureForMatch(match)`,
+			`match.getStart$(), match.getEnd$()`,
+		} {
+			if !strings.Contains(ui, want) {
+				t.Fatalf("vendored Jalview Finder UI %s missing native feature integration fragment %q", asset, want)
+			}
+		}
+	}
+	baseFinder, err := viewerAsset("assets/jalviewjs/swingjs/j2s/jalview/jbgui/GFinder.js")
+	if err != nil || !strings.Contains(string(baseFinder), "Prefix-anchored range mapping") {
+		t.Fatalf("vendored Jalview base Finder is missing the prefix mapping checkbox")
 	}
 }
 

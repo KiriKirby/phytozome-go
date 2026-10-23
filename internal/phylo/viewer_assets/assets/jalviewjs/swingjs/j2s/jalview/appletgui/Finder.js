@@ -14,6 +14,7 @@ this.findNext=null;
 this.createFeatures=null;
 this.caseSensitive=null;
 this.searchDescription=null;
+this.phgoTailMapMode=null;
 this.searchResults=null;
 this.finders=null;
 }, 1);
@@ -25,6 +26,7 @@ this.findNext=Clazz.new_($I$(2));
 this.createFeatures=Clazz.new_($I$(2));
 this.caseSensitive=Clazz.new_($I$(3));
 this.searchDescription=Clazz.new_($I$(3));
+this.phgoTailMapMode=Clazz.new_($I$(3));
 }, 1);
 
 Clazz.newMeth(C$, 'c$$jalview_appletgui_AlignmentPanel', function (ap) {
@@ -78,14 +80,30 @@ var seqs=Clazz.new_($I$(9));
 var features=Clazz.new_($I$(9));
 var searchString=this.textfield.getText$().trim$();
 for (var match, $match = this.searchResults.getResults$().iterator$(); $match.hasNext$()&&((match=($match.next$())),1);) {
+if (typeof this.searchResults.__phgoCanCreateFeatureForMatch == "function" && !this.searchResults.__phgoCanCreateFeatureForMatch(match)) {
+continue;
+}
 seqs.add$TE(match.getSequence$().getDatasetSequence$());
 features.add$TE(Clazz.new_($I$(10).c$$S$S$I$I$S,[searchString, "Search Results", match.getStart$(), match.getEnd$(), "Search Results"]));
+}
+if (features.isEmpty$()) {
+return;
 }
 if (this.ap.seqPanel.seqCanvas.getFeatureRenderer$().amendFeatures$java_util_List$java_util_List$Z$jalview_appletgui_AlignmentPanel(seqs, features, true, this.ap)) {
 this.ap.alignFrame.sequenceFeatures.setState$Z(true);
 this.av.setShowSequenceFeatures$Z(true);
 this.ap.highlightSearchResults$jalview_datamodel_SearchResultsI(null);
 }});
+
+Clazz.newMeth(C$, 'hasFeatureableSearchResults$', function () {
+if (this.searchResults == null  || this.searchResults.isEmpty$() ) {
+return false;
+}for (var match, $match = this.searchResults.getResults$().iterator$(); $match.hasNext$()&&((match=($match.next$())),1);) {
+if (typeof this.searchResults.__phgoCanCreateFeatureForMatch != "function" || this.searchResults.__phgoCanCreateFeatureForMatch(match) ) {
+return true;
+}}
+return false;
+});
 
 Clazz.newMeth(C$, 'doSearch$Z', function (doFindAll) {
 if (this.ap.av.applet.currentAlignFrame != null ) {
@@ -99,6 +117,7 @@ this.finders.put$TK$TV(this.av, finder);
 }var searchString=this.textfield.getText$();
 var isCaseSensitive=this.caseSensitive.getState$();
 var doSearchDescription=this.searchDescription.getState$();
+finder.setPhgoTailMapMode$Z(this.phgoTailMapMode.getState$());
 if (doFindAll) {
 finder.findAll$S$Z$Z(searchString, isCaseSensitive, doSearchDescription);
 } else {
@@ -109,7 +128,7 @@ this.ap.idPanel.highlightSearchResults$java_util_List(idMatches);
 if (this.searchResults.isEmpty$()) {
 this.searchResults=null;
 } else {
-this.createFeatures.setEnabled$Z(true);
+this.createFeatures.setEnabled$Z(this.hasFeatureableSearchResults$());
 }this.ap.highlightSearchResults$jalview_datamodel_SearchResultsI(this.searchResults);
 if (idMatches.isEmpty$() && this.searchResults == null  ) {
 this.ap.alignFrame.statusBar.setText$S($I$(7).getString$S("label.finished_searching"));
@@ -170,6 +189,8 @@ this.caseSensitive.setLabel$S($I$(7).getString$S("label.match_case"));
 this.caseSensitive.setBounds$java_awt_Rectangle(Clazz.new_($I$(14).c$$I$I$I$I,[30, 39, 126, 23]));
 this.searchDescription.setLabel$S($I$(7).getString$S("label.include_description"));
 this.searchDescription.setBounds$java_awt_Rectangle(Clazz.new_($I$(14).c$$I$I$I$I,[30, 59, 170, 23]));
+this.phgoTailMapMode.setLabel$S("Prefix-anchored range mapping");
+this.phgoTailMapMode.setBounds$java_awt_Rectangle(Clazz.new_($I$(14).c$$I$I$I$I,[30, 79, 220, 23]));
 actionsPanel.add$java_awt_Component$O(this.findNext, null);
 actionsPanel.add$java_awt_Component$O(this.findAll, null);
 actionsPanel.add$java_awt_Component$O(this.createFeatures, null);
@@ -178,6 +199,7 @@ this.add$java_awt_Component$O(this.textfield, null);
 this.add$java_awt_Component$O(jLabel1, null);
 this.add$java_awt_Component$O(actionsPanel, null);
 this.add$java_awt_Component(this.searchDescription);
+this.add$java_awt_Component(this.phgoTailMapMode);
 }, p$1);
 
 Clazz.newMeth(C$, 'textfield_keyTyped$', function () {

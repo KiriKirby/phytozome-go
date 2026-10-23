@@ -101,10 +101,26 @@ var features=Clazz.new_($I$(9));
 var searchString=this.searchBox.getUserInput$();
 var desc="Search Results";
 for (var match, $match = this.searchResults.getResults$().iterator$(); $match.hasNext$()&&((match=($match.next$())),1);) {
+if (typeof this.searchResults.__phgoCanCreateFeatureForMatch == "function" && !this.searchResults.__phgoCanCreateFeatureForMatch(match)) {
+continue;
+}
 seqs.add$TE(match.getSequence$().getDatasetSequence$());
 features.add$TE(Clazz.new_($I$(10).c$$S$S$I$I$S,[searchString, desc, match.getStart$(), match.getEnd$(), desc]));
 }
+if (features.isEmpty$()) {
+return;
+}
 Clazz.new_($I$(11).c$$jalview_gui_AlignmentPanel$java_util_List$java_util_List$Z,[this.ap, seqs, features, true]).showDialog$();
+});
+
+Clazz.newMeth(C$, 'hasFeatureableSearchResults$', function () {
+if (this.searchResults == null  || this.searchResults.isEmpty$() ) {
+return false;
+}for (var match, $match = this.searchResults.getResults$().iterator$(); $match.hasNext$()&&((match=($match.next$())),1);) {
+if (typeof this.searchResults.__phgoCanCreateFeatureForMatch != "function" || this.searchResults.__phgoCanCreateFeatureForMatch(match) ) {
+return true;
+}}
+return false;
 });
 
 Clazz.newMeth(C$, 'doSearch$Z', function (doFindAll) {
@@ -118,6 +134,7 @@ finder=Clazz.new_($I$(12).c$$jalview_api_AlignViewportI,[this.av]);
 this.finders.put$TK$TV(this.av, finder);
 }var isCaseSensitive=this.caseSensitive.isSelected$();
 var doSearchDescription=this.searchDescription.isSelected$();
+finder.setPhgoTailMapMode$Z(this.phgoTailMapMode.isSelected$());
 if (doFindAll) {
 finder.findAll$S$Z$Z(searchString, isCaseSensitive, doSearchDescription);
 } else {
@@ -128,7 +145,7 @@ this.ap.getIdPanel$().highlightSearchResults$java_util_List(idMatch);
 if (this.searchResults.isEmpty$()) {
 this.searchResults=null;
 } else {
-this.createFeatures.setEnabled$Z(true);
+this.createFeatures.setEnabled$Z(this.hasFeatureableSearchResults$());
 }this.searchBox.updateCache$();
 this.ap.highlightSearchResults$jalview_datamodel_SearchResultsI(this.searchResults);
 if (idMatch.isEmpty$() && this.searchResults == null  ) {
