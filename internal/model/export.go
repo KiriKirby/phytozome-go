@@ -51,6 +51,7 @@ type ExportMetadata struct {
 	GeneID        string
 	GeneReportURL string
 	Queries       []ExportQueryMetadata
+	Motifs        string
 }
 
 type ExportQueryMetadata struct {

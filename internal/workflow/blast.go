@@ -34,6 +34,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/labelname"
 	"github.com/KiriKirby/phytozome-go/internal/lemna"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/motif"
 	"github.com/KiriKirby/phytozome-go/internal/ncbi"
 	"github.com/KiriKirby/phytozome-go/internal/notifyaudio"
 	"github.com/KiriKirby/phytozome-go/internal/phylo"
@@ -49,6 +50,10 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+// PDF data-analysis report code is intentionally retained but retired from all
+// runtime generation paths.
+const dataAnalysisPDFReportsEnabled = false
 
 type BlastWizard struct {
 	httpClient              *http.Client
@@ -410,6 +415,7 @@ type externalReferenceConfig struct {
 	UseUniProt         bool
 	UseInterPro        bool
 	InterProSettings   model.InterProConservedRegionSettings
+	MotifChecker       model.MotifCheckerSettings
 }
 
 type familyBlastPlan struct {
@@ -3577,6 +3583,7 @@ func (w *BlastWizard) collectExternalReferenceConfig() (externalReferenceConfig,
 		UseUniProt:         settings.UseUniProt,
 		UseInterPro:        settings.UseInterPro,
 		InterProSettings:   settings.InterProSettings,
+		MotifChecker:       settings.MotifChecker,
 	}
 	w.lastExternalRefs = config
 	return config, nil
@@ -3960,13 +3967,19 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					}
 				}
 				if references.UseInterPro {
-					enriched, enrichErr := w.enrichBlastRowsWithInterPro(queryCtx, item, results.Rows, references.InterProSettings)
+					enriched, enrichErr := results.Rows, error(nil)
+					// Retained for snapshot/backward compatibility; conserved-region status execution is disabled.
+					_ = item
+					_ = references.InterProSettings
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
 						return blastQueryRun{}, enrichErr
 					}
 					if enrichErr == nil {
 						results.Rows = enriched
 					}
+				}
+				if references.MotifChecker.Enabled && strings.TrimSpace(references.MotifChecker.Motifs) != "" {
+					results.Rows = w.enrichBlastRowsWithMotifChecker(queryCtx, results.Rows, references.MotifChecker)
 				}
 				if references.AutoLabelBlastHits {
 					results.Rows = w.autoIdentifyBlastHitLabels(queryCtx, request.Species, item, results.Rows)
@@ -4229,7 +4242,7 @@ func (w *BlastWizard) resumeBlastRowSelection(ctx context.Context, rowContext bl
 				allRows = rowContext.Results.Rows
 			}
 			files, err := w.exportFamilyBlastSelectionsToDir(ctx, rows, allRows, rowContext.Numbers, rowContext.Flags, exportItemFamilySources(exportItem), displayName, txtHeaderLabel, filePrefix, outputDir, settings, rowContext.FamilySettings, true)
-			if err == nil && settings.WriteReport && strings.TrimSpace(files.ReportPath) == "" {
+			if err == nil && dataAnalysisPDFReportsEnabled && settings.WriteReport && strings.TrimSpace(files.ReportPath) == "" {
 				selectedMask := buildBlastSelectedMaskFromSelection(len(allRows), rowContext.Numbers)
 				if len(selectedMask) == 0 {
 					selectedMask = append([]bool(nil), rowContext.SelectedRowsMask...)
@@ -4535,7 +4548,7 @@ func (w *BlastWizard) exportSingleBlastRun(ctx context.Context, selected model.S
 		writerSettings := settings
 		writerSettings.WriteSession = false
 		files, err = w.exportFamilyBlastSelectionsToDir(ctx, rows, allRows, rowNumbers, filterFlags, exportItemFamilySources(exportItem), displayName, txtHeaderLabel, filePrefix, settings.OutputDir, writerSettings, exportItem.FamilySettings, false)
-		if err == nil && settings.WriteReport {
+		if err == nil && dataAnalysisPDFReportsEnabled && settings.WriteReport {
 			reportPath, reportErr := w.renderBlastReportForExport(ctx, blastReportExportContext{
 				Selected:          selected,
 				Prepared:          cloneBlastQueryItems(prepared),
@@ -4670,7 +4683,7 @@ func (w *BlastWizard) exportAllBlastRuns(ctx context.Context, selected model.Spe
 		reportPrepared = cloneBlastQueryItems(reviewCtx.Prepared)
 		reportRuns = cloneBlastQueryRuns(reviewCtx.Runs)
 	}
-	if settings.WriteReport {
+	if dataAnalysisPDFReportsEnabled && settings.WriteReport {
 		inputPrepared := reportPrepared
 		if reviewCtx := w.lastBlastReviewContext; reviewCtx != nil && len(reviewCtx.OriginalPrepared) > 0 {
 			inputPrepared = reviewCtx.OriginalPrepared
@@ -6085,6 +6098,39 @@ func applyInterProEntry(row *model.BlastResultRow, entry interpro.Entry) {
 	row.InterProMatchRegions = entry.MatchRegions
 	row.InterProSignatureAccessions = entry.SignatureAccessions
 	row.InterProPfamAccessions = entry.PfamAccessions
+}
+
+func (w *BlastWizard) enrichBlastRowsWithMotifChecker(ctx context.Context, rows []model.BlastResultRow, settings model.MotifCheckerSettings) []model.BlastResultRow {
+	motifs := motif.SplitList(settings.Motifs)
+	if !settings.Enabled || len(motifs) == 0 {
+		return rows
+	}
+	out := append([]model.BlastResultRow(nil), rows...)
+	for i := range out {
+		out[i].MotifCheckerEnabled = true
+		out[i].PhgoMotifPatterns = settings.Motifs
+	}
+	_ = runParallel(ctx, len(out), blastSequenceFetchWorkerCount(len(out)), func(taskCtx context.Context, rowIndex int) error {
+		id := firstNonEmpty(out[rowIndex].SequenceID, out[rowIndex].TranscriptID, out[rowIndex].Protein, out[rowIndex].SubjectID)
+		if id == "" {
+			return nil
+		}
+		data, err := w.fetchProteinSequenceCached(taskCtx, out[rowIndex].TargetID, id)
+		if err != nil {
+			return nil
+		}
+		matches := motif.MatchingIndexes(data.Sequence, motifs)
+		if len(matches) == 0 {
+			return nil
+		}
+		values := make([]string, len(matches))
+		for j, value := range matches {
+			values[j] = strconv.Itoa(value)
+		}
+		out[rowIndex].PhgoMotifMatches = strings.Join(values, ",")
+		return nil
+	})
+	return out
 }
 
 func interProConservedRegionStatus(query interpro.Entry, queryOK bool, hit interpro.Entry, settings model.InterProConservedRegionSettings) string {
@@ -11472,7 +11518,7 @@ func (w *BlastWizard) exportSelectedKeywordFiles(ctx context.Context, selected m
 	} else {
 		sequenceAudit = report.SequenceAudit{Requested: false}
 	}
-	if settings.WriteReport {
+	if dataAnalysisPDFReportsEnabled && settings.WriteReport {
 		reportPath, err := w.renderKeywordReportForExport(ctx, rows, allRows, groups, files, baseName, outputDir, settings, reportCtx, exportStarted, steps, sequenceAudit, sequenceRecords)
 		if err != nil {
 			return err

@@ -1544,6 +1544,19 @@ func TestUniProtReviewedCellColor(t *testing.T) {
 	}
 }
 
+func TestMotifMatchesCellColorRequiresAllConfiguredMotifs(t *testing.T) {
+	column := TableColumn{ID: "phgo_motif_matches", MotifTotal: 2}
+	if got := tableCellColor(column, "1"); got != tview.Styles.PrimaryTextColor {
+		t.Fatalf("partial motif match color = %v", got)
+	}
+	if got := tableCellColor(column, "1,2"); got != colorSelectionOn {
+		t.Fatalf("complete motif match color = %v", got)
+	}
+	if got := tableCellColor(column, "1,3"); got != tview.Styles.PrimaryTextColor {
+		t.Fatalf("invalid motif index color = %v", got)
+	}
+}
+
 func TestIndentSecondaryPreservesMultiLineDetails(t *testing.T) {
 	got := indentSecondary("PAL4\n5 lines")
 	if got != "  PAL4\n  5 lines" {

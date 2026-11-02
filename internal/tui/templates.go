@@ -26,6 +26,7 @@ import (
 
 	"github.com/KiriKirby/phytozome-go/internal/appfs"
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/motif"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -151,12 +152,13 @@ type MultiLineResult struct {
 }
 
 type TableColumn struct {
-	ID        string
-	Header    string
-	Width     int
-	Sortable  bool
-	Reference string
-	Help      string
+	ID         string
+	Header     string
+	Width      int
+	Sortable   bool
+	Reference  string
+	Help       string
+	MotifTotal int
 }
 
 type TableRow struct {
@@ -262,6 +264,27 @@ type RowSelectionPage struct {
 	LoadAliases   func(rowIndex int) RowAliasChoices
 	ApplyAlias    func(rowIndex int, alias string) (TableRow, error)
 	ApplyCellEdit func(rowIndex int, columnID string, value string) (TableRow, error)
+}
+
+// UniversalFilterPage is the stable entry point for the replacement filter.
+// Its body is intentionally empty until the new filter contract is designed.
+type UniversalFilterPage struct {
+	Breadcrumb string
+	Path       []string
+	Title      string
+}
+
+func RunUniversalFilterModal(page UniversalFilterPage) error {
+	app := newApp()
+	box := tview.NewBox().SetBorder(true).SetTitle(" New Universal Filter ").SetTitleAlign(tview.AlignCenter)
+	root := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), box)
+	buttons := modalButtons([]buttonSpec{{Label: ButtonClose, Shortcut: ShortcutBack, Action: app.Stop, Visible: true}}, true, ButtonClose, ShortcutBack, func(NavAction) {}, app.Stop)
+	wrap := newButtonFlex()
+	wrap.AddItem(root, 0, 1, true)
+	addButtonRow(wrap, buttons)
+	app.SetRoot(wrap, true)
+	app.SetFocus(box)
+	return app.Run()
 }
 
 type RowAliasChoices struct {
@@ -2347,20 +2370,22 @@ type ExportSettingsResult struct {
 }
 
 type ExternalReferencePage struct {
-	Breadcrumb       string
-	Path             []string
-	Title            string
-	Message          string
-	AutoLabelLabel   string
-	AutoLabelInitial bool
-	UniProtLabel     string
-	UniProtInitial   bool
-	InterProLabel    string
-	InterProInitial  bool
-	InterProSettings InterProConservedRegionSettings
-	AllowBack        bool
-	AllowHome        bool
-	ConfirmText      string
+	Breadcrumb           string
+	Path                 []string
+	Title                string
+	Message              string
+	AutoLabelLabel       string
+	AutoLabelInitial     bool
+	UniProtLabel         string
+	UniProtInitial       bool
+	InterProLabel        string
+	InterProInitial      bool
+	InterProSettings     InterProConservedRegionSettings
+	MotifCheckerInitial  bool
+	MotifPatternsInitial string
+	AllowBack            bool
+	AllowHome            bool
+	ConfirmText          string
 }
 
 type ExternalReferenceResult struct {
@@ -2368,6 +2393,7 @@ type ExternalReferenceResult struct {
 	UseUniProt         bool
 	UseInterPro        bool
 	InterProSettings   InterProConservedRegionSettings
+	MotifChecker       model.MotifCheckerSettings
 	Nav                NavAction
 }
 
@@ -4652,7 +4678,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; result.State = captureState(); app.Stop() }, Visible: page.AllowHome},
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
 		{Label: "Aliases", Shortcut: "Ctrl+L", Action: showAliasModal, Visible: canAliasCurrent()},
-		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
+		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: true},
 	}
 	primaryActions := []buttonSpec{}
 	for _, extra := range orderedExtraActions {
@@ -4702,9 +4728,9 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		updateAliasButtonVisibility()
 	})
 	body.AddItem(modeText, 1, 0, false)
-	shortcutHint := "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens filter when available | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+	shortcutHint := "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens the new universal filter | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
 	if page.LoadAliases != nil && page.ApplyAlias != nil {
-		shortcutHint = "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens filter when available | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+		shortcutHint = "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens the new universal filter | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
 	}
 	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", shortcutHint))
 
@@ -4807,10 +4833,8 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			setSelectionHeader()
 			return nil
 		case tcell.KeyCtrlF:
-			if page.AllowFilter {
-				requestFilter()
-				return nil
-			}
+			requestFilter()
+			return nil
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
 			controlHeaders = false
 			keepSelectionVisible(layout.firstDataRow, rowSelectionFirstDataColumn)
@@ -6564,7 +6588,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; result.State = captureState(); app.Stop() }, Visible: page.AllowBack},
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; result.State = captureState(); app.Stop() }, Visible: page.AllowHome},
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
-		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: page.AllowFilter},
+		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: true},
 		{Label: "Show tree tools", Shortcut: "Ctrl+T", Action: toggleTreeTools, Visible: page.TreePanel.Available, Primary: true},
 	}
 	primaryActions := []buttonSpec{}
@@ -6648,7 +6672,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				continue
 			}
 			if strings.EqualFold(strings.TrimSpace(button.Shortcut), ShortcutFilter) {
-				button.Visible = page.AllowFilter
+				button.Visible = true
 				continue
 			}
 			if button.LeftPrimary && controlMode == 1 {
@@ -6915,10 +6939,8 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			}
 			return nil
 		case tcell.KeyCtrlF:
-			if page.AllowFilter {
-				requestFilter()
-				return nil
-			}
+			requestFilter()
+			return nil
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
 			if setControlMode != nil {
 				setControlMode(0)
@@ -8010,6 +8032,8 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	autoLabelHits := page.AutoLabelInitial
 	useUniProt := page.UniProtInitial
 	useInterPro := page.InterProInitial
+	useMotifChecker := page.MotifCheckerInitial
+	motifPatterns := page.MotifPatternsInitial
 	settings := normalizeTUIInterProSettings(page.InterProSettings)
 	helpVisible := false
 	var mainRoot tview.Primitive
@@ -8041,6 +8065,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	interProBox.SetBorder(false)
 	setFocusBorder(interProBox.Box, false)
 	attachFocusBorder(interProBox.Box)
+	motifBox := newCheckboxModule("Check configured motifs in hit sequences", func() bool { return useMotifChecker }, func() { useMotifChecker = !useMotifChecker })
+	motifBox.SetBorder(true)
+	motifBox.SetTitle(" Motif checker ")
+	motifBox.SetTitleAlign(tview.AlignCenter)
+	attachFocusBorder(motifBox.Box)
+	motifInput := tview.NewInputField().SetLabel("Motifs (comma-separated)").SetText(motifPatterns).SetFieldWidth(60)
 
 	settingRows := []struct {
 		label  string
@@ -8101,12 +8131,13 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 
 	interProModule := newButtonFlex()
 	interProModule.SetBorder(true)
-	interProModule.SetTitle(" InterPro ")
+	interProModule.SetTitle(" Motif checker ")
 	interProModule.SetTitleAlign(tview.AlignCenter)
 	setFocusBorder(interProModule.Box, false)
 	attachFocusBorder(interProModule.Box)
-	interProModule.AddItem(interProBox, 2, 0, true)
-	interProModule.AddItem(params, 0, 1, false)
+	interProModule.AddItem(motifBox, 2, 0, true)
+	interProModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 4, 0, false)
+	interProModule.AddItem(motifInput, 2, 0, false)
 
 	closeWithNav := func(nav NavAction) {
 		result.Nav = nav
@@ -8129,14 +8160,11 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			PresentMinMatchedItems: presentItems.GetText(),
 			PartialMinMatchedItems: partialItems.GetText(),
 		}
+		result.MotifChecker = model.MotifCheckerSettings{Enabled: useMotifChecker, Motifs: strings.TrimSpace(motifInput.GetText())}
 		app.Stop()
 	}
 
-	interProControls := []tview.Primitive{interProBox}
-	for _, box := range settingBoxes {
-		interProControls = append(interProControls, box)
-	}
-	interProControls = append(interProControls, presentCoverage, presentItems, partialCoverage, partialItems)
+	interProControls := []tview.Primitive{motifBox, motifInput}
 	topIndex := 0
 	interProIndex := 0
 	setTopFocus := func(index int) {
@@ -8232,7 +8260,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	showHelp := func() {
 		helpVisible = true
 		if helpModal == nil {
-			helpModal = newLocalizedHelpModal(app, interProParameterHelpPages(), func() {
+			helpModal = newLocalizedHelpModal(app, motifCheckerHelpPages(), func() {
 				if closeHelp != nil {
 					closeHelp()
 				}
@@ -8263,7 +8291,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
-	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, and InterPro. Up/Down moves through InterPro options. Space toggles a checkbox. Enter continues or applies from InterPro. F1 opens parameter help."})
+	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, and Motif checker. Space toggles the checker. Enter continues or applies. F1 opens motif syntax help."})
 
 	messageHeight := 0
 	if strings.TrimSpace(page.Message) != "" {
@@ -10704,6 +10732,41 @@ Score と ranking のコントロールは、フィルター内部で使うす�
 	}
 }
 
+func motifCheckerHelpPages() []localizedHelpPage {
+	return []localizedHelpPage{
+		{
+			Label:    "English",
+			Shortcut: "1",
+			Title:    "Motif checker help",
+			Text: strings.TrimSpace(`The motif checker is disabled by default. Enter one or more motifs separated by an English comma (,) or Chinese comma (，). Each motif is searched independently anywhere in the complete BLAST hit protein sequence.
+
+Literal residues match exactly. X matches one non-gap residue. -, －, and − match one gap. [A/B] and (A/B) mean A or B; compact alternatives such as [ABC] mean A, B, or C. Full-width bracket and slash forms are accepted like the MSA Finder syntax.
+
+The phgo_motif_matches column lists the 1-based numbers of completely matched motifs. For example, 1,3 means motifs 1 and 3 matched. No match is blank. The cell becomes green only when every configured motif matched; a partial set keeps the normal text color.`),
+		},
+		{
+			Label:    "中文",
+			Shortcut: "2",
+			Title:    "Motif 检查器帮助",
+			Text: strings.TrimSpace(`Motif 检查器默认不勾选。多个 motif 用英文逗号 , 或中文逗号 ， 分隔；程序会在每条 BLAST 命中蛋白的完整序列中分别查找每个 motif。
+
+普通氨基酸字母必须完全匹配。X 匹配一个非 gap 残基；-、－、− 匹配一个 gap；[A/B] 和 (A/B) 表示 A 或 B；[ABC] 表示 A、B、C 中任意一个。支持与 MSA Finder 相同的全角括号和分隔符形式。
+
+phgo_motif_matches 列显示完全匹配的 motif 序号，从 1 开始。例如 1,3 表示第 1 和第 3 个 motif 匹配。一个都没匹配时为空。只有所有配置的 motif 全部匹配时单元格才显示绿色；部分匹配仍显示序号，但保持普通颜色。`),
+		},
+		{
+			Label:    "日本語",
+			Shortcut: "3",
+			Title:    "Motif checker ヘルプ",
+			Text: strings.TrimSpace(`Motif checker は既定でオフです。複数の motif は , または ， で区切り、各 motif を BLAST hit protein の完全配列内で個別に検索します。
+
+通常の残基文字は完全一致です。X は gap 以外の 1 残基、-・－・− は 1 gap、[A/B] と (A/B) は A または B を表します。[ABC] は A・B・C のいずれかです。MSA Finder と同じ全角記号も使用できます。
+
+phgo_motif_matches 列は完全一致した motif の 1 始まり番号を表示します。たとえば 1,3 は motif 1 と 3 の一致です。一致なしは空欄です。設定したすべての motif が一致した場合だけ緑色になり、部分一致は通常色のまま番号を表示します。`),
+		},
+	}
+}
+
 func interProParameterHelpPages() []localizedHelpPage {
 	return []localizedHelpPage{
 		{
@@ -11466,6 +11529,9 @@ func tableHeaderLines(text string) (string, string) {
 }
 
 func tableCellColor(column TableColumn, value string) tcell.Color {
+	if column.ID == "phgo_motif_matches" && motif.AllMatched(value, column.MotifTotal) {
+		return colorSelectionOn
+	}
 	if column.ID == "uniprot_reviewed" {
 		switch strings.ToLower(strings.TrimSpace(value)) {
 		case "reviewed":

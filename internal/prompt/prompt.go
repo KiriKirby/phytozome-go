@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/motif"
 	"github.com/KiriKirby/phytozome-go/internal/ncbi"
 	"github.com/KiriKirby/phytozome-go/internal/notifyaudio"
 	"github.com/KiriKirby/phytozome-go/internal/phylo"
@@ -62,6 +63,14 @@ type Prompter struct {
 type FamilySearchProvider func(keyword string, scope []model.SpeciesCandidate) []model.SpeciesCandidate
 
 var BlastFilterSuggest func(BlastFilterRequest) (BlastFilterSuggestion, error)
+
+// The former BLAST filter remains in source for compatibility and archival
+// purposes, but no UI or runtime path may execute it.
+const legacyBlastFilterRuntimeEnabled = false
+
+// PDF data-analysis reports are archived source only. Keep the implementation
+// available for reference, but never expose or execute it at runtime.
+const dataAnalysisPDFReportsEnabled = false
 
 var invalidFileNameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
 var numericValuePattern = regexp.MustCompile(`[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?`)
@@ -268,6 +277,11 @@ var columnHelpText = map[string]string{
 		"Derived InterPro status for conserved-region support. With a query InterPro template, the program compares query conserved evidence against each hit; without a query template, it grades the hit's own conserved-domain evidence. present means enough conserved evidence is found, partial means related but incomplete evidence exists, missing means InterPro lookup succeeded but expected conserved evidence was not found, and uncertain means the evidence is too weak or ambiguous.",
 		"由 InterPro 派生的保守区域支持状态。有 query InterPro 模板时，程序会把 query 的保守证据与每个 hit 比较；没有 query 模板时，会保守地评价 hit 自身的保守结构域证据。present 表示证据足够，partial 表示有相关但不完整的证据，missing 表示查询成功但没有找到预期保守证据，uncertain 表示证据太弱或不明确。",
 		"InterPro から導いた保存領域サポート状態です。query の InterPro テンプレートがある場合は query の保存証拠を各 hit と比較し、ない場合は hit 自身の保存ドメイン証拠を評価します。present は十分な証拠、partial は関連するが不完全な証拠、missing は検索成功だが期待証拠なし、uncertain は証拠が弱いまたは曖昧な状態です。",
+	),
+	"phgo_motif_matches": columnHelp(
+		"One-based motif numbers whose complete patterns were found in the hit protein sequence by the optional PHgo motif checker. Blank means none matched or the checker was not used.",
+		"可选 PHgo motif 检查器在命中蛋白序列中完整匹配到的 motif 序号（从 1 开始）。空白表示没有匹配，或本次未启用检查器。",
+		"任意の PHgo motif checker がヒットタンパク質配列内で完全一致を確認した motif の1始まり番号です。空欄は一致なし、または未使用を示します。",
 	),
 	"interpro_entry_name": columnHelp(
 		"InterPro entry names matched on the hit protein. These names summarize families, domains, repeats, sites, or superfamilies and help you see whether the hit carries annotations expected for the pathway protein being studied.",
@@ -751,6 +765,7 @@ type ExternalReferenceSettings struct {
 	UseUniProt         bool
 	UseInterPro        bool
 	InterProSettings   model.InterProConservedRegionSettings
+	MotifChecker       model.MotifCheckerSettings
 }
 
 type BlastFilterRequest struct {
@@ -1381,6 +1396,9 @@ func (p *Prompter) OutputFolderName(backTarget error) (string, error) {
 }
 
 func (p *Prompter) DetailedReportAction(backTarget error) (string, error) {
+	if !dataAnalysisPDFReportsEnabled {
+		return "no", nil
+	}
 	result, err := tui.RunActionModalPage(tui.ActionModalPage{
 		Path:    p.tuiPath("Startup", "Export", "Data analysis report"),
 		Title:   p.t("Data analysis report (PDF)?"),
@@ -1413,7 +1431,8 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 	initial := ExternalReferenceSettings{
 		AutoLabelBlastHits: true,
 		UseUniProt:         true,
-		UseInterPro:        true,
+		UseInterPro:        false,
+		MotifChecker:       model.MotifCheckerSettings{},
 		InterProSettings:   defaultInterPro,
 	}
 	if p.externalRefsSet {
@@ -1442,9 +1461,11 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 			PresentMinMatchedItems: strconv.Itoa(initial.InterProSettings.PresentMinMatchedItems),
 			PartialMinMatchedItems: strconv.Itoa(initial.InterProSettings.PartialMinMatchedItems),
 		},
-		AllowBack:   true,
-		AllowHome:   p.allowHome(true),
-		ConfirmText: tui.ButtonApply,
+		MotifCheckerInitial:  initial.MotifChecker.Enabled,
+		MotifPatternsInitial: initial.MotifChecker.Motifs,
+		AllowBack:            true,
+		AllowHome:            p.allowHome(true),
+		ConfirmText:          tui.ButtonApply,
 	})
 	if err != nil {
 		return ExternalReferenceSettings{}, err
@@ -1457,6 +1478,7 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 		UseUniProt:         result.UseUniProt,
 		UseInterPro:        result.UseInterPro,
 		InterProSettings:   parseInterProSettings(result.InterProSettings),
+		MotifChecker:       result.MotifChecker,
 	}
 	p.lastExternalRefs = settings
 	p.externalRefsSet = true
@@ -1727,6 +1749,13 @@ func promptFamilyBlastMembersFromTUI(members []tui.FamilyBlastMember) []FamilyBl
 		})
 	}
 	return out
+}
+
+func (p *Prompter) UniversalFilter(path []string) error {
+	return tui.RunUniversalFilterModal(tui.UniversalFilterPage{
+		Path:  path,
+		Title: "New Universal Filter",
+	})
 }
 
 func (p *Prompter) BlastFilterSettings(backTarget error) (BlastFilterSettingsResult, error) {
@@ -3762,6 +3791,12 @@ func (p *Prompter) selectKeywordRows(groups []model.KeywordSearchGroup, initial 
 		}
 		selected = result.Selected
 		p.keywordSelections[stateKey] = append([]bool(nil), selected...)
+		if result.FilterRequested {
+			if err := p.UniversalFilter(p.tuiPath("Startup", "Species", "Keyword input", "Keyword results", "New Universal Filter")); err != nil {
+				return KeywordRowSelection{}, err
+			}
+			continue
+		}
 		chosen := make([]model.KeywordResultRow, 0, totalRows)
 		for i, ok := range selected {
 			if ok {
@@ -3998,6 +4033,12 @@ func (p *Prompter) selectBlastRunsWithState(runs []BlastRunView, backTarget erro
 			return BlastRowSelection{}, navErr
 		}
 		if result.FilterRequested {
+			if err := p.UniversalFilter(p.blastTUIPath("BLAST input", "BLAST results", "New Universal Filter")); err != nil {
+				return BlastRowSelection{}, err
+			}
+			continue
+		}
+		if legacyBlastFilterRuntimeEnabled && result.FilterRequested {
 			filterResult, settingsErr := p.BlastFilterSettings(ErrBackToRowSelection)
 			if settingsErr != nil {
 				if errors.Is(settingsErr, ErrBackToRowSelection) {
@@ -4588,6 +4629,12 @@ func (p *Prompter) selectBlastRowsWithInitial(rows []model.BlastResultRow, allow
 		p.blastSelections[stateKey] = append([]bool(nil), selected...)
 		p.blastFilterFlags[stateKey] = append([]bool(nil), filterFlags...)
 		if result.FilterRequested {
+			if err := p.UniversalFilter(p.blastTUIPath("BLAST input", "BLAST results", "New Universal Filter")); err != nil {
+				return BlastRowSelection{}, err
+			}
+			continue
+		}
+		if legacyBlastFilterRuntimeEnabled && result.FilterRequested {
 			filterResult, settingsErr := p.BlastFilterSettings(ErrBackToRowSelection)
 			if settingsErr != nil {
 				if errors.Is(settingsErr, ErrBackToRowSelection) {
@@ -5142,6 +5189,7 @@ func blastColumnValue(row model.BlastResultRow, columnID string) string {
 		"uniprot_go":           row.UniProtGO,
 		"target_uniprot_canonical_length_percent": row.TargetUniProtCanonicalLengthPercent,
 		"align_query_length_percent":              blastAlignQueryLengthPercent(row),
+		"phgo_motif_matches":                      row.PhgoMotifMatches,
 		"interpro_conserved_region_status":        row.InterProConservedRegionStatus,
 		"interpro_entry_name":                     row.InterProEntryName,
 		"interpro_entry_type":                     row.InterProEntryType,
@@ -5322,6 +5370,14 @@ func buildBlastSelectionTable(rows []model.BlastResultRow) ([]tui.TableColumn, [
 			Sortable:  def.Sortable,
 			Reference: def.Reference,
 			Help:      def.Help,
+			MotifTotal: func() int {
+				for _, row := range rows {
+					if row.MotifCheckerEnabled {
+						return len(motif.SplitList(row.PhgoMotifPatterns))
+					}
+				}
+				return 0
+			}(),
 		})
 	}
 	tableRows := make([]tui.TableRow, 0, len(rows))
@@ -6565,6 +6621,10 @@ func blastDisplayColumns(rows []model.BlastResultRow) []tableColumnValue[model.B
 				return blastAlignQueryLengthPercent(row)
 			},
 		},
+		"phgo_motif_matches": {
+			ID: "phgo_motif_matches", Header: ColumnCompactHeader("phgo_motif_matches", options), Sortable: true,
+			Value: func(row model.BlastResultRow) string { return strings.TrimSpace(row.PhgoMotifMatches) },
+		},
 		"interpro_conserved_region_status": {
 			ID:        "interpro_conserved_region_status",
 			Header:    ColumnCompactHeader("interpro_conserved_region_status", options),
@@ -6689,7 +6749,20 @@ func blastDisplayColumns(rows []model.BlastResultRow) []tableColumnValue[model.B
 func blastDisplayColumnIDsForRows(rows []model.BlastResultRow) []string {
 	withUniProt := blastRowsHaveUniProtReference(rows)
 	withInterPro := blastRowsHaveInterProReference(rows)
-	return BlastDisplayColumnIDs(sourceDatabaseForBlastRows(rows), blastRowsProgram(rows), withUniProt, withInterPro)
+	ids := BlastDisplayColumnIDs(sourceDatabaseForBlastRows(rows), blastRowsProgram(rows), withUniProt, withInterPro)
+	if !blastRowsHaveMotifChecker(rows) {
+		ids = filteredColumnIDs(ids, "phgo_motif_matches")
+	}
+	return ids
+}
+
+func blastRowsHaveMotifChecker(rows []model.BlastResultRow) bool {
+	for _, row := range rows {
+		if row.MotifCheckerEnabled {
+			return true
+		}
+	}
+	return false
 }
 
 func databaseDisplayNameForRows(rows []model.BlastResultRow) string {
@@ -6709,7 +6782,11 @@ func databaseDisplayNameForRows(rows []model.BlastResultRow) string {
 }
 
 func blastDetailColumnIDsForRow(row model.BlastResultRow) []string {
-	return BlastDetailColumnIDs(strings.TrimSpace(row.SourceDatabase), strings.TrimSpace(row.BlastProgram), row.UniProtReferenceEnabled, row.InterProReferenceEnabled)
+	ids := BlastDetailColumnIDs(strings.TrimSpace(row.SourceDatabase), strings.TrimSpace(row.BlastProgram), row.UniProtReferenceEnabled, row.InterProReferenceEnabled)
+	if !row.MotifCheckerEnabled {
+		ids = filteredColumnIDs(ids, "phgo_motif_matches")
+	}
+	return ids
 }
 
 func blastRowsHaveUniProtReference(rows []model.BlastResultRow) bool {
@@ -7123,8 +7200,8 @@ func (p *Prompter) ExportSettingsWithOptions(label string, allowFolder bool, all
 		AllowFolder:            allowFolder,
 		AllowEmptyFile:         allowEmptyFileName,
 		ReportLabel:            p.t("Data analysis report (PDF)"),
-		ReportInitial:          defaults.WriteReport,
-		ShowReport:             true,
+		ReportInitial:          false,
+		ShowReport:             false,
 		ShowSession:            true,
 		AllowBack:              true,
 		AllowHome:              p.allowHome(true),
@@ -7156,9 +7233,11 @@ func (p *Prompter) ExportSettingsWithOptions(label string, allowFolder bool, all
 		return ExportSettings{}, fmt.Errorf("file name cannot be empty")
 	}
 	settings := ExportSettings{
-		BaseName:              name,
-		FolderName:            sanitizeFileName(result.FolderName),
-		WriteReport:           result.WriteReport,
+		BaseName:   name,
+		FolderName: sanitizeFileName(result.FolderName),
+		// PDF data-analysis reports are retained in source for compatibility but
+		// are permanently disabled and never run.
+		WriteReport:           false,
 		WriteSession:          result.WriteSession,
 		WriteText:             result.WriteText,
 		WriteConvertedFasta:   false,
@@ -7718,6 +7797,7 @@ func blastRowDetail(row model.BlastResultRow) string {
 		"uniprot_alphafolddb":                     strings.TrimSpace(row.UniProtAlphaFoldDB),
 		"uniprot_pdb":                             strings.TrimSpace(row.UniProtPDB),
 		"interpro_conserved_region_status":        strings.TrimSpace(row.InterProConservedRegionStatus),
+		"phgo_motif_matches":                      strings.TrimSpace(row.PhgoMotifMatches),
 		"interpro_entry_name":                     strings.TrimSpace(row.InterProEntryName),
 		"interpro_entry_type":                     strings.TrimSpace(row.InterProEntryType),
 		"interpro_coverage_percent":               strings.TrimSpace(row.InterProCoveragePercent),
@@ -7803,6 +7883,7 @@ func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
 		"uniprot_alphafolddb":                     strings.TrimSpace(row.UniProtAlphaFoldDB),
 		"uniprot_pdb":                             strings.TrimSpace(row.UniProtPDB),
 		"interpro_conserved_region_status":        strings.TrimSpace(row.InterProConservedRegionStatus),
+		"phgo_motif_matches":                      strings.TrimSpace(row.PhgoMotifMatches),
 		"interpro_entry_name":                     strings.TrimSpace(row.InterProEntryName),
 		"interpro_entry_type":                     strings.TrimSpace(row.InterProEntryType),
 		"interpro_coverage_percent":               strings.TrimSpace(row.InterProCoveragePercent),

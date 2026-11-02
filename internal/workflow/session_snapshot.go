@@ -843,6 +843,7 @@ func snapshotExternalReferences(config externalReferenceConfig) *sessionsnapshot
 		UseUniProt:         config.UseUniProt,
 		UseInterPro:        config.UseInterPro,
 		InterProSettings:   config.InterProSettings,
+		MotifChecker:       config.MotifChecker,
 	}
 }
 
@@ -1027,12 +1028,14 @@ func (w *BlastWizard) hydrateCommonSnapshotState(snapshot sessionsnapshot.Snapsh
 			UseUniProt:         snapshot.ExternalReferences.UseUniProt,
 			UseInterPro:        snapshot.ExternalReferences.UseInterPro,
 			InterProSettings:   snapshot.ExternalReferences.InterProSettings,
+			MotifChecker:       snapshot.ExternalReferences.MotifChecker,
 		}
 		w.prompt.RestoreExternalReferenceSettings(prompt.ExternalReferenceSettings{
 			AutoLabelBlastHits: snapshot.ExternalReferences.AutoLabelBlastHits,
 			UseUniProt:         snapshot.ExternalReferences.UseUniProt,
 			UseInterPro:        snapshot.ExternalReferences.UseInterPro,
 			InterProSettings:   snapshot.ExternalReferences.InterProSettings,
+			MotifChecker:       snapshot.ExternalReferences.MotifChecker,
 		})
 	}
 	if snapshot.Handoff != nil {

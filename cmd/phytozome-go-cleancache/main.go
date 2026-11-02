@@ -376,11 +376,9 @@ func maybeEnsureSymbolNameDatabase(appDir string, args []string) (bool, error) {
 			_, _ = fmt.Fprintln(os.Stdout, "Skipping symbol name library download. It will be required when symbol names are used.")
 			return false, nil
 		}
-		launchNow, err := downloadSymbolNameDatabaseInteractiveFirstAttemptWithRetry(appDir, args, dbPath, plan, "Downloading and preparing symbol name library", "Open phytozome GO while the symbol name library downloads? [y/N]: ")
-		if err != nil {
-			return launchNow, err
-		}
-		return launchNow, nil
+		// Symbol-name data is always installed completely before the main UI starts.
+		// The former "use while downloading" branch is intentionally retired.
+		return false, downloadSymbolNameDatabaseStartupWithRetry(appDir, "Downloading and preparing symbol name library", dbPath, plan, false)
 	}
 	if remote.LastModified.IsZero() || local.LastModified.IsZero() || !remote.LastModified.After(local.LastModified) {
 		writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Symbol name database is current.", dbPath)
@@ -408,11 +406,7 @@ func maybeEnsureSymbolNameDatabase(appDir string, args []string) (bool, error) {
 		_, _ = fmt.Fprintln(os.Stdout, "Keeping existing symbol name library.")
 		return false, nil
 	}
-	launchNow, err := downloadSymbolNameDatabaseInteractiveFirstAttemptWithRetry(appDir, args, dbPath, plan, "Downloading and preparing updated symbol name library", "Open phytozome GO while the symbol name library update downloads? [y/N]: ")
-	if err != nil {
-		return launchNow, err
-	}
-	return launchNow, nil
+	return false, downloadSymbolNameDatabaseStartupWithRetry(appDir, "Downloading and preparing updated symbol name library", dbPath, plan, false)
 }
 
 func downloadSymbolNameDatabaseStartupWithRetry(appDir string, label string, dbPath string, plan labelname.GeneInfoInstallPlan, allowUse bool) error {

@@ -331,6 +331,7 @@ type ExternalReferenceSettingsV2 struct {
 	UseUniProt         bool                                  `json:"use_uniprot"`
 	UseInterPro        bool                                  `json:"use_interpro"`
 	InterProSettings   model.InterProConservedRegionSettings `json:"interpro_settings"`
+	MotifChecker       model.MotifCheckerSettings            `json:"motif_checker"`
 }
 
 type HandoffStateV2 struct {

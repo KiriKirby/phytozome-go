@@ -142,11 +142,9 @@ func TestBlastExcelExportMirrorsHeaderAndStatusColors(t *testing.T) {
 		UniProtReferenceEnabled:             true,
 		UniProtAccession:                    "P12345",
 		UniProtReviewed:                     "unreviewed",
-		InterProReferenceEnabled:            true,
-		InterProConservedRegionStatus:       "missing",
-		InterProEntryName:                   "domain",
-		InterProAccessions:                  "IPR000001",
-		InterProSignatureAccessions:         "PF00001",
+		MotifCheckerEnabled:                 true,
+		PhgoMotifMatches:                    "1,2",
+		PhgoMotifPatterns:                   "AXC,[P/I]PGP",
 		TargetUniProtCanonicalLengthPercent: "95.00",
 	}}
 	path := filepath.Join(t.TempDir(), "colors.xlsx")
@@ -157,10 +155,26 @@ func TestBlastExcelExportMirrorsHeaderAndStatusColors(t *testing.T) {
 	assertExcelFontColor(t, path, "BLAST Results", "A1", excelColorDefault)
 	assertExcelFontColor(t, path, "BLAST Results", cellForHeader(t, path, "source_database"), excelColorAction)
 	assertExcelFontColor(t, path, "BLAST Results", cellForHeader(t, path, "UniProt reviewed"), excelColorMuted)
-	assertExcelFontColor(t, path, "BLAST Results", cellForHeader(t, path, "InterPro conserved region status"), excelColorAccent)
+	assertExcelFontColor(t, path, "BLAST Results", cellForHeader(t, path, "PHgo motif matches"), excelColorDefault)
 
 	assertExcelFontColor(t, path, "BLAST Results", dataCellForHeader(t, path, "UniProt reviewed"), excelColorMuted)
-	assertExcelFontColor(t, path, "BLAST Results", dataCellForHeader(t, path, "InterPro conserved region status"), excelColorSelectionOff)
+	assertExcelFontColor(t, path, "BLAST Results", dataCellForHeader(t, path, "PHgo motif matches"), excelColorSelectionOn)
+}
+
+func TestBlastExcelMotifColorRequiresAllConfiguredMotifs(t *testing.T) {
+	row := model.BlastResultRow{PhgoMotifPatterns: "AXC,[P/I]PGP"}
+	row.PhgoMotifMatches = "1"
+	if got := blastExcelCellColorByID("phgo_motif_matches", row, 0, nil); got != excelColorDefault {
+		t.Fatalf("partial motif match color = %q", got)
+	}
+	row.PhgoMotifMatches = "1,2"
+	if got := blastExcelCellColorByID("phgo_motif_matches", row, 0, nil); got != excelColorSelectionOn {
+		t.Fatalf("complete motif match color = %q", got)
+	}
+	row.PhgoMotifMatches = "1,3"
+	if got := blastExcelCellColorByID("phgo_motif_matches", row, 0, nil); got != excelColorDefault {
+		t.Fatalf("invalid motif index color = %q", got)
+	}
 }
 
 func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t *testing.T) {

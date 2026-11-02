@@ -82,6 +82,9 @@ type BlastResultRow struct {
 	AlignQueryLengthPercent             float64
 	InterProReferenceEnabled            bool
 	InterProConservedRegionStatus       string
+	PhgoMotifMatches                    string
+	MotifCheckerEnabled                 bool
+	PhgoMotifPatterns                   string
 	PfamDomain                          string
 	AlignLength                         int
 	Strands                             string
@@ -147,6 +150,11 @@ type InterProConservedRegionSettings struct {
 	PartialMinCoverage     float64
 	PresentMinMatchedItems int
 	PartialMinMatchedItems int
+}
+
+type MotifCheckerSettings struct {
+	Enabled bool   `json:"enabled"`
+	Motifs  string `json:"motifs"`
 }
 
 func DefaultInterProConservedRegionSettings() InterProConservedRegionSettings {

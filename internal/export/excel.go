@@ -15,6 +15,7 @@ import (
 	"github.com/xuri/excelize/v2"
 
 	"github.com/KiriKirby/phytozome-go/internal/model"
+	"github.com/KiriKirby/phytozome-go/internal/motif"
 	"github.com/KiriKirby/phytozome-go/internal/prompt"
 )
 
@@ -91,12 +92,33 @@ func blastHeaderPlanForRows(rows []model.BlastResultRow) ([]string, []string) {
 	includeUniProt := blastRowsHaveUniProtReference(rows)
 	includeInterPro := blastRowsHaveInterProReference(rows)
 	headerIDs := prompt.BlastExportColumnIDs(sourceDatabaseForBlastRows(rows), includeUniProt, includeInterPro)
+	if !blastRowsHaveMotifChecker(rows) {
+		headerIDs = removeString(headerIDs, "phgo_motif_matches")
+	}
 	headers := make([]string, 0, len(headerIDs))
 	options := prompt.ColumnDisplayOptions{DatabaseDisplay: databaseDisplayNameForRows(rows)}
 	for _, id := range headerIDs {
 		headers = append(headers, prompt.ColumnExportHeader(id, options))
 	}
 	return headerIDs, headers
+}
+
+func blastRowsHaveMotifChecker(rows []model.BlastResultRow) bool {
+	for _, row := range rows {
+		if row.MotifCheckerEnabled {
+			return true
+		}
+	}
+	return false
+}
+func removeString(values []string, unwanted string) []string {
+	out := values[:0]
+	for _, value := range values {
+		if value != unwanted {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func blastTargetUniProtCanonicalLengthHeader(rows []model.BlastResultRow) string {
@@ -157,6 +179,8 @@ func blastExportValue(id string, row model.BlastResultRow, rowNumber int) any {
 		return blastAlignQueryLengthPercent(row)
 	case "interpro_conserved_region_status":
 		return blankIfNoInterPro(row, row.InterProConservedRegionStatus)
+	case "phgo_motif_matches":
+		return row.PhgoMotifMatches
 	case "target_length":
 		return row.TargetLength
 	case "target_uniprot_canonical_length_percent":
@@ -301,6 +325,22 @@ func blankIfNoInterPro(row model.BlastResultRow, value string) string {
 }
 
 func WriteBlastResultsExcelWithMetadata(path string, rows []model.BlastResultRow, metadata *model.ExportMetadata, options *BlastExcelExportOptions) error {
+	if metadata == nil {
+		for _, row := range rows {
+			if strings.TrimSpace(row.PhgoMotifPatterns) != "" {
+				metadata = &model.ExportMetadata{Motifs: row.PhgoMotifPatterns}
+				break
+			}
+		}
+	}
+	if metadata != nil && strings.TrimSpace(metadata.Motifs) == "" {
+		for _, row := range rows {
+			if strings.TrimSpace(row.PhgoMotifPatterns) != "" {
+				metadata.Motifs = row.PhgoMotifPatterns
+				break
+			}
+		}
+	}
 	file := excelize.NewFile()
 	defer func() {
 		_ = file.Close()
@@ -400,7 +440,7 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 		return nil
 	}
 	queries := exportMetadataQueries(metadata)
-	if len(queries) == 0 && strings.TrimSpace(metadata.GeneName) == "" && strings.TrimSpace(metadata.GeneID) == "" && strings.TrimSpace(metadata.GeneReportURL) == "" {
+	if len(queries) == 0 && strings.TrimSpace(metadata.GeneName) == "" && strings.TrimSpace(metadata.GeneID) == "" && strings.TrimSpace(metadata.GeneReportURL) == "" && strings.TrimSpace(metadata.Motifs) == "" {
 		return nil
 	}
 	const sheet = "Query Metadata"
@@ -419,6 +459,7 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 			{key: "gene_name", value: strings.TrimSpace(metadata.GeneName)},
 			{key: "gene_id", value: strings.TrimSpace(metadata.GeneID)},
 			{key: "gene_report_url", value: strings.TrimSpace(metadata.GeneReportURL)},
+			{key: "phgo_motif_patterns", value: strings.TrimSpace(metadata.Motifs)},
 		}
 		if err := stream.SetRow("A1", []interface{}{"field", "value"}); err != nil {
 			return fmt.Errorf("write metadata header row: %w", err)
@@ -489,6 +530,12 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 			return fmt.Errorf("write metadata query row %d: %w", rowIndex+1, err)
 		}
 	}
+	if strings.TrimSpace(metadata.Motifs) != "" {
+		row := len(queries) + 3
+		if err := stream.SetRow(fmt.Sprintf("A%d", row), []interface{}{"phgo_motif_patterns", strings.TrimSpace(metadata.Motifs)}); err != nil {
+			return fmt.Errorf("write motif metadata: %w", err)
+		}
+	}
 	if err := stream.Flush(); err != nil {
 		return fmt.Errorf("flush metadata stream: %w", err)
 	}
@@ -545,6 +592,10 @@ func blastExcelCellColorByID(id string, row model.BlastResultRow, originalRowInd
 			return excelColorSelectionOff
 		case "uncertain":
 			return excelColorAction
+		}
+	case "phgo_motif_matches":
+		if motif.AllMatched(row.PhgoMotifMatches, len(motif.SplitList(row.PhgoMotifPatterns))) {
+			return excelColorSelectionOn
 		}
 	}
 	return excelColorDefault

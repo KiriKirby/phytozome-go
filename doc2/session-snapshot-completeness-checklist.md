@@ -192,6 +192,8 @@ Must preserve:
   - `InterProSettings.PartialMinCoverage`
   - `InterProSettings.PresentMinMatchedItems`
   - `InterProSettings.PartialMinMatchedItems`
+  - `MotifChecker.Enabled`
+  - `MotifChecker.Motifs`
 - family BLAST settings
   - `Enabled`
   - `GroupByDetectedPrefix`
