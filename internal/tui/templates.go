@@ -8066,9 +8066,9 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	setFocusBorder(interProBox.Box, false)
 	attachFocusBorder(interProBox.Box)
 	motifBox := newCheckboxModule("Check configured motifs in hit sequences", func() bool { return useMotifChecker }, func() { useMotifChecker = !useMotifChecker })
-	motifBox.SetBorder(true)
-	motifBox.SetTitle(" Motif checker ")
-	motifBox.SetTitleAlign(tview.AlignCenter)
+	// The outer module owns the single section border/title. Keep the checkbox
+	// itself borderless so it aligns with the Auto-label and UniProt peer rows.
+	motifBox.SetBorder(false)
 	attachFocusBorder(motifBox.Box)
 	motifInput := tview.NewInputField().SetLabel("Motifs (comma-separated)").SetText(motifPatterns).SetFieldWidth(60)
 
@@ -8178,7 +8178,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		setFocusBorder(autoLabelBox.Box, topIndex == 0)
 		setFocusBorder(uniProtBox.Box, topIndex == 1)
 		setFocusBorder(interProModule.Box, topIndex == 2)
-		setFocusBorder(params.Box, topIndex == 2)
 		if topIndex == 0 {
 			app.SetFocus(autoLabelBox)
 			return
@@ -8206,7 +8205,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			index = 0
 		}
 		interProIndex = index
-		setTopFocus(1)
+		setTopFocus(2)
 	}
 	syncFocusFromApp := func() {
 		current := app.GetFocus()
@@ -8215,7 +8214,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			setFocusBorder(autoLabelBox.Box, true)
 			setFocusBorder(uniProtBox.Box, false)
 			setFocusBorder(interProModule.Box, false)
-			setFocusBorder(params.Box, false)
 			return
 		}
 		if current == uniProtBox {
@@ -8223,7 +8221,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			setFocusBorder(autoLabelBox.Box, false)
 			setFocusBorder(uniProtBox.Box, true)
 			setFocusBorder(interProModule.Box, false)
-			setFocusBorder(params.Box, false)
 			return
 		}
 		for i, primitive := range interProControls {
@@ -8233,7 +8230,6 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				setFocusBorder(autoLabelBox.Box, false)
 				setFocusBorder(uniProtBox.Box, false)
 				setFocusBorder(interProModule.Box, true)
-				setFocusBorder(params.Box, true)
 				return
 			}
 		}
@@ -8287,7 +8283,10 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	modalBody.AddItem(autoLabelBox, 3, 0, true)
 	modalBody.AddItem(uniProtBox, 3, 0, true)
-	modalBody.AddItem(interProModule, 0, 1, false)
+	// Keep the motif section content-sized like the two peer switches above;
+	// letting it flex consumed the remaining modal height and produced a large
+	// empty area below the input.
+	modalBody.AddItem(interProModule, 8, 0, true)
 	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
@@ -8297,7 +8296,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	if strings.TrimSpace(page.Message) != "" {
 		messageHeight = 3
 	}
-	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+2+2+3+len(settingBoxes)+1+2+1+5+1+4, 39, 50)
+	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+8+4, 39, 50)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
 	setPageRoot(app, mainRoot)
 	setTopFocus(0)
