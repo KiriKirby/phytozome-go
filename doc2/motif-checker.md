@@ -1,6 +1,6 @@
 # PHgo motif checker
 
-The BLAST external-reference dialog provides an optional local motif checker. It is disabled by default. The former InterPro conserved-region status evaluator remains in source for backward compatibility but is not executed and its status controls/column are not shown.
+The BLAST external-reference dialog contains three independent reference sections: UniProt, InterPro, and the optional local Motif checker. The Motif checker is disabled by default. InterPro's existing parameter controls remain visible so old settings and snapshots remain understandable, but the former conserved-region status calculation is retained only for compatibility and is not executed in new runs; its generated status column is not added to new result tables.
 
 Enter motifs separated by `,` or `，`. Matching is case-insensitive and searches the complete hit protein sequence. Literal residues must match exactly; `X` matches one non-gap residue; `-`/`－`/`−` match one gap; `[A/B]` and `(A/B)` (including full-width forms) allow alternatives. Slashless `[ABC]` means one of A, B, or C.
 

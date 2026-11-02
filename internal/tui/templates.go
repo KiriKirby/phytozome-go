@@ -8131,13 +8131,22 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 
 	interProModule := newButtonFlex()
 	interProModule.SetBorder(true)
-	interProModule.SetTitle(" Motif checker ")
+	interProModule.SetTitle(" InterPro ")
 	interProModule.SetTitleAlign(tview.AlignCenter)
 	setFocusBorder(interProModule.Box, false)
 	attachFocusBorder(interProModule.Box)
-	interProModule.AddItem(motifBox, 2, 0, true)
-	interProModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 4, 0, false)
-	interProModule.AddItem(motifInput, 2, 0, false)
+	interProModule.AddItem(interProBox, 3, 0, true)
+	interProModule.AddItem(params, 0, 1, false)
+
+	motifModule := newButtonFlex()
+	motifModule.SetBorder(true)
+	motifModule.SetTitle(" Motif checker ")
+	motifModule.SetTitleAlign(tview.AlignCenter)
+	setFocusBorder(motifModule.Box, false)
+	attachFocusBorder(motifModule.Box)
+	motifModule.AddItem(motifBox, 3, 0, true)
+	motifModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 3, 0, false)
+	motifModule.AddItem(motifInput, 2, 0, false)
 
 	closeWithNav := func(nav NavAction) {
 		result.Nav = nav
@@ -8164,20 +8173,27 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		app.Stop()
 	}
 
-	interProControls := []tview.Primitive{motifBox, motifInput}
+	interProControls := []tview.Primitive{interProBox}
+	for _, box := range settingBoxes {
+		interProControls = append(interProControls, box)
+	}
+	interProControls = append(interProControls, presentCoverage, presentItems, partialCoverage, partialItems)
+	motifControls := []tview.Primitive{motifBox, motifInput}
 	topIndex := 0
 	interProIndex := 0
+	motifIndex := 0
 	setTopFocus := func(index int) {
 		if index < 0 {
-			index = 2
+			index = 3
 		}
-		if index > 2 {
+		if index > 3 {
 			index = 0
 		}
 		topIndex = index
 		setFocusBorder(autoLabelBox.Box, topIndex == 0)
 		setFocusBorder(uniProtBox.Box, topIndex == 1)
 		setFocusBorder(interProModule.Box, topIndex == 2)
+		setFocusBorder(motifModule.Box, topIndex == 3)
 		if topIndex == 0 {
 			app.SetFocus(autoLabelBox)
 			return
@@ -8192,7 +8208,14 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		if interProIndex >= len(interProControls) {
 			interProIndex = len(interProControls) - 1
 		}
-		app.SetFocus(interProControls[interProIndex])
+		if topIndex == 2 {
+			app.SetFocus(interProControls[interProIndex])
+		} else {
+			if motifIndex < 0 || motifIndex >= len(motifControls) {
+				motifIndex = 0
+			}
+			app.SetFocus(motifControls[motifIndex])
+		}
 	}
 	setInterProFocus := func(index int) {
 		if len(interProControls) == 0 {
@@ -8214,6 +8237,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			setFocusBorder(autoLabelBox.Box, true)
 			setFocusBorder(uniProtBox.Box, false)
 			setFocusBorder(interProModule.Box, false)
+			setFocusBorder(motifModule.Box, false)
 			return
 		}
 		if current == uniProtBox {
@@ -8221,6 +8245,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			setFocusBorder(autoLabelBox.Box, false)
 			setFocusBorder(uniProtBox.Box, true)
 			setFocusBorder(interProModule.Box, false)
+			setFocusBorder(motifModule.Box, false)
 			return
 		}
 		for i, primitive := range interProControls {
@@ -8230,6 +8255,18 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				setFocusBorder(autoLabelBox.Box, false)
 				setFocusBorder(uniProtBox.Box, false)
 				setFocusBorder(interProModule.Box, true)
+				setFocusBorder(motifModule.Box, false)
+				return
+			}
+		}
+		for i, primitive := range motifControls {
+			if current == primitive {
+				topIndex = 3
+				motifIndex = i
+				setFocusBorder(autoLabelBox.Box, false)
+				setFocusBorder(uniProtBox.Box, false)
+				setFocusBorder(interProModule.Box, false)
+				setFocusBorder(motifModule.Box, true)
 				return
 			}
 		}
@@ -8243,8 +8280,14 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			uniProtBox.toggleChecked()
 			return true
 		}
-		if interProIndex >= 0 && interProIndex < len(interProControls) {
+		if topIndex == 2 && interProIndex >= 0 && interProIndex < len(interProControls) {
 			if box, ok := interProControls[interProIndex].(*checkboxModule); ok {
+				box.toggleChecked()
+				return true
+			}
+		}
+		if topIndex == 3 && motifIndex == 0 {
+			if box, ok := motifControls[0].(*checkboxModule); ok {
 				box.toggleChecked()
 				return true
 			}
@@ -8255,8 +8298,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	var helpModal *localizedHelpModal
 	showHelp := func() {
 		helpVisible = true
-		if helpModal == nil {
-			helpModal = newLocalizedHelpModal(app, motifCheckerHelpPages(), func() {
+		pages := motifCheckerHelpPages()
+		if topIndex == 2 {
+			pages = interProParameterHelpPages()
+		}
+		{
+			helpModal = newLocalizedHelpModal(app, pages, func() {
 				if closeHelp != nil {
 					closeHelp()
 				}
@@ -8283,20 +8330,18 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	modalBody.AddItem(autoLabelBox, 3, 0, true)
 	modalBody.AddItem(uniProtBox, 3, 0, true)
-	// Keep the motif section content-sized like the two peer switches above;
-	// letting it flex consumed the remaining modal height and produced a large
-	// empty area below the input.
-	modalBody.AddItem(interProModule, 8, 0, true)
+	modalBody.AddItem(interProModule, 0, 1, true)
+	modalBody.AddItem(motifModule, 8, 0, true)
 	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
-	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, and Motif checker. Space toggles the checker. Enter continues or applies. F1 opens motif syntax help."})
+	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, InterPro, and Motif checker. Up/Down moves within the active settings. Space toggles a checkbox. Enter applies. F1 opens context help."})
 
 	messageHeight := 0
 	if strings.TrimSpace(page.Message) != "" {
 		messageHeight = 3
 	}
-	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+8+4, 39, 50)
+	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+16+8+4, 39, 70)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
 	setPageRoot(app, mainRoot)
 	setTopFocus(0)
@@ -8312,6 +8357,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		}
 		if topIndex == 2 {
 			if input, ok := interProControls[interProIndex].(*tview.InputField); ok && inputFieldEditKey(event) {
+				deliverInputFieldKey(input, event, app)
+				return nil
+			}
+		}
+		if topIndex == 3 {
+			if input, ok := motifControls[1].(*tview.InputField); ok && inputFieldEditKey(event) {
 				deliverInputFieldKey(input, event, app)
 				return nil
 			}
@@ -8333,6 +8384,11 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				setTopFocus(1)
 			} else if topIndex == 1 {
 				setTopFocus(2)
+			} else if topIndex == 2 {
+				setTopFocus(3)
+			} else if topIndex == 3 && motifIndex == 0 {
+				motifIndex = 1
+				setTopFocus(3)
 			} else {
 				confirm()
 			}
@@ -8342,9 +8398,18 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				setInterProFocus(interProIndex - 1)
 				return nil
 			}
+			if topIndex == 3 {
+				setTopFocus(2)
+				return nil
+			}
 		case tcell.KeyDown:
 			if topIndex == 2 {
 				setInterProFocus(interProIndex + 1)
+				return nil
+			}
+			if topIndex == 3 {
+				motifIndex = 1
+				setTopFocus(3)
 				return nil
 			}
 		case tcell.KeyLeft:
@@ -8353,7 +8418,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				return nil
 			}
 		case tcell.KeyRight:
-			if topIndex < 2 {
+			if topIndex < 3 {
 				setTopFocus(topIndex + 1)
 				return nil
 			}
