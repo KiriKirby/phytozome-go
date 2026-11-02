@@ -38,9 +38,10 @@ func backgroundFromRoot(root tview.Primitive) tview.Primitive {
 }
 
 func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
-	externalHeight := modalHeightForContent(3+3+2+2+3+7+1+2+1+5+1+4, 36, 46)
-	if externalHeight < 36 || externalHeight > 46 {
-		t.Fatalf("external reference modal height = %d, want within [36,46]", externalHeight)
+	externalHeight := externalReferenceModalHeight(3)
+	expectedExternalHeight := 2 + 3 + 3 + 3 + externalReferenceInterProRows() + externalReferenceMotifRows() + 1 + 2
+	if externalHeight != expectedExternalHeight {
+		t.Fatalf("external reference modal height = %d, want exact content height %d", externalHeight, expectedExternalHeight)
 	}
 
 	familySettingsRows := 3 + 1 + 4 + 1 + 7 + 1 + 4
@@ -56,6 +57,121 @@ func TestBlastSettingsModalHeightsFitCurrentContent(t *testing.T) {
 	filterHeight := modalHeightForContent(3+maxInt(31, 46)+3+2, 50, 58)
 	if filterHeight < 52 || filterHeight > 58 {
 		t.Fatalf("filter modal height = %d, want within [52,58]", filterHeight)
+	}
+}
+
+func TestExternalReferenceModalFitsMotifControlsAndButtonOrder(t *testing.T) {
+	withTestApp(t, 140, 60, func(app *tview.Application, screen tcell.SimulationScreen) error {
+		drawn := make(chan struct{})
+		app.SetAfterDrawFunc(func(current tcell.Screen) {
+			width, height := current.Size()
+			if width != 140 || height != 60 {
+				screen.SetSize(140, 60)
+				go app.QueueUpdateDraw(func() {})
+				return
+			}
+			select {
+			case <-drawn:
+			default:
+				close(drawn)
+			}
+		})
+		go func() {
+			if err := app.Run(); err != nil {
+				t.Errorf("application run failed: %v", err)
+			}
+		}()
+		select {
+		case <-drawn:
+		case <-time.After(2 * time.Second):
+			app.Stop()
+			t.Fatal("external-reference modal was not drawn")
+		}
+		dump := screenDump(screen, 140, 60)
+		app.Stop()
+		for _, text := range []string{
+			"Motif checker",
+			"Check configured motifs in hit sequences",
+			"Motifs (comma-separated)",
+			"Ctrl+V pastes motifs",
+		} {
+			if !strings.Contains(dump, text) {
+				t.Fatalf("external-reference modal should render %q\n%s", text, dump)
+			}
+		}
+		closeAt := strings.Index(dump, "Close (Esc)")
+		pasteAt := strings.Index(dump, "Paste (Ctrl+V)")
+		helpAt := strings.Index(dump, "Help (F1)")
+		if closeAt < 0 || pasteAt <= closeAt || helpAt <= pasteAt {
+			t.Fatalf("button order should be Close, Paste, Help; indexes close=%d paste=%d help=%d\n%s", closeAt, pasteAt, helpAt, dump)
+		}
+		return nil
+	})
+
+	_, err := RunExternalReferenceModal(ExternalReferencePage{
+		Title:                "External references",
+		Message:              "Choose external evidence columns.",
+		AutoLabelInitial:     true,
+		UniProtInitial:       true,
+		InterProInitial:      true,
+		InterProSettings:     InterProConservedRegionSettings{},
+		MotifCheckerInitial:  true,
+		MotifPatternsInitial: "ABC",
+		AllowBack:            true,
+		ConfirmText:          ButtonApply,
+	})
+	if err != nil {
+		t.Fatalf("RunExternalReferenceModal returned error: %v", err)
+	}
+}
+
+func TestExternalReferenceModalCtrlVPastesMotifs(t *testing.T) {
+	oldNewApp := newApp
+	oldRunApp := runApp
+	oldPasteClipboardText := pasteClipboardText
+	defer func() {
+		newApp = oldNewApp
+		runApp = oldRunApp
+		pasteClipboardText = oldPasteClipboardText
+	}()
+
+	pasteClipboardText = func() (string, error) { return "AX-[N/S]", nil }
+	var screenRef tcell.SimulationScreen
+	newApp = func() *tview.Application {
+		configStyles()
+		app := tview.NewApplication().EnableMouse(true).EnablePaste(true)
+		screen := tcell.NewSimulationScreen("UTF-8")
+		if err := screen.Init(); err != nil {
+			t.Fatalf("screen init failed: %v", err)
+		}
+		screen.SetSize(140, 60)
+		app.SetScreen(screen)
+		screenRef = screen
+		return app
+	}
+	runApp = func(app *tview.Application) error {
+		go func() {
+			screenRef.InjectKey(tcell.KeyCtrlV, 0, tcell.ModCtrl)
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if input, ok := app.GetFocus().(*tview.InputField); ok && input.GetText() == "AX-[N/S]" {
+					screenRef.InjectKey(tcell.KeyEnter, 0, tcell.ModNone)
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Error("Ctrl+V did not paste into the motif input")
+			app.Stop()
+		}()
+		return app.Run()
+	}
+
+	result, err := RunExternalReferenceModal(ExternalReferencePage{Title: "External references", ConfirmText: ButtonApply})
+	if err != nil {
+		t.Fatalf("RunExternalReferenceModal returned error: %v", err)
+	}
+	if result.MotifChecker.Motifs != "AX-[N/S]" {
+		t.Fatalf("pasted motifs = %q, want AX-[N/S]", result.MotifChecker.Motifs)
 	}
 }
 

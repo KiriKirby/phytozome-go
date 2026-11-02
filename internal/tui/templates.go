@@ -724,6 +724,8 @@ type pasteStatus struct {
 	focus func()
 }
 
+var pasteClipboardText = readClipboardText
+
 type rowSelectionTable struct {
 	*tview.Table
 	dividerRow   int
@@ -8071,6 +8073,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	motifBox.SetBorder(false)
 	attachFocusBorder(motifBox.Box)
 	motifInput := tview.NewInputField().SetLabel("Motifs (comma-separated)").SetText(motifPatterns).SetFieldWidth(60)
+	motifInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
+	motifInput.SetLabelColor(tview.Styles.SecondaryTextColor)
+	motifPasteStatus := newPasteStatus(func() { app.SetFocus(motifInput) })
+	pasteMotifs := func() {
+		runInputFieldPaste(app, motifInput, motifPasteStatus)
+	}
 
 	settingRows := []struct {
 		label  string
@@ -8125,7 +8133,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	thresholds.AddItem(partialThresholds, 1, 0, false)
 	params.AddItem(thresholds, 2, 0, true)
 	params.AddItem(sectionHeader("Status meaning"), 1, 0, false)
-	params.AddItem(textBlock("present: strong conserved-region support. partial: related support exists but is weaker or shorter. missing: InterPro returned data but no expected conserved evidence was found. uncertain: evidence is too weak or ambiguous to judge."), 5, 0, false)
+	params.AddItem(textBlock("present: strong conserved-region support. partial: related support exists but is weaker or shorter. missing: InterPro returned data but no expected conserved evidence was found. uncertain: evidence is too weak or ambiguous to judge."), 3, 0, false)
 	setFocusBorder(params.Box, false)
 	attachFocusBorder(params.Box)
 
@@ -8135,7 +8143,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	interProModule.SetTitleAlign(tview.AlignCenter)
 	setFocusBorder(interProModule.Box, false)
 	attachFocusBorder(interProModule.Box)
-	interProModule.AddItem(interProBox, 3, 0, true)
+	interProModule.AddItem(interProBox, 1, 0, true)
 	interProModule.AddItem(params, 0, 1, false)
 
 	motifModule := newButtonFlex()
@@ -8144,9 +8152,12 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	motifModule.SetTitleAlign(tview.AlignCenter)
 	setFocusBorder(motifModule.Box, false)
 	attachFocusBorder(motifModule.Box)
-	motifModule.AddItem(motifBox, 3, 0, true)
-	motifModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 3, 0, false)
-	motifModule.AddItem(motifInput, 2, 0, false)
+	motifModule.AddItem(motifBox, 1, 0, true)
+	motifModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 2, 0, false)
+	motifInputRow := tview.NewFlex().SetDirection(tview.FlexColumn)
+	motifInputRow.AddItem(motifInput, 0, 1, false)
+	motifInputRow.AddItem(motifPasteStatus.view, 36, 0, false)
+	motifModule.AddItem(motifInputRow, 1, 0, false)
 
 	closeWithNav := func(nav NavAction) {
 		result.Nav = nav
@@ -8330,18 +8341,22 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	}
 	modalBody.AddItem(autoLabelBox, 3, 0, true)
 	modalBody.AddItem(uniProtBox, 3, 0, true)
-	modalBody.AddItem(interProModule, 0, 1, true)
-	modalBody.AddItem(motifModule, 8, 0, true)
+	modalBody.AddItem(interProModule, externalReferenceInterProRows(), 0, true)
+	modalBody.AddItem(motifModule, externalReferenceMotifRows(), 0, true)
 	addButtonRow(modalBody, closeOnlyModalButtons([]buttonSpec{
+		{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: pasteMotifs, Visible: true},
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
-	addHints(modalBody, []string{"Tab switches between BLAST labels, UniProt, InterPro, and Motif checker. Up/Down moves within the active settings. Space toggles a checkbox. Enter applies. F1 opens context help."})
+	addHints(modalBody, []string{
+		"Tab switches between BLAST labels, UniProt, InterPro, and Motif checker. Up/Down moves within the active settings. Space toggles a checkbox.",
+		"Ctrl+V pastes motifs. Enter applies. F1 opens context help.",
+	})
 
 	messageHeight := 0
 	if strings.TrimSpace(page.Message) != "" {
 		messageHeight = 3
 	}
-	externalReferenceHeight := modalHeightForContent(messageHeight+3+3+16+8+4, 39, 70)
+	externalReferenceHeight := externalReferenceModalHeight(messageHeight)
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), modalBody, 118, externalReferenceHeight)
 	setPageRoot(app, mainRoot)
 	setTopFocus(0)
@@ -8353,6 +8368,10 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		syncFocusFromApp()
 		if shortcutMatchesEvent(ShortcutHelp, event) {
 			showHelp()
+			return nil
+		}
+		if shortcutMatchesEvent(ShortcutPaste, event) {
+			pasteMotifs()
 			return nil
 		}
 		if topIndex == 2 {
@@ -12652,6 +12671,38 @@ func modalHeightForContent(contentRows int, minHeight int, maxHeight int) int {
 	return height
 }
 
+func externalReferenceInterProRows() int {
+	const (
+		outerBorderRows = 2
+		checkboxRows    = 1
+		paramsRows      = 20
+	)
+	return outerBorderRows + checkboxRows + paramsRows
+}
+
+func externalReferenceMotifRows() int {
+	const (
+		borderRows      = 2
+		checkboxRows    = 1
+		descriptionRows = 2
+		inputRows       = 1
+	)
+	return borderRows + checkboxRows + descriptionRows + inputRows
+}
+
+func externalReferenceModalHeight(messageRows int) int {
+	const (
+		modalBorderRows = 2
+		autoLabelRows   = 3
+		uniProtRows     = 3
+		buttonRows      = 1
+		hintRows        = 2
+	)
+	contentRows := modalBorderRows + messageRows + autoLabelRows + uniProtRows +
+		externalReferenceInterProRows() + externalReferenceMotifRows() + buttonRows + hintRows
+	return modalHeightForContent(contentRows, contentRows, 70)
+}
+
 func rowSelectionFirstSortableColumn(columns []TableColumn) int {
 	for i, column := range columns {
 		if column.Sortable {
@@ -13812,7 +13863,7 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 		status.focus()
 	}
 	go func() {
-		text, err := readClipboardText()
+		text, err := pasteClipboardText()
 		if err == nil {
 			text, err = sanitizePastedText(text)
 		}
