@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gdamore/tcell/v2"
+
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/motif"
 	"github.com/KiriKirby/phytozome-go/internal/ncbi"
@@ -281,11 +283,6 @@ var columnHelpText = map[string]string{
 		"Alignment length divided by query length, shown as a percentage. This is a quick query-coverage signal: high values mean most of the query participates in the hit, while low values often indicate a partial domain-only match.",
 		"比对长度除以 query 长度后的百分比。这是快速判断 query coverage 的指标：高值说明 query 大部分参与比对，低值常提示只是局部结构域命中。",
 		"アラインメント長を query 長で割った割合です。query coverage の簡易指標で、高い値は query の大部分がヒットしていること、低い値はドメインだけの部分ヒットである可能性を示します。",
-	),
-	"interpro_conserved_region_status": columnHelp(
-		"Derived InterPro status for conserved-region support. With a query InterPro template, the program compares query conserved evidence against each hit; without a query template, it grades the hit's own conserved-domain evidence. present means enough conserved evidence is found, partial means related but incomplete evidence exists, missing means InterPro lookup succeeded but expected conserved evidence was not found, and uncertain means the evidence is too weak or ambiguous.",
-		"由 InterPro 派生的保守区域支持状态。有 query InterPro 模板时，程序会把 query 的保守证据与每个 hit 比较；没有 query 模板时，会保守地评价 hit 自身的保守结构域证据。present 表示证据足够，partial 表示有相关但不完整的证据，missing 表示查询成功但没有找到预期保守证据，uncertain 表示证据太弱或不明确。",
-		"InterPro から導いた保存領域サポート状態です。query の InterPro テンプレートがある場合は query の保存証拠を各 hit と比較し、ない場合は hit 自身の保存ドメイン証拠を評価します。present は十分な証拠、partial は関連するが不完全な証拠、missing は検索成功だが期待証拠なし、uncertain は証拠が弱いまたは曖昧な状態です。",
 	),
 	"phgo_motif_matches": columnHelp(
 		"One-based motif numbers whose complete patterns were found in the hit protein sequence by the optional PHgo motif checker. Blank means none matched or the checker was not used.",
@@ -1438,8 +1435,8 @@ func (p *Prompter) DetailedReportAction(backTarget error) (string, error) {
 func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenceSettings, error) {
 	defaultInterPro := model.DefaultInterProConservedRegionSettings()
 	initial := ExternalReferenceSettings{
-		AutoLabelBlastHits: true,
-		UseUniProt:         true,
+		AutoLabelBlastHits: false,
+		UseUniProt:         false,
 		UseInterPro:        false,
 		MotifChecker:       model.MotifCheckerSettings{},
 		InterProSettings:   defaultInterPro,
@@ -1458,6 +1455,7 @@ func (p *Prompter) ExternalReferenceSettings(backTarget error) (ExternalReferenc
 		InterProLabel:    p.t("Add InterPro domain-evidence columns"),
 		InterProInitial:  initial.UseInterPro,
 		InterProSettings: tui.InterProConservedRegionSettings{
+			CompareWithQuery:       initial.InterProSettings.CompareWithQuery,
 			UsePfamAccession:       initial.InterProSettings.UsePfamAccession,
 			UseInterProAccession:   initial.InterProSettings.UseInterProAccession,
 			UseSignatureAccession:  initial.InterProSettings.UseSignatureAccession,
@@ -2924,6 +2922,7 @@ func blastRunRows(runs []BlastRunView) [][]model.BlastResultRow {
 func parseInterProSettings(settings tui.InterProConservedRegionSettings) model.InterProConservedRegionSettings {
 	defaults := model.DefaultInterProConservedRegionSettings()
 	out := model.InterProConservedRegionSettings{
+		CompareWithQuery:      settings.CompareWithQuery,
 		UsePfamAccession:      settings.UsePfamAccession,
 		UseInterProAccession:  settings.UseInterProAccession,
 		UseSignatureAccession: settings.UseSignatureAccession,
@@ -5205,7 +5204,6 @@ func blastColumnValue(row model.BlastResultRow, columnID string) string {
 		"target_uniprot_canonical_length_percent": row.TargetUniProtCanonicalLengthPercent,
 		"align_query_length_percent":              blastAlignQueryLengthPercent(row),
 		"phgo_motif_matches":                      row.PhgoMotifMatches,
-		"interpro_conserved_region_status":        row.InterProConservedRegionStatus,
 		"interpro_entry_name":                     row.InterProEntryName,
 		"interpro_entry_type":                     row.InterProEntryType,
 		"interpro_coverage_percent":               row.InterProCoveragePercent,
@@ -5228,6 +5226,24 @@ func blastColumnValue(row model.BlastResultRow, columnID string) string {
 		"positives":                               fmt.Sprintf("%d", row.Positives),
 		"gaps":                                    fmt.Sprintf("%d", row.Gaps),
 		"query_length":                            fmt.Sprintf("%d", row.QueryLength),
+		"query_label_name":                        row.QueryLabelName,
+		"query_phgo_alias":                        row.QueryPhgoAliases,
+		"query_sequence":                          row.QuerySequence,
+		"query_gene_id":                           row.QueryGeneID,
+		"query_protein_id":                        row.QueryProteinID,
+		"query_transcript_id":                     row.QueryTranscriptID,
+		"query_source_database":                   row.QuerySourceDatabase,
+		"query_organism":                          row.QueryOrganism,
+		"query_annotation":                        row.QueryAnnotation,
+		"query_uniprot_accession":                 row.QueryUniProtAccession,
+		"query_motif_matches":                     row.QueryMotifMatches,
+		"query_interpro_entry_name":               row.QueryInterProEntryName,
+		"query_interpro_entry_type":               row.QueryInterProEntryType,
+		"query_interpro_coverage_percent":         row.QueryInterProCoveragePercent,
+		"query_interpro_match_regions":            row.QueryInterProMatchRegions,
+		"query_interpro_accessions":               row.QueryInterProAccessions,
+		"query_interpro_signature_accessions":     row.QueryInterProSignatureAccessions,
+		"query_interpro_pfam_accessions":          row.QueryInterProPfamAccessions,
 		"uniprot_canonical_length":                row.UniProtCanonicalLength,
 		"jbrowse_name":                            row.JBrowseName,
 		"target_id":                               fmt.Sprintf("%d", row.TargetID),
@@ -5398,11 +5414,14 @@ func buildBlastSelectionTable(rows []model.BlastResultRow) ([]tui.TableColumn, [
 	tableRows := make([]tui.TableRow, 0, len(rows))
 	for _, row := range rows {
 		cells := make([]string, 0, len(defs))
+		colors := make([]tcell.Color, 0, len(defs))
 		for _, def := range defs {
 			cells = append(cells, tableDisplayValueForColumn(def.ID, def.Value(row)))
+			colors = append(colors, blastInterProComparisonColor(row, def.ID))
 		}
 		tableRows = append(tableRows, tui.TableRow{
 			Cells:       cells,
+			CellColors:  colors,
 			Detail:      blastRowDetail(row),
 			DetailPages: blastRowDetailPages(row),
 		})
@@ -6642,18 +6661,6 @@ func blastDisplayColumns(rows []model.BlastResultRow) []tableColumnValue[model.B
 			ID: "phgo_motif_matches", Header: ColumnCompactHeader("phgo_motif_matches", options), Sortable: true,
 			Value: func(row model.BlastResultRow) string { return strings.TrimSpace(row.PhgoMotifMatches) },
 		},
-		"interpro_conserved_region_status": {
-			ID:        "interpro_conserved_region_status",
-			Header:    ColumnCompactHeader("interpro_conserved_region_status", options),
-			Sortable:  true,
-			Reference: "interpro",
-			Value: func(row model.BlastResultRow) string {
-				if !row.InterProReferenceEnabled {
-					return ""
-				}
-				return strings.TrimSpace(row.InterProConservedRegionStatus)
-			},
-		},
 		"target_length": {
 			ID:       "target_length",
 			Header:   ColumnCompactHeader("target_length", options),
@@ -6738,6 +6745,24 @@ func blastDisplayColumns(rows []model.BlastResultRow) []tableColumnValue[model.B
 				return strings.TrimSpace(row.InterProMatchRegions)
 			},
 		},
+		"interpro_accessions": {ID: "interpro_accessions", Header: ColumnCompactHeader("interpro_accessions", options), Sortable: true, Reference: "interpro", Value: func(row model.BlastResultRow) string {
+			if !blastRowHasInterProData(row) {
+				return ""
+			}
+			return strings.TrimSpace(row.InterProAccessions)
+		}},
+		"interpro_signature_accessions": {ID: "interpro_signature_accessions", Header: ColumnCompactHeader("interpro_signature_accessions", options), Sortable: true, Reference: "interpro", Value: func(row model.BlastResultRow) string {
+			if !blastRowHasInterProData(row) {
+				return ""
+			}
+			return strings.TrimSpace(row.InterProSignatureAccessions)
+		}},
+		"interpro_pfam_accessions": {ID: "interpro_pfam_accessions", Header: ColumnCompactHeader("interpro_pfam_accessions", options), Sortable: true, Reference: "interpro", Value: func(row model.BlastResultRow) string {
+			if !blastRowHasInterProData(row) {
+				return ""
+			}
+			return strings.TrimSpace(row.InterProPfamAccessions)
+		}},
 		"species": {
 			ID:       "species",
 			Header:   ColumnCompactHeader("species", options),
@@ -6835,7 +6860,11 @@ func blastRowsHaveInterProReference(rows []model.BlastResultRow) bool {
 func blastRowHasInterProData(row model.BlastResultRow) bool {
 	return strings.TrimSpace(row.InterProAccessions) != "" ||
 		strings.TrimSpace(row.InterProEntryName) != "" ||
-		strings.TrimSpace(row.InterProConservedRegionStatus) != ""
+		strings.TrimSpace(row.InterProEntryType) != "" ||
+		strings.TrimSpace(row.InterProCoveragePercent) != "" ||
+		strings.TrimSpace(row.InterProMatchRegions) != "" ||
+		strings.TrimSpace(row.InterProSignatureAccessions) != "" ||
+		strings.TrimSpace(row.InterProPfamAccessions) != ""
 }
 
 func blastColumnIsInterProReference(id string) bool {
@@ -7771,81 +7800,87 @@ func keywordRowDetailPages(row model.KeywordResultRow) []tui.DetailPage {
 
 func blastRowDetail(row model.BlastResultRow) string {
 	values := map[string]string{
-		"source_database":                         row.SourceDatabase,
-		"blast_program":                           row.BlastProgram,
-		"label_name":                              blastLabelName(row),
-		"labelname_type":                          strings.TrimSpace(row.LabelNameType),
-		"phgo_alias":                              strings.TrimSpace(row.PhgoAliases),
-		"blast_labelname":                         strings.TrimSpace(row.BlastLabelName),
-		"blast_geneid":                            strings.TrimSpace(row.BlastGeneID),
-		"hit_number":                              fmt.Sprintf("%d", row.HitNumber),
-		"hsp_number":                              fmt.Sprintf("%d", row.HSPNumber),
-		"protein":                                 row.Protein,
-		"subject_id":                              firstNonEmptyText(row.SubjectID, row.Protein),
-		"species":                                 row.Species,
-		"e_value":                                 row.EValue,
-		"percent_identity":                        fmt.Sprintf("%.2f", row.PercentIdentity),
-		"uniprot_accession":                       strings.TrimSpace(row.UniProtAccession),
-		"uniprot_entry_name":                      strings.TrimSpace(row.UniProtEntryName),
-		"uniprot_reviewed":                        strings.TrimSpace(row.UniProtReviewed),
-		"uniprot_protein_name":                    strings.TrimSpace(row.UniProtProteinName),
-		"uniprot_gene_names":                      strings.TrimSpace(row.UniProtGeneNames),
-		"uniprot_organism":                        strings.TrimSpace(row.UniProtOrganism),
-		"uniprot_organism_id":                     strings.TrimSpace(row.UniProtOrganismID),
-		"uniprot_keywords":                        strings.TrimSpace(row.UniProtKeywords),
-		"uniprot_ec":                              strings.TrimSpace(row.UniProtEC),
-		"uniprot_go":                              strings.TrimSpace(row.UniProtGO),
-		"uniprot_go_ids":                          strings.TrimSpace(row.UniProtGOIDs),
-		"uniprot_function":                        strings.TrimSpace(row.UniProtFunction),
-		"uniprot_catalytic_activity":              strings.TrimSpace(row.UniProtCatalyticActivity),
-		"uniprot_pathway":                         strings.TrimSpace(row.UniProtPathway),
-		"uniprot_subcellular_location":            strings.TrimSpace(row.UniProtSubcellularLocation),
-		"uniprot_protein_existence":               strings.TrimSpace(row.UniProtProteinExistence),
-		"uniprot_annotation_score":                strings.TrimSpace(row.UniProtAnnotationScore),
-		"uniprot_fragment":                        strings.TrimSpace(row.UniProtFragment),
-		"uniprot_sequence_caution":                strings.TrimSpace(row.UniProtSequenceCaution),
-		"uniprot_pfam":                            strings.TrimSpace(row.UniProtPfam),
-		"uniprot_interpro":                        strings.TrimSpace(row.UniProtInterPro),
-		"uniprot_domain":                          strings.TrimSpace(row.UniProtDomain),
-		"uniprot_region":                          strings.TrimSpace(row.UniProtRegion),
-		"uniprot_motif":                           strings.TrimSpace(row.UniProtMotif),
-		"uniprot_active_site":                     strings.TrimSpace(row.UniProtActiveSite),
-		"uniprot_binding_site":                    strings.TrimSpace(row.UniProtBindingSite),
-		"uniprot_alphafolddb":                     strings.TrimSpace(row.UniProtAlphaFoldDB),
-		"uniprot_pdb":                             strings.TrimSpace(row.UniProtPDB),
-		"interpro_conserved_region_status":        strings.TrimSpace(row.InterProConservedRegionStatus),
-		"phgo_motif_matches":                      strings.TrimSpace(row.PhgoMotifMatches),
-		"interpro_entry_name":                     strings.TrimSpace(row.InterProEntryName),
-		"interpro_entry_type":                     strings.TrimSpace(row.InterProEntryType),
-		"interpro_coverage_percent":               strings.TrimSpace(row.InterProCoveragePercent),
-		"interpro_match_regions":                  strings.TrimSpace(row.InterProMatchRegions),
-		"interpro_accessions":                     strings.TrimSpace(row.InterProAccessions),
-		"interpro_signature_accessions":           strings.TrimSpace(row.InterProSignatureAccessions),
-		"interpro_pfam_accessions":                strings.TrimSpace(row.InterProPfamAccessions),
-		"target_uniprot_canonical_length_percent": strings.TrimSpace(row.TargetUniProtCanonicalLengthPercent),
-		"align_query_length_percent":              blastAlignQueryLengthPercent(row),
-		"target_length":                           fmt.Sprintf("%d", row.TargetLength),
-		"align_len":                               fmt.Sprintf("%d", row.AlignLength),
-		"strands":                                 row.Strands,
-		"query_id":                                row.QueryID,
-		"query_from":                              fmt.Sprintf("%d", row.QueryFrom),
-		"query_to":                                fmt.Sprintf("%d", row.QueryTo),
-		"target_from":                             fmt.Sprintf("%d", row.TargetFrom),
-		"target_to":                               fmt.Sprintf("%d", row.TargetTo),
-		"bitscore":                                fmt.Sprintf("%.2f", row.Bitscore),
-		"mismatches":                              fmt.Sprintf("%d", row.Mismatches),
-		"gap_openings":                            fmt.Sprintf("%d", row.GapOpenings),
-		"identical":                               fmt.Sprintf("%d", row.Identical),
-		"positives":                               fmt.Sprintf("%d", row.Positives),
-		"gaps":                                    fmt.Sprintf("%d", row.Gaps),
-		"query_length":                            fmt.Sprintf("%d", row.QueryLength),
-		"uniprot_canonical_length":                strings.TrimSpace(row.UniProtCanonicalLength),
-		"jbrowse_name":                            row.JBrowseName,
-		"target_id":                               fmt.Sprintf("%d", row.TargetID),
-		"sequence_id":                             row.SequenceID,
-		"transcript_id":                           row.TranscriptID,
-		"defline":                                 row.Defline,
-		"gene_report_url":                         row.GeneReportURL,
+		"source_database":                          row.SourceDatabase,
+		"blast_program":                            row.BlastProgram,
+		"label_name":                               blastLabelName(row),
+		"labelname_type":                           strings.TrimSpace(row.LabelNameType),
+		"phgo_alias":                               strings.TrimSpace(row.PhgoAliases),
+		"blast_labelname":                          strings.TrimSpace(row.BlastLabelName),
+		"blast_geneid":                             strings.TrimSpace(row.BlastGeneID),
+		"hit_number":                               fmt.Sprintf("%d", row.HitNumber),
+		"hsp_number":                               fmt.Sprintf("%d", row.HSPNumber),
+		"protein":                                  row.Protein,
+		"subject_id":                               firstNonEmptyText(row.SubjectID, row.Protein),
+		"species":                                  row.Species,
+		"e_value":                                  row.EValue,
+		"percent_identity":                         fmt.Sprintf("%.2f", row.PercentIdentity),
+		"uniprot_accession":                        strings.TrimSpace(row.UniProtAccession),
+		"uniprot_entry_name":                       strings.TrimSpace(row.UniProtEntryName),
+		"uniprot_reviewed":                         strings.TrimSpace(row.UniProtReviewed),
+		"uniprot_protein_name":                     strings.TrimSpace(row.UniProtProteinName),
+		"uniprot_gene_names":                       strings.TrimSpace(row.UniProtGeneNames),
+		"uniprot_organism":                         strings.TrimSpace(row.UniProtOrganism),
+		"uniprot_organism_id":                      strings.TrimSpace(row.UniProtOrganismID),
+		"uniprot_keywords":                         strings.TrimSpace(row.UniProtKeywords),
+		"uniprot_ec":                               strings.TrimSpace(row.UniProtEC),
+		"uniprot_go":                               strings.TrimSpace(row.UniProtGO),
+		"uniprot_go_ids":                           strings.TrimSpace(row.UniProtGOIDs),
+		"uniprot_function":                         strings.TrimSpace(row.UniProtFunction),
+		"uniprot_catalytic_activity":               strings.TrimSpace(row.UniProtCatalyticActivity),
+		"uniprot_pathway":                          strings.TrimSpace(row.UniProtPathway),
+		"uniprot_subcellular_location":             strings.TrimSpace(row.UniProtSubcellularLocation),
+		"uniprot_protein_existence":                strings.TrimSpace(row.UniProtProteinExistence),
+		"uniprot_annotation_score":                 strings.TrimSpace(row.UniProtAnnotationScore),
+		"uniprot_fragment":                         strings.TrimSpace(row.UniProtFragment),
+		"uniprot_sequence_caution":                 strings.TrimSpace(row.UniProtSequenceCaution),
+		"uniprot_pfam":                             strings.TrimSpace(row.UniProtPfam),
+		"uniprot_interpro":                         strings.TrimSpace(row.UniProtInterPro),
+		"uniprot_domain":                           strings.TrimSpace(row.UniProtDomain),
+		"uniprot_region":                           strings.TrimSpace(row.UniProtRegion),
+		"uniprot_motif":                            strings.TrimSpace(row.UniProtMotif),
+		"uniprot_active_site":                      strings.TrimSpace(row.UniProtActiveSite),
+		"uniprot_binding_site":                     strings.TrimSpace(row.UniProtBindingSite),
+		"uniprot_alphafolddb":                      strings.TrimSpace(row.UniProtAlphaFoldDB),
+		"uniprot_pdb":                              strings.TrimSpace(row.UniProtPDB),
+		"phgo_motif_matches":                       strings.TrimSpace(row.PhgoMotifMatches),
+		"interpro_entry_name":                      strings.TrimSpace(row.InterProEntryName),
+		"interpro_entry_type":                      strings.TrimSpace(row.InterProEntryType),
+		"interpro_coverage_percent":                strings.TrimSpace(row.InterProCoveragePercent),
+		"interpro_match_regions":                   strings.TrimSpace(row.InterProMatchRegions),
+		"interpro_accessions":                      strings.TrimSpace(row.InterProAccessions),
+		"interpro_signature_accessions":            strings.TrimSpace(row.InterProSignatureAccessions),
+		"interpro_pfam_accessions":                 strings.TrimSpace(row.InterProPfamAccessions),
+		"interpro_entry_name_comparison":           strings.TrimSpace(row.InterProEntryNameComparison),
+		"interpro_entry_type_comparison":           strings.TrimSpace(row.InterProEntryTypeComparison),
+		"interpro_coverage_comparison":             strings.TrimSpace(row.InterProCoverageComparison),
+		"interpro_match_regions_comparison":        strings.TrimSpace(row.InterProMatchRegionsComparison),
+		"interpro_accessions_comparison":           strings.TrimSpace(row.InterProAccessionsComparison),
+		"interpro_signature_accessions_comparison": strings.TrimSpace(row.InterProSignatureAccessionsComparison),
+		"interpro_pfam_accessions_comparison":      strings.TrimSpace(row.InterProPfamAccessionsComparison),
+		"target_uniprot_canonical_length_percent":  strings.TrimSpace(row.TargetUniProtCanonicalLengthPercent),
+		"align_query_length_percent":               blastAlignQueryLengthPercent(row),
+		"target_length":                            fmt.Sprintf("%d", row.TargetLength),
+		"align_len":                                fmt.Sprintf("%d", row.AlignLength),
+		"strands":                                  row.Strands,
+		"query_id":                                 row.QueryID,
+		"query_from":                               fmt.Sprintf("%d", row.QueryFrom),
+		"query_to":                                 fmt.Sprintf("%d", row.QueryTo),
+		"target_from":                              fmt.Sprintf("%d", row.TargetFrom),
+		"target_to":                                fmt.Sprintf("%d", row.TargetTo),
+		"bitscore":                                 fmt.Sprintf("%.2f", row.Bitscore),
+		"mismatches":                               fmt.Sprintf("%d", row.Mismatches),
+		"gap_openings":                             fmt.Sprintf("%d", row.GapOpenings),
+		"identical":                                fmt.Sprintf("%d", row.Identical),
+		"positives":                                fmt.Sprintf("%d", row.Positives),
+		"gaps":                                     fmt.Sprintf("%d", row.Gaps),
+		"query_length":                             fmt.Sprintf("%d", row.QueryLength),
+		"uniprot_canonical_length":                 strings.TrimSpace(row.UniProtCanonicalLength),
+		"jbrowse_name":                             row.JBrowseName,
+		"target_id":                                fmt.Sprintf("%d", row.TargetID),
+		"sequence_id":                              row.SequenceID,
+		"transcript_id":                            row.TranscriptID,
+		"defline":                                  row.Defline,
+		"gene_report_url":                          row.GeneReportURL,
 	}
 	ids := blastDetailColumnIDsForRow(row)
 	lines := make([]string, 0, len(ids))
@@ -7856,6 +7891,10 @@ func blastRowDetail(row model.BlastResultRow) string {
 }
 
 func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
+	queryRef := model.BlastResultRow{}
+	if row.QueryReferenceData != nil {
+		queryRef = *row.QueryReferenceData
+	}
 	values := map[string]string{
 		"source_database":                         row.SourceDatabase,
 		"blast_program":                           row.BlastProgram,
@@ -7899,7 +7938,6 @@ func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
 		"uniprot_binding_site":                    strings.TrimSpace(row.UniProtBindingSite),
 		"uniprot_alphafolddb":                     strings.TrimSpace(row.UniProtAlphaFoldDB),
 		"uniprot_pdb":                             strings.TrimSpace(row.UniProtPDB),
-		"interpro_conserved_region_status":        strings.TrimSpace(row.InterProConservedRegionStatus),
 		"phgo_motif_matches":                      strings.TrimSpace(row.PhgoMotifMatches),
 		"interpro_entry_name":                     strings.TrimSpace(row.InterProEntryName),
 		"interpro_entry_type":                     strings.TrimSpace(row.InterProEntryType),
@@ -7939,8 +7977,59 @@ func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
 	display := func(id string, value string) string {
 		return blastDetailDisplayValue(id, row, value)
 	}
-	pages := make([]tui.DetailPage, 0, 4)
+	pages := make([]tui.DetailPage, 0, 5)
 	pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("Source", blastRowPrimaryDetailIDs(row), values, label, display, nil))
+	pages = append(pages, tui.DetailPage{Title: "Query Metadata", Items: []tui.DetailItem{
+		{Label: "query label_name", Value: displayPreviewValue(row.QueryLabelName)},
+		{Label: "query phgo_alias", Value: displayPreviewValue(row.QueryPhgoAliases)},
+		{Label: "query sequence data", Value: displayPreviewValue(row.QuerySequence)},
+		{Label: "query geneid", Value: displayPreviewValue(row.QueryGeneID)},
+		{Label: "query protein_id", Value: displayPreviewValue(row.QueryProteinID)},
+		{Label: "query transcript", Value: displayPreviewValue(row.QueryTranscriptID)},
+		{Label: "query source_database", Value: displayPreviewValue(row.QuerySourceDatabase)},
+		{Label: "query organism", Value: displayPreviewValue(row.QueryOrganism)},
+		{Label: "query annotation", Value: displayPreviewValue(row.QueryAnnotation)},
+		{Label: "query UniProt accession", Value: displayPreviewValue(row.QueryUniProtAccession)},
+		{Label: "query UniProt entry name", Value: displayPreviewValue(queryRef.UniProtEntryName)},
+		{Label: "query UniProt reviewed", Value: displayPreviewValue(queryRef.UniProtReviewed)},
+		{Label: "query UniProt protein name", Value: displayPreviewValue(queryRef.UniProtProteinName)},
+		{Label: "query UniProt gene names", Value: displayPreviewValue(queryRef.UniProtGeneNames)},
+		{Label: "query UniProt organism", Value: displayPreviewValue(queryRef.UniProtOrganism)},
+		{Label: "query UniProt organism ID", Value: displayPreviewValue(queryRef.UniProtOrganismID)},
+		{Label: "query UniProt keywords", Value: displayPreviewValue(queryRef.UniProtKeywords)},
+		{Label: "query UniProt EC", Value: displayPreviewValue(queryRef.UniProtEC)},
+		{Label: "query UniProt GO", Value: displayPreviewValue(queryRef.UniProtGO)},
+		{Label: "query UniProt GO IDs", Value: displayPreviewValue(queryRef.UniProtGOIDs)},
+		{Label: "query UniProt function", Value: displayPreviewValue(queryRef.UniProtFunction)},
+		{Label: "query UniProt catalytic activity", Value: displayPreviewValue(queryRef.UniProtCatalyticActivity)},
+		{Label: "query UniProt pathway", Value: displayPreviewValue(queryRef.UniProtPathway)},
+		{Label: "query UniProt subcellular location", Value: displayPreviewValue(queryRef.UniProtSubcellularLocation)},
+		{Label: "query UniProt protein existence", Value: displayPreviewValue(queryRef.UniProtProteinExistence)},
+		{Label: "query UniProt annotation score", Value: displayPreviewValue(queryRef.UniProtAnnotationScore)},
+		{Label: "query UniProt fragment", Value: displayPreviewValue(queryRef.UniProtFragment)},
+		{Label: "query UniProt sequence caution", Value: displayPreviewValue(queryRef.UniProtSequenceCaution)},
+		{Label: "query UniProt Pfam", Value: displayPreviewValue(queryRef.UniProtPfam)},
+		{Label: "query UniProt InterPro", Value: displayPreviewValue(queryRef.UniProtInterPro)},
+		{Label: "query UniProt domain", Value: displayPreviewValue(queryRef.UniProtDomain)},
+		{Label: "query UniProt region", Value: displayPreviewValue(queryRef.UniProtRegion)},
+		{Label: "query UniProt motif", Value: displayPreviewValue(queryRef.UniProtMotif)},
+		{Label: "query UniProt active site", Value: displayPreviewValue(queryRef.UniProtActiveSite)},
+		{Label: "query UniProt binding site", Value: displayPreviewValue(queryRef.UniProtBindingSite)},
+		{Label: "query UniProt AlphaFoldDB", Value: displayPreviewValue(queryRef.UniProtAlphaFoldDB)},
+		{Label: "query UniProt PDB", Value: displayPreviewValue(queryRef.UniProtPDB)},
+		{Label: "query motif matches", Value: displayPreviewValue(row.QueryMotifMatches)},
+		{Label: "query InterPro entry name", Value: displayPreviewValue(row.QueryInterProEntryName)},
+		{Label: "query InterPro entry type", Value: displayPreviewValue(row.QueryInterProEntryType)},
+		{Label: "query InterPro coverage (%)", Value: displayPreviewValue(row.QueryInterProCoveragePercent)},
+		{Label: "query InterPro match regions", Value: displayPreviewValue(row.QueryInterProMatchRegions)},
+		{Label: "query InterPro accessions", Value: displayPreviewValue(row.QueryInterProAccessions)},
+		{Label: "query InterPro signature accessions", Value: displayPreviewValue(row.QueryInterProSignatureAccessions)},
+		{Label: "query InterPro Pfam accessions", Value: displayPreviewValue(row.QueryInterProPfamAccessions)},
+		{Label: "query sequence", Value: displayPreviewValue(row.QueryID)},
+		{Label: "query length", Value: fmt.Sprintf("%d", row.QueryLength)},
+		{Label: "query from", Value: fmt.Sprintf("%d", row.QueryFrom)},
+		{Label: "query to", Value: fmt.Sprintf("%d", row.QueryTo)},
+	}})
 	if row.UniProtReferenceEnabled {
 		pages = appendDetailPageIfNotEmpty(pages, detailPageFromIDs("UniProt", blastDetailUniProtColumnIDs, values, label, display, nil))
 	}
@@ -7949,6 +8038,35 @@ func blastRowDetailPages(row model.BlastResultRow) []tui.DetailPage {
 	}
 	pages = append(pages, tui.DetailPage{Title: "FASTA", Items: []tui.DetailItem{detailFASTALoadItem()}})
 	return pages
+}
+
+func blastInterProComparisonColor(row model.BlastResultRow, id string) tcell.Color {
+	value := ""
+	switch id {
+	case "interpro_entry_name":
+		value = row.InterProEntryNameComparison
+	case "interpro_entry_type":
+		value = row.InterProEntryTypeComparison
+	case "interpro_coverage_percent":
+		value = row.InterProCoverageComparison
+	case "interpro_match_regions":
+		value = row.InterProMatchRegionsComparison
+	case "interpro_accessions":
+		value = row.InterProAccessionsComparison
+	case "interpro_signature_accessions":
+		value = row.InterProSignatureAccessionsComparison
+	case "interpro_pfam_accessions":
+		value = row.InterProPfamAccessionsComparison
+	}
+	switch value {
+	case "green":
+		return tcell.ColorGreen
+	case "yellow":
+		return tcell.ColorYellow
+	case "red":
+		return tcell.ColorRed
+	}
+	return tcell.ColorDefault
 }
 
 func blastDetailDisplayValue(id string, row model.BlastResultRow, value string) string {

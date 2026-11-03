@@ -246,7 +246,7 @@ var blastDisplayBaseColumnIDsByDatabaseProgram = map[string]map[string][]string{
 }
 
 var blastDisplayUniProtColumnIDs = []string{"uniprot_accession", "uniprot_reviewed", "uniprot_gene_names"}
-var blastDisplayInterProColumnIDs = []string{"interpro_entry_type", "interpro_coverage_percent"}
+var blastDisplayInterProColumnIDs = []string{"interpro_entry_name", "interpro_entry_type", "interpro_coverage_percent", "interpro_match_regions", "interpro_accessions", "interpro_signature_accessions", "interpro_pfam_accessions"}
 
 var blastDetailBaseColumnIDsByDatabaseProgram = map[string]map[string][]string{
 	"phytozome": {

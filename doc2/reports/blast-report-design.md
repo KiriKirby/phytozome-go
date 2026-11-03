@@ -5,6 +5,8 @@ It is an implementation specification, not a marketing document. The report must
 
 The BLAST report shares the same audit foundation as the keyword report, but it must not be limited by keyword-mode chapter logic. BLAST has a much richer state surface: one input box accepts many query formats, execution may be server-side or local, rows may be enriched by UniProt and InterPro, family mode may merge multiple query runs, the filter may rebuild checkbox recommendations, and export may target one reviewed query or every reviewed query. The report must explain that complexity clearly enough for a reviewer who did not watch the terminal session.
 
+Current implementation note: the legacy `InterPro conserved region status` field and its evaluator remain in the model/report compatibility surface for older snapshots, but they are not executed or shown in new BLAST runs. Active InterPro reporting covers the seven annotation columns (entry name, entry type, coverage, match regions, InterPro accessions, signature accessions, and Pfam accessions) plus the original-query comparison setting and Query Metadata provenance.
+
 ## Non-Negotiable Rules
 
 1. The report is passive and observational.

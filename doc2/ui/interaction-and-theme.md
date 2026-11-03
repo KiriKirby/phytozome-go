@@ -4,7 +4,7 @@
 
 - Default text, option labels, control labels, IDs, metadata, and shortcut tokens are white.
 - Explanatory, secondary, inactive, and help prose is light gray.
-- Focused borders and focused titles are pale blue. Primary buttons use the same blue with white text.
+- Focused borders and focused titles are pale blue. Text on pale-blue or pale-yellow selected/focused backgrounds is black, including primary buttons and highlighted rows/cells.
 - Yellow is reserved for warnings and deliberate highlights. Canvas may keep its pale-yellow focus/highlight exception.
 - Green and red retain semantic selected/on and unselected/off meanings.
 

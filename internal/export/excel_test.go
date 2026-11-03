@@ -177,6 +177,23 @@ func TestBlastExcelMotifColorRequiresAllConfiguredMotifs(t *testing.T) {
 	}
 }
 
+func TestBlastExcelInterProComparisonColors(t *testing.T) {
+	row := model.BlastResultRow{
+		InterProEntryNameComparison:    "green",
+		InterProMatchRegionsComparison: "yellow",
+		InterProAccessionsComparison:   "red",
+	}
+	for id, want := range map[string]string{
+		"interpro_entry_name":    excelColorSelectionOn,
+		"interpro_match_regions": excelColorMuted,
+		"interpro_accessions":    excelColorSelectionOff,
+	} {
+		if got := blastExcelCellColorByID(id, row, 0, nil); got != want {
+			t.Fatalf("%s comparison color = %q, want %q", id, got, want)
+		}
+	}
+}
+
 func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t *testing.T) {
 	rows := []model.BlastResultRow{{
 		SourceDatabase: "phytozome",
@@ -190,8 +207,13 @@ func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t 
 		Queries: []model.ExportQueryMetadata{{
 			Index:            1,
 			LabelName:        "C4H",
+			PhgoAliases:      "C4H; CYP73A5",
 			GeneID:           "AT2G30490",
 			OriginalInputURL: "https://phytozome-next.jgi.doe.gov/report/gene/Athaliana_TAIR10/AT2G30490",
+			ExternalReferenceData: &model.BlastResultRow{
+				UniProtAccession: "P92994",
+				UniProtFunction:  "Cinnamate 4-hydroxylase",
+			},
 		}},
 	}, nil)
 	if err != nil {
@@ -215,6 +237,23 @@ func TestBlastExcelExportKeepsResultsSheetHeaderOnFirstRowWhenMetadataPresent(t 
 	}
 	if got, err := file.GetCellValue("Query Metadata", "B2"); err != nil || got != "C4H" {
 		t.Fatalf("Query Metadata!B2 = %q, err=%v, want C4H", got, err)
+	}
+	if got, err := file.GetCellValue("Query Metadata", "C2"); err != nil || got != "C4H; CYP73A5" {
+		t.Fatalf("Query Metadata!C2 = %q, err=%v, want query phgo_alias", got, err)
+	}
+	rowsOnSheet, err := file.GetRows("Query Metadata")
+	if err != nil || len(rowsOnSheet) < 2 {
+		t.Fatalf("read Query Metadata rows: %v, rows=%d", err, len(rowsOnSheet))
+	}
+	functionColumn := -1
+	for i, header := range rowsOnSheet[0] {
+		if header == "uniprot_function" {
+			functionColumn = i
+			break
+		}
+	}
+	if functionColumn < 0 || functionColumn >= len(rowsOnSheet[1]) || rowsOnSheet[1][functionColumn] != "Cinnamate 4-hydroxylase" {
+		t.Fatalf("Query Metadata did not retain full query UniProt function: %#v", rowsOnSheet)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -4010,6 +4011,8 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					return blastQueryRun{Index: i + 1, Item: item, Request: request, Results: results}, nil
 				}
 				results.Rows = prepareBlastRowsForReferences(results.Rows, item, request, w.source.Name())
+				w.enrichBlastQueryItemReferences(queryCtx, &item, references)
+				results.Rows = attachBlastQueryMetadata(results.Rows, item)
 				if references.UseUniProt {
 					w.prefetchBlastRowUniProtAccessions(queryCtx, results.Rows)
 					enriched, enrichErr := w.enrichBlastRowsWithUniProt(queryCtx, results.Rows)
@@ -4021,10 +4024,7 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 					}
 				}
 				if references.UseInterPro {
-					enriched, enrichErr := results.Rows, error(nil)
-					// Retained for snapshot/backward compatibility; conserved-region status execution is disabled.
-					_ = item
-					_ = references.InterProSettings
+					enriched, enrichErr := w.enrichBlastRowsWithInterPro(queryCtx, item, results.Rows, references.InterProSettings)
 					if errors.Is(enrichErr, context.Canceled) || errors.Is(enrichErr, tui.ErrTaskCancelled) || errors.Is(enrichErr, prompt.ErrBackToQueryInput) {
 						return blastQueryRun{}, enrichErr
 					}
@@ -4158,6 +4158,100 @@ func (w *BlastWizard) executeConfiguredBlastBatchRuns(ctx context.Context, prepa
 	}, func(taskCtx context.Context, update func(int, string)) ([]blastQueryRun, error) {
 		return run(updateWithContext(mergeContexts(ctx, taskCtx), update))
 	})
+}
+
+func (w *BlastWizard) enrichBlastQueryItemReferences(ctx context.Context, item *blastQueryItem, references externalReferenceConfig) {
+	if item == nil || item.QuerySource == nil || (!references.UseUniProt && !references.UseInterPro && !references.MotifChecker.Enabled) {
+		return
+	}
+	row := w.interProQueryLookupRow(*item, ctx)
+	data := model.BlastResultRow{}
+	var (
+		uniProtEntry  uniprot.Entry
+		uniProtOK     bool
+		interProEntry interpro.Entry
+		interProOK    bool
+		lookupWorkers sync.WaitGroup
+	)
+	if references.UseUniProt {
+		lookupWorkers.Add(1)
+		go func() {
+			defer lookupWorkers.Done()
+			uniProtEntry, uniProtOK, _ = w.lookupUniProtEntry(ctx, w.sharedUniProtClient(), row)
+		}()
+	}
+	if references.UseInterPro {
+		lookupWorkers.Add(1)
+		go func() {
+			defer lookupWorkers.Done()
+			interProEntry, interProOK, _ = w.lookupInterProEntry(ctx, w.sharedInterProClient(), row)
+		}()
+	}
+	lookupWorkers.Wait()
+	if references.UseUniProt {
+		data.UniProtReferenceEnabled = true
+		if uniProtOK {
+			applyUniProtEntry(&data, uniProtEntry)
+		}
+	}
+	if references.UseInterPro {
+		data.InterProReferenceEnabled = true
+		if interProOK {
+			applyInterProEntry(&data, interProEntry)
+		}
+	}
+	if references.MotifChecker.Enabled {
+		data.MotifCheckerEnabled = true
+		data.PhgoMotifPatterns = references.MotifChecker.Motifs
+		matches := motif.MatchingIndexes(item.QuerySource.Sequence, motif.SplitList(references.MotifChecker.Motifs))
+		values := make([]string, len(matches))
+		for i, match := range matches {
+			values[i] = strconv.Itoa(match)
+		}
+		data.PhgoMotifMatches = strings.Join(values, ",")
+	}
+	copySource := *item.QuerySource
+	if strings.TrimSpace(copySource.UniProtAccession) == "" {
+		copySource.UniProtAccession = strings.TrimSpace(data.UniProtAccession)
+	}
+	copySource.ExternalReferenceData = &data
+	item.QuerySource = &copySource
+}
+
+func attachBlastQueryMetadata(rows []model.BlastResultRow, item blastQueryItem) []model.BlastResultRow {
+	if item.QuerySource == nil {
+		return rows
+	}
+	source := item.QuerySource
+	var refs model.BlastResultRow
+	if source.ExternalReferenceData != nil {
+		refs = *source.ExternalReferenceData
+	}
+	for i := range rows {
+		rows[i].QueryLabelName = firstNonEmpty(source.LabelName, item.LabelName)
+		rows[i].QueryPhgoAliases = source.PhgoAliases
+		rows[i].QuerySequence = source.Sequence
+		rows[i].QueryGeneID = source.GeneID
+		rows[i].QueryProteinID = source.ProteinID
+		rows[i].QueryTranscriptID = source.TranscriptID
+		rows[i].QuerySourceDatabase = source.SourceDatabase
+		rows[i].QueryOrganism = source.OrganismShort
+		rows[i].QueryAnnotation = source.Annotation
+		rows[i].QueryUniProtAccession = refs.UniProtAccession
+		rows[i].QueryMotifMatches = refs.PhgoMotifMatches
+		rows[i].QueryInterProEntryName = refs.InterProEntryName
+		rows[i].QueryInterProEntryType = refs.InterProEntryType
+		rows[i].QueryInterProCoveragePercent = refs.InterProCoveragePercent
+		rows[i].QueryInterProMatchRegions = refs.InterProMatchRegions
+		rows[i].QueryInterProAccessions = refs.InterProAccessions
+		rows[i].QueryInterProSignatureAccessions = refs.InterProSignatureAccessions
+		rows[i].QueryInterProPfamAccessions = refs.InterProPfamAccessions
+		if source.ExternalReferenceData != nil {
+			copyRefs := *source.ExternalReferenceData
+			rows[i].QueryReferenceData = &copyRefs
+		}
+	}
+	return rows
 }
 
 func blastRunTaskTitle(queryCount int) string {
@@ -6012,19 +6106,218 @@ func (w *BlastWizard) enrichBlastRowsWithInterProProgress(ctx context.Context, c
 		}
 		for _, rowIndex := range group.Rows {
 			applyInterProEntry(&rows[rowIndex], result.entry)
-			rows[rowIndex].InterProConservedRegionStatus = interProConservedRegionStatus(queryEntry, queryOK, result.entry, settings)
+			applyInterProQueryComparisons(&rows[rowIndex], queryEntry, queryOK, result.entry, settings)
 		}
 	}
 	return rows, nil
+}
+
+func applyInterProQueryComparisons(row *model.BlastResultRow, query interpro.Entry, queryOK bool, hit interpro.Entry, settings model.InterProConservedRegionSettings) {
+	if row == nil || !settings.CompareWithQuery {
+		return
+	}
+	row.InterProCoverageComparison = compareInterProCoverage(query.CoveragePercent, hit.CoveragePercent)
+	if !queryOK {
+		return
+	}
+	row.InterProEntryNameComparison = compareInterProText(query.EntryNames, hit.EntryNames)
+	row.InterProEntryTypeComparison = compareInterProText(query.EntryTypes, hit.EntryTypes)
+	row.InterProMatchRegionsComparison = compareInterProRegions(query.MatchRegions, hit.MatchRegions)
+	row.InterProAccessionsComparison = compareInterProText(query.Accessions, hit.Accessions)
+	row.InterProSignatureAccessionsComparison = compareInterProText(query.SignatureAccessions, hit.SignatureAccessions)
+	row.InterProPfamAccessionsComparison = compareInterProText(query.PfamAccessions, hit.PfamAccessions)
+}
+
+func compareInterProText(query, hit string) string {
+	q, h := normalizeInterProSet(query), normalizeInterProSet(hit)
+	if q == "" || h == "" {
+		return ""
+	}
+	if strings.EqualFold(q, h) {
+		return "green"
+	}
+	if interProSetContains(h, q) {
+		return "yellow"
+	}
+	return ""
+}
+
+var (
+	interProFloatPattern  = regexp.MustCompile(`[-+]?\d*\.?\d+`)
+	interProRegionPattern = regexp.MustCompile(`(\d+)\s*-\s*(\d+)`)
+)
+
+func compareInterProCoverage(query, hit string) string {
+	_ = query
+	h := parseInterProFloat(hit)
+	if h == 0 {
+		return ""
+	}
+	if h == 100 {
+		return "green"
+	}
+	return ""
+}
+
+func parseInterProFloat(value string) float64 {
+	match := interProFloatPattern.FindString(strings.TrimSpace(value))
+	parsed, _ := strconv.ParseFloat(match, 64)
+	return parsed
+}
+
+func normalizeInterProSet(value string) string {
+	parts := uniqueStrings(strings.FieldsFunc(strings.TrimSpace(value), func(r rune) bool { return r == ';' || r == ',' || r == '|' }))
+	for i := range parts {
+		parts[i] = strings.ToLower(strings.TrimSpace(parts[i]))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
+}
+
+func interProSetContains(haystack, needle string) bool {
+	h, n := strings.Split(haystack, ";"), strings.Split(needle, ";")
+	set := make(map[string]struct{}, len(h))
+	for _, value := range h {
+		set[value] = struct{}{}
+	}
+	for _, value := range n {
+		if _, ok := set[value]; !ok {
+			return false
+		}
+	}
+	return len(n) > 0
+}
+
+func compareInterProRegions(query, hit string) string {
+	q, h := parseInterProRegions(query), parseInterProRegions(hit)
+	if len(q) == 0 || len(h) == 0 {
+		return ""
+	}
+	if equalInterProRegions(q, h) {
+		return "green"
+	}
+	if sameInterProRegionItems(q, h) {
+		return "red"
+	}
+	if sharedInterProRegionItemsSameLength(q, h) {
+		return "yellow"
+	}
+	return ""
+}
+
+type interProRegionValue struct {
+	key    string
+	length int
+}
+
+func parseInterProRegions(value string) []interProRegionValue {
+	var out []interProRegionValue
+	for _, part := range strings.FieldsFunc(strings.TrimSpace(value), func(r rune) bool { return r == ';' || r == ',' }) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key := part
+		if idx := strings.Index(part, ":"); idx >= 0 {
+			key, part = strings.TrimSpace(part[:idx]), strings.TrimSpace(part[idx+1:])
+		}
+		match := interProRegionPattern.FindStringSubmatch(part)
+		if len(match) != 3 {
+			continue
+		}
+		start, _ := strconv.Atoi(match[1])
+		end, _ := strconv.Atoi(match[2])
+		if end < start {
+			start, end = end, start
+		}
+		out = append(out, interProRegionValue{key: strings.ToLower(key), length: end - start + 1})
+	}
+	return out
+}
+
+func equalInterProRegions(left, right []interProRegionValue) bool {
+	return reflect.DeepEqual(interProRegionLengthsByKey(left), interProRegionLengthsByKey(right))
+}
+
+func sameInterProRegionItems(left, right []interProRegionValue) bool {
+	leftCounts, rightCounts := make(map[string]int), make(map[string]int)
+	for _, value := range left {
+		leftCounts[value.key]++
+	}
+	for _, value := range right {
+		rightCounts[value.key]++
+	}
+	return reflect.DeepEqual(leftCounts, rightCounts)
+}
+
+func sharedInterProRegionItemsSameLength(left, right []interProRegionValue) bool {
+	leftByKey, rightByKey := interProRegionLengthsByKey(left), interProRegionLengthsByKey(right)
+	shared := 0
+	for key, leftLengths := range leftByKey {
+		rightLengths, ok := rightByKey[key]
+		if !ok {
+			continue
+		}
+		shared++
+		matchedLength := false
+		for _, leftLength := range leftLengths {
+			for _, rightLength := range rightLengths {
+				if leftLength == rightLength {
+					matchedLength = true
+					break
+				}
+			}
+			if matchedLength {
+				break
+			}
+		}
+		if !matchedLength {
+			return false
+		}
+	}
+	return shared > 0
+}
+
+func interProRegionLengthsByKey(values []interProRegionValue) map[string][]int {
+	out := make(map[string][]int)
+	for _, value := range values {
+		out[value.key] = append(out[value.key], value.length)
+	}
+	for key := range out {
+		sort.Ints(out[key])
+	}
+	return out
 }
 
 func (w *BlastWizard) lookupInterProQueryEntry(ctx context.Context, client *interpro.Client, item blastQueryItem) (interpro.Entry, bool) {
 	if item.QuerySource == nil {
 		return interpro.Entry{}, false
 	}
+	if refs := item.QuerySource.ExternalReferenceData; refs != nil && blastRowHasActiveInterProValues(*refs) {
+		return interpro.Entry{
+			Accession:           strings.TrimSpace(refs.UniProtAccession),
+			Accessions:          refs.InterProAccessions,
+			EntryNames:          refs.InterProEntryName,
+			EntryTypes:          refs.InterProEntryType,
+			CoveragePercent:     refs.InterProCoveragePercent,
+			MatchRegions:        refs.InterProMatchRegions,
+			SignatureAccessions: refs.InterProSignatureAccessions,
+			PfamAccessions:      refs.InterProPfamAccessions,
+		}, true
+	}
 	row := w.interProQueryLookupRow(item, ctx)
 	entry, ok, _ := w.lookupInterProEntry(ctx, client, row)
 	return entry, ok
+}
+
+func blastRowHasActiveInterProValues(row model.BlastResultRow) bool {
+	return strings.TrimSpace(row.InterProEntryName) != "" ||
+		strings.TrimSpace(row.InterProEntryType) != "" ||
+		strings.TrimSpace(row.InterProCoveragePercent) != "" ||
+		strings.TrimSpace(row.InterProMatchRegions) != "" ||
+		strings.TrimSpace(row.InterProAccessions) != "" ||
+		strings.TrimSpace(row.InterProSignatureAccessions) != "" ||
+		strings.TrimSpace(row.InterProPfamAccessions) != ""
 }
 
 func (w *BlastWizard) interProQueryLookupRow(item blastQueryItem, ctx context.Context) model.BlastResultRow {
@@ -7294,15 +7587,8 @@ func parseFamilyBlastRankingOrder(value string) []string {
 func familyBlastReferenceScore(row model.BlastResultRow, settings model.FamilyBlastSettings) int {
 	score := 0
 	if settings.UseInterProReference {
-		switch strings.ToLower(strings.TrimSpace(row.InterProConservedRegionStatus)) {
-		case "present":
-			score += 80
-		case "partial":
-			score += 40
-		case "uncertain":
-			score += 5
-		case "missing":
-			score -= 80
+		if blastRowHasActiveInterProValues(row) {
+			score += 20
 		}
 		if coverage := parseScientificFloatWorkflow(row.InterProCoveragePercent, 0); coverage > 0 {
 			score += int(coverage / 10)
@@ -12399,20 +12685,23 @@ func exportQueryMetadataFromSources(querySources []*model.QuerySequenceSource) [
 			continue
 		}
 		out = append(out, model.ExportQueryMetadata{
-			Index:             len(out) + 1,
-			LabelName:         strings.TrimSpace(source.LabelName),
-			GeneID:            strings.TrimSpace(source.GeneID),
-			ProteinID:         strings.TrimSpace(source.ProteinID),
-			TranscriptID:      strings.TrimSpace(source.TranscriptID),
-			SourceDatabase:    strings.TrimSpace(source.SourceDatabase),
-			SourceProteomeID:  source.SourceProteomeID,
-			SourceJBrowseName: strings.TrimSpace(source.SourceJBrowseName),
-			SourceGenomeLabel: strings.TrimSpace(source.SourceGenomeLabel),
-			OriginalInputURL:  strings.TrimSpace(source.OriginalInputURL),
-			NormalizedURL:     strings.TrimSpace(source.NormalizedURL),
-			OrganismShort:     strings.TrimSpace(source.OrganismShort),
-			Annotation:        strings.TrimSpace(source.Annotation),
-			SequenceLength:    len(sanitizeSequence(source.Sequence)),
+			Index:                 len(out) + 1,
+			LabelName:             strings.TrimSpace(source.LabelName),
+			PhgoAliases:           strings.TrimSpace(source.PhgoAliases),
+			GeneID:                strings.TrimSpace(source.GeneID),
+			ProteinID:             strings.TrimSpace(source.ProteinID),
+			TranscriptID:          strings.TrimSpace(source.TranscriptID),
+			SourceDatabase:        strings.TrimSpace(source.SourceDatabase),
+			SourceProteomeID:      source.SourceProteomeID,
+			SourceJBrowseName:     strings.TrimSpace(source.SourceJBrowseName),
+			SourceGenomeLabel:     strings.TrimSpace(source.SourceGenomeLabel),
+			OriginalInputURL:      strings.TrimSpace(source.OriginalInputURL),
+			NormalizedURL:         strings.TrimSpace(source.NormalizedURL),
+			OrganismShort:         strings.TrimSpace(source.OrganismShort),
+			Annotation:            strings.TrimSpace(source.Annotation),
+			SequenceLength:        len(sanitizeSequence(source.Sequence)),
+			Sequence:              strings.TrimSpace(source.Sequence),
+			ExternalReferenceData: source.ExternalReferenceData,
 		})
 	}
 	return out

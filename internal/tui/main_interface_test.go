@@ -464,9 +464,9 @@ func TestMainGridDrawCursorAtInsertionPointAfterText(t *testing.T) {
 	}
 	for i, want := range []rune{'q', 'q', 'q'} {
 		got, _, style, _ := screen.GetContent(textX+i, rowY)
-		_, bg, _ := style.Decompose()
-		if got != want || bg != colorAction {
-			t.Fatalf("text cell %d = %q bg=%v, want %q action bg", i, got, bg, want)
+		fg, bg, _ := style.Decompose()
+		if got != want || fg != tcell.ColorBlack || bg != colorAction {
+			t.Fatalf("text cell %d = %q fg=%v bg=%v, want %q black on action bg", i, got, fg, bg, want)
 		}
 	}
 	got, _, style, _ := screen.GetContent(textX+3, rowY)

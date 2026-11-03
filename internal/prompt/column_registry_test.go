@@ -369,3 +369,18 @@ func TestBlastReportColumnIDsExcludeReferenceColumnsWhenDisabled(t *testing.T) {
 		}
 	}
 }
+
+func TestBlastSchemasNeverExposeLegacyInterProConservedStatus(t *testing.T) {
+	for name, ids := range map[string][]string{
+		"display": BlastDisplayColumnIDs("phytozome", "BLASTP", true, true),
+		"detail":  BlastDetailColumnIDs("phytozome", "BLASTP", true, true),
+		"export":  BlastExportColumnIDs("phytozome", true, true),
+		"report":  BlastReportColumnIDs("phytozome", "BLASTP", true, true),
+	} {
+		for _, id := range ids {
+			if id == "interpro_conserved_region_status" {
+				t.Fatalf("%s schema exposed legacy InterPro conserved status", name)
+			}
+		}
+	}
+}

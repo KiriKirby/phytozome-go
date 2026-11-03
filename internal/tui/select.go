@@ -27,7 +27,7 @@ const (
 	colorCanvas         = tcell.ColorBlack
 	colorPanel          = tcell.ColorDarkBlue
 	colorAction         = tcell.ColorDeepSkyBlue
-	colorActionText     = tcell.ColorWhite
+	colorActionText     = tcell.ColorBlack
 	colorText           = tcell.ColorGhostWhite
 	colorMuted          = tcell.ColorLightGray
 	colorWarning        = tcell.ColorYellow
@@ -286,7 +286,7 @@ func configStyles() {
 		PrimaryTextColor:            colorText,
 		SecondaryTextColor:          colorMuted,
 		TertiaryTextColor:           colorAccent,
-		InverseTextColor:            colorText,
+		InverseTextColor:            colorActionText,
 		ContrastSecondaryTextColor:  colorInactiveText,
 	}
 }
@@ -424,7 +424,7 @@ func optionListWithStart(title string, options []Option, start int) *tview.List 
 	list.ShowSecondaryText(true)
 	list.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	list.SetSecondaryTextColor(tview.Styles.SecondaryTextColor)
-	list.SetSelectedTextColor(tview.Styles.InverseTextColor)
+	list.SetSelectedTextColor(colorText)
 	list.SetSelectedBackgroundColor(tview.Styles.ContrastBackgroundColor)
 	setFocusBorder(list.Box, false)
 	attachFocusBorder(list.Box)

@@ -477,7 +477,7 @@ func TestApplyFamilyBlastPlanMergesTranscriptIsoformsByTargetGene(t *testing.T) 
 	prepared := []blastQueryItem{{LabelName: "C3H1"}, {LabelName: "C3H2"}}
 	runs := []blastQueryRun{
 		{Index: 1, Item: prepared[0], Results: model.BlastResult{Rows: []model.BlastResultRow{{Protein: "Sp9509d006g001100_T002", EValue: "1e-40", PercentIdentity: 70, LabelName: "C3H1"}}}},
-		{Index: 2, Item: prepared[1], Results: model.BlastResult{Rows: []model.BlastResultRow{{Protein: "Sp9509d006g001100_T001", EValue: "1e-30", PercentIdentity: 65, LabelName: "C3H2", InterProConservedRegionStatus: "present"}}}},
+		{Index: 2, Item: prepared[1], Results: model.BlastResult{Rows: []model.BlastResultRow{{Protein: "Sp9509d006g001100_T001", EValue: "1e-30", PercentIdentity: 65, LabelName: "C3H2", InterProAccessions: "IPR0001"}}}},
 	}
 	settings := model.DefaultFamilyBlastSettings()
 	settings.UseInterProReference = true
@@ -5271,6 +5271,30 @@ func TestInterProQueryLookupRowCarriesQuerySourceMetadata(t *testing.T) {
 	}
 	if strings.TrimSpace(row.UniProtAccession) == "" {
 		t.Fatalf("UniProtAccession = %q, want non-empty accession from query source or resolver", row.UniProtAccession)
+	}
+}
+
+func TestInterProQueryComparisonColors(t *testing.T) {
+	if got := compareInterProText("IPR1; IPR2", "IPR2; IPR1"); got != "green" {
+		t.Fatalf("exact set = %q", got)
+	}
+	if got := compareInterProText("IPR1", "IPR1; IPR2"); got != "yellow" {
+		t.Fatalf("superset = %q", got)
+	}
+	if got := compareInterProText("IPR1", "IPR2"); got != "" {
+		t.Fatalf("different set = %q, want blank", got)
+	}
+	if got := compareInterProCoverage("45", "100.00"); got != "green" {
+		t.Fatalf("coverage = %q", got)
+	}
+	if got := compareInterProRegions("IPR1:10-20", "IPR1:30-40"); got != "green" {
+		t.Fatalf("same project and length = %q", got)
+	}
+	if got := compareInterProRegions("IPR1:10-20", "IPR1:30-45"); got != "red" {
+		t.Fatalf("same project different length = %q", got)
+	}
+	if got := compareInterProRegions("IPR1:10-20; IPR2:1-5", "IPR1:30-40; IPR3:1-8"); got != "yellow" {
+		t.Fatalf("shared same-length project = %q", got)
 	}
 }
 

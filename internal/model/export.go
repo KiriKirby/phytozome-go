@@ -55,20 +55,23 @@ type ExportMetadata struct {
 }
 
 type ExportQueryMetadata struct {
-	Index             int
-	LabelName         string
-	GeneID            string
-	ProteinID         string
-	TranscriptID      string
-	SourceDatabase    string
-	SourceProteomeID  int
-	SourceJBrowseName string
-	SourceGenomeLabel string
-	OriginalInputURL  string
-	NormalizedURL     string
-	OrganismShort     string
-	Annotation        string
-	SequenceLength    int
+	Index                 int
+	LabelName             string
+	PhgoAliases           string
+	GeneID                string
+	ProteinID             string
+	TranscriptID          string
+	SourceDatabase        string
+	SourceProteomeID      int
+	SourceJBrowseName     string
+	SourceGenomeLabel     string
+	OriginalInputURL      string
+	NormalizedURL         string
+	OrganismShort         string
+	Annotation            string
+	SequenceLength        int
+	Sequence              string
+	ExternalReferenceData *BlastResultRow `json:"external_reference_data,omitempty"`
 }
 
 type KeywordResultRow struct {
@@ -111,38 +114,39 @@ type KeywordSearchGroup struct {
 }
 
 type QuerySequenceSource struct {
-	Sequence             string
-	ProteinSequence      string
-	NucleotideSequence   string
-	SequenceKind         SequenceKind
-	PreferredSequenceID  string
-	OriginalInputURL     string
-	NormalizedURL        string
-	SourceDatabase       string
-	SourceProteomeID     int
-	SourceJBrowseName    string
-	SourceGenomeLabel    string
-	LabelName            string
-	PhgoAliases          string
-	Aliases              string
-	Symbols              string
-	Synonyms             string
-	AutoDefine           string
-	UniProtAccession     string
-	GeneID               string
-	TranscriptID         string
-	ProteinID            string
-	OrganismShort        string
-	Annotation           string
-	BlastSourceLabelName string
-	BlastSourceGeneID    string
-	PhgoRowNumber        int
-	PhgoHasRowNumber     bool
-	PhgoBlastQuerySource bool
-	PhgoCanvasRawRow     int
-	PhgoCanvasHasRawRow  bool
-	PhgoCanvasTitle      string
-	PhgoCanvasDisplay    string
+	Sequence              string
+	ProteinSequence       string
+	NucleotideSequence    string
+	SequenceKind          SequenceKind
+	PreferredSequenceID   string
+	OriginalInputURL      string
+	NormalizedURL         string
+	SourceDatabase        string
+	SourceProteomeID      int
+	SourceJBrowseName     string
+	SourceGenomeLabel     string
+	LabelName             string
+	PhgoAliases           string
+	Aliases               string
+	Symbols               string
+	Synonyms              string
+	AutoDefine            string
+	UniProtAccession      string
+	GeneID                string
+	TranscriptID          string
+	ProteinID             string
+	OrganismShort         string
+	Annotation            string
+	BlastSourceLabelName  string
+	BlastSourceGeneID     string
+	PhgoRowNumber         int
+	PhgoHasRowNumber      bool
+	PhgoBlastQuerySource  bool
+	PhgoCanvasRawRow      int
+	PhgoCanvasHasRawRow   bool
+	PhgoCanvasTitle       string
+	PhgoCanvasDisplay     string
+	ExternalReferenceData *BlastResultRow `json:"external_reference_data,omitempty"`
 }
 
 type CanvasKind string

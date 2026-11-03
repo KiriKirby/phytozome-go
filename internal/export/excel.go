@@ -177,8 +177,6 @@ func blastExportValue(id string, row model.BlastResultRow, rowNumber int) any {
 		return row.PercentIdentity
 	case "align_query_length_percent":
 		return blastAlignQueryLengthPercent(row)
-	case "interpro_conserved_region_status":
-		return blankIfNoInterPro(row, row.InterProConservedRegionStatus)
 	case "phgo_motif_matches":
 		return row.PhgoMotifMatches
 	case "target_length":
@@ -318,7 +316,14 @@ func blankIfNoUniProt(row model.BlastResultRow, value string) string {
 }
 
 func blankIfNoInterPro(row model.BlastResultRow, value string) string {
-	if !row.InterProReferenceEnabled || (strings.TrimSpace(row.InterProAccessions) == "" && strings.TrimSpace(row.InterProConservedRegionStatus) == "") {
+	if !row.InterProReferenceEnabled ||
+		(strings.TrimSpace(row.InterProAccessions) == "" &&
+			strings.TrimSpace(row.InterProEntryName) == "" &&
+			strings.TrimSpace(row.InterProEntryType) == "" &&
+			strings.TrimSpace(row.InterProCoveragePercent) == "" &&
+			strings.TrimSpace(row.InterProMatchRegions) == "" &&
+			strings.TrimSpace(row.InterProSignatureAccessions) == "" &&
+			strings.TrimSpace(row.InterProPfamAccessions) == "") {
 		return ""
 	}
 	return value
@@ -481,6 +486,7 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 	headers := []string{
 		"query_index",
 		"blast_labelname",
+		"phgo_alias",
 		"geneid",
 		"protein_id",
 		"transcript_id",
@@ -493,6 +499,44 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 		"organism_short",
 		"annotation",
 		"sequence_length",
+		"sequence",
+		"uniprot_accession",
+		"uniprot_entry_name",
+		"uniprot_reviewed",
+		"uniprot_protein_name",
+		"uniprot_gene_names",
+		"uniprot_keywords",
+		"uniprot_organism",
+		"uniprot_organism_id",
+		"uniprot_canonical_length",
+		"uniprot_function",
+		"uniprot_catalytic_activity",
+		"uniprot_ec",
+		"uniprot_go",
+		"uniprot_go_ids",
+		"uniprot_pathway",
+		"uniprot_subcellular_location",
+		"uniprot_protein_existence",
+		"uniprot_annotation_score",
+		"uniprot_fragment",
+		"uniprot_sequence_caution",
+		"uniprot_pfam",
+		"uniprot_interpro",
+		"uniprot_domain",
+		"uniprot_region",
+		"uniprot_motif",
+		"uniprot_active_site",
+		"uniprot_binding_site",
+		"uniprot_alphafolddb",
+		"uniprot_pdb",
+		"phgo_motif_matches",
+		"interpro_entry_name",
+		"interpro_entry_type",
+		"interpro_coverage_percent",
+		"interpro_match_regions",
+		"interpro_accessions",
+		"interpro_signature_accessions",
+		"interpro_pfam_accessions",
 	}
 	headerCells := make([]interface{}, 0, len(headers))
 	for _, header := range headers {
@@ -505,6 +549,7 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 		values := []any{
 			query.Index,
 			query.LabelName,
+			query.PhgoAliases,
 			query.GeneID,
 			query.ProteinID,
 			query.TranscriptID,
@@ -517,6 +562,44 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 			query.OrganismShort,
 			query.Annotation,
 			query.SequenceLength,
+			query.Sequence,
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_accession"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_entry_name"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_reviewed"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_protein_name"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_gene_names"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_keywords"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_organism"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_organism_id"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_canonical_length"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_function"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_catalytic_activity"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_ec"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_go"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_go_ids"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_pathway"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_subcellular_location"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_protein_existence"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_annotation_score"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_fragment"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_sequence_caution"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_pfam"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_interpro"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_domain"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_region"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_motif"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_active_site"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_binding_site"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_alphafolddb"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "uniprot_pdb"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "phgo_motif_matches"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_entry_name"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_entry_type"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_coverage_percent"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_match_regions"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_accessions"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_signature_accessions"),
+			exportQueryMetadataReferenceValue(query.ExternalReferenceData, "interpro_pfam_accessions"),
 		}
 		rowCells := make([]interface{}, 0, len(values))
 		for _, value := range values {
@@ -540,6 +623,90 @@ func writeBlastMetadataSheet(file *excelize.File, metadata *model.ExportMetadata
 		return fmt.Errorf("flush metadata stream: %w", err)
 	}
 	return nil
+}
+
+func exportQueryMetadataReferenceValue(row *model.BlastResultRow, id string) string {
+	if row == nil {
+		return ""
+	}
+	switch id {
+	case "uniprot_accession":
+		return row.UniProtAccession
+	case "uniprot_entry_name":
+		return row.UniProtEntryName
+	case "uniprot_reviewed":
+		return row.UniProtReviewed
+	case "uniprot_protein_name":
+		return row.UniProtProteinName
+	case "uniprot_gene_names":
+		return row.UniProtGeneNames
+	case "uniprot_keywords":
+		return row.UniProtKeywords
+	case "uniprot_organism":
+		return row.UniProtOrganism
+	case "uniprot_organism_id":
+		return row.UniProtOrganismID
+	case "uniprot_canonical_length":
+		return row.UniProtCanonicalLength
+	case "uniprot_function":
+		return row.UniProtFunction
+	case "uniprot_catalytic_activity":
+		return row.UniProtCatalyticActivity
+	case "uniprot_ec":
+		return row.UniProtEC
+	case "uniprot_go":
+		return row.UniProtGO
+	case "uniprot_go_ids":
+		return row.UniProtGOIDs
+	case "uniprot_pathway":
+		return row.UniProtPathway
+	case "uniprot_subcellular_location":
+		return row.UniProtSubcellularLocation
+	case "uniprot_protein_existence":
+		return row.UniProtProteinExistence
+	case "uniprot_annotation_score":
+		return row.UniProtAnnotationScore
+	case "uniprot_fragment":
+		return row.UniProtFragment
+	case "uniprot_sequence_caution":
+		return row.UniProtSequenceCaution
+	case "uniprot_pfam":
+		return row.UniProtPfam
+	case "uniprot_interpro":
+		return row.UniProtInterPro
+	case "uniprot_domain":
+		return row.UniProtDomain
+	case "uniprot_region":
+		return row.UniProtRegion
+	case "uniprot_motif":
+		return row.UniProtMotif
+	case "uniprot_active_site":
+		return row.UniProtActiveSite
+	case "uniprot_binding_site":
+		return row.UniProtBindingSite
+	case "uniprot_alphafolddb":
+		return row.UniProtAlphaFoldDB
+	case "uniprot_pdb":
+		return row.UniProtPDB
+	case "phgo_motif_matches":
+		return row.PhgoMotifMatches
+	case "interpro_entry_name":
+		return row.InterProEntryName
+	case "interpro_entry_type":
+		return row.InterProEntryType
+	case "interpro_coverage_percent":
+		return row.InterProCoveragePercent
+	case "interpro_match_regions":
+		return row.InterProMatchRegions
+	case "interpro_accessions":
+		return row.InterProAccessions
+	case "interpro_signature_accessions":
+		return row.InterProSignatureAccessions
+	case "interpro_pfam_accessions":
+		return row.InterProPfamAccessions
+	default:
+		return ""
+	}
 }
 
 func exportMetadataQueries(metadata *model.ExportMetadata) []model.ExportQueryMetadata {
@@ -582,23 +749,43 @@ func blastExcelCellColorByID(id string, row model.BlastResultRow, originalRowInd
 		case "unreviewed":
 			return excelColorMuted
 		}
-	case "interpro_conserved_region_status":
-		switch strings.ToLower(strings.TrimSpace(row.InterProConservedRegionStatus)) {
-		case "present":
-			return excelColorSelectionOn
-		case "partial":
-			return excelColorMuted
-		case "missing":
-			return excelColorSelectionOff
-		case "uncertain":
-			return excelColorAction
-		}
 	case "phgo_motif_matches":
 		if motif.AllMatched(row.PhgoMotifMatches, len(motif.SplitList(row.PhgoMotifPatterns))) {
 			return excelColorSelectionOn
 		}
 	}
+	if comparison := blastExcelInterProComparison(row, id); comparison != "" {
+		switch comparison {
+		case "green":
+			return excelColorSelectionOn
+		case "yellow":
+			return excelColorMuted
+		case "red":
+			return excelColorSelectionOff
+		}
+	}
 	return excelColorDefault
+}
+
+func blastExcelInterProComparison(row model.BlastResultRow, id string) string {
+	switch id {
+	case "interpro_entry_name":
+		return row.InterProEntryNameComparison
+	case "interpro_entry_type":
+		return row.InterProEntryTypeComparison
+	case "interpro_coverage_percent":
+		return row.InterProCoverageComparison
+	case "interpro_match_regions":
+		return row.InterProMatchRegionsComparison
+	case "interpro_accessions":
+		return row.InterProAccessionsComparison
+	case "interpro_signature_accessions":
+		return row.InterProSignatureAccessionsComparison
+	case "interpro_pfam_accessions":
+		return row.InterProPfamAccessionsComparison
+	default:
+		return ""
+	}
 }
 
 func blastExcelHeaderColor(header string) string {

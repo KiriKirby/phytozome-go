@@ -163,6 +163,7 @@ type TableColumn struct {
 
 type TableRow struct {
 	Cells         []string
+	CellColors    []tcell.Color
 	Group         string
 	Detail        string
 	DetailPages   []DetailPage
@@ -1925,7 +1926,7 @@ func (b *blastRunSidebar) Draw(screen tcell.Screen) {
 		return
 	}
 	b.clamp()
-	selectedStyle := tcell.StyleDefault.Background(tview.Styles.ContrastBackgroundColor).Foreground(tview.Styles.InverseTextColor)
+	selectedStyle := tcell.StyleDefault.Background(tview.Styles.ContrastBackgroundColor).Foreground(colorText)
 	primaryStyle := tcell.StyleDefault.Background(tview.Styles.PrimitiveBackgroundColor).Foreground(tview.Styles.PrimaryTextColor)
 	secondaryStyle := tcell.StyleDefault.Background(tview.Styles.PrimitiveBackgroundColor).Foreground(tview.Styles.SecondaryTextColor)
 	for row := 0; row < innerHeight; row++ {
@@ -2578,6 +2579,7 @@ type BlastFilterSettings struct {
 }
 
 type InterProConservedRegionSettings struct {
+	CompareWithQuery       bool
 	UsePfamAccession       bool
 	UseInterProAccession   bool
 	UseSignatureAccession  bool
@@ -2634,7 +2636,7 @@ func RunChoicePage(page ChoicePage) (ChoiceResult, error) {
 	list.ShowSecondaryText(true)
 	list.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	list.SetSecondaryTextColor(tview.Styles.SecondaryTextColor)
-	list.SetSelectedTextColor(tview.Styles.InverseTextColor)
+	list.SetSelectedTextColor(colorText)
 	list.SetSelectedBackgroundColor(tview.Styles.ContrastBackgroundColor)
 	setFocusBorder(list.Box, true)
 	attachFocusBorder(list.Box)
@@ -4535,7 +4537,11 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				if c < len(rowData.Cells) {
 					value = rowData.Cells[c]
 				}
-				cell := paddedTableCell(value).SetTextColor(tableCellColor(page.Columns[c], value)).SetSelectable(true)
+				cellColor := tableCellColor(page.Columns[c], value)
+				if c < len(rowData.CellColors) && rowData.CellColors[c] != tcell.ColorDefault {
+					cellColor = rowData.CellColors[c]
+				}
+				cell := paddedTableCell(value).SetTextColor(cellColor).SetSelectable(true)
 				table.SetCell(rowNumber, c+2, cell)
 			}
 		}
@@ -4573,7 +4579,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		list.ShowSecondaryText(true)
 		list.SetMainTextColor(tview.Styles.PrimaryTextColor)
 		list.SetSecondaryTextColor(tview.Styles.SecondaryTextColor)
-		list.SetSelectedTextColor(tview.Styles.InverseTextColor)
+		list.SetSelectedTextColor(colorText)
 		list.SetSelectedBackgroundColor(tview.Styles.ContrastBackgroundColor)
 		list.SetBorder(true)
 		list.SetTitle(" Export scope ")
@@ -5918,7 +5924,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 					if c < len(rowData.Cells) {
 						value = rowData.Cells[c]
 					}
-					table.SetCell(rowNumber, c+2, paddedTableCell(value).SetTextColor(tableCellColor(item.Columns[c], value)).SetSelectable(true))
+					cellColor := tableCellColor(item.Columns[c], value)
+					if c < len(rowData.CellColors) && rowData.CellColors[c] != tcell.ColorDefault {
+						cellColor = rowData.CellColors[c]
+					}
+					table.SetCell(rowNumber, c+2, paddedTableCell(value).SetTextColor(cellColor).SetSelectable(true))
 				}
 			}
 			if controlMode == 1 {
@@ -6101,7 +6111,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		list.ShowSecondaryText(true)
 		list.SetMainTextColor(tview.Styles.PrimaryTextColor)
 		list.SetSecondaryTextColor(tview.Styles.SecondaryTextColor)
-		list.SetSelectedTextColor(tview.Styles.InverseTextColor)
+		list.SetSelectedTextColor(colorText)
 		list.SetSelectedBackgroundColor(tview.Styles.ContrastBackgroundColor)
 		list.SetBorder(true)
 		list.SetTitle(" Export scope ")
@@ -7394,7 +7404,7 @@ func RunChoiceModalPage(page ChoiceModalPage) (ChoiceResult, error) {
 	list.ShowSecondaryText(true)
 	list.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	list.SetSecondaryTextColor(tview.Styles.SecondaryTextColor)
-	list.SetSelectedTextColor(tview.Styles.InverseTextColor)
+	list.SetSelectedTextColor(colorText)
 	list.SetSelectedBackgroundColor(tview.Styles.ContrastBackgroundColor)
 	setFocusBorder(list.Box, true)
 	attachFocusBorder(list.Box)
@@ -8139,60 +8149,19 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		runInputFieldPaste(app, motifInput, motifPasteStatus)
 	}
 
-	settingRows := []struct {
-		label  string
-		get    func() bool
-		toggle func()
-	}{
-		{"Match Pfam IDs", func() bool { return settings.UsePfamAccession }, func() { settings.UsePfamAccession = !settings.UsePfamAccession }},
-		{"Match InterPro IDs", func() bool { return settings.UseInterProAccession }, func() { settings.UseInterProAccession = !settings.UseInterProAccession }},
-		{"Match member-database signature IDs", func() bool { return settings.UseSignatureAccession }, func() { settings.UseSignatureAccession = !settings.UseSignatureAccession }},
-		{"Require compatible entry type", func() bool { return settings.UseEntryType }, func() { settings.UseEntryType = !settings.UseEntryType }},
-		{"Also compare entry names", func() bool { return settings.UseEntryName }, func() { settings.UseEntryName = !settings.UseEntryName }},
-		{"Use coverage cutoffs", func() bool { return settings.UseCoverage }, func() { settings.UseCoverage = !settings.UseCoverage }},
-		{"Use coordinate overlap evidence", func() bool { return settings.UseMatchRegions }, func() { settings.UseMatchRegions = !settings.UseMatchRegions }},
-	}
-	settingBoxes := make([]*checkboxModule, 0, len(settingRows))
-	for _, row := range settingRows {
-		box := newCheckboxModule(row.label, row.get, row.toggle)
-		box.SetBorder(false)
-		settingBoxes = append(settingBoxes, box)
-	}
-	presentCoverage := tview.NewInputField().SetLabel("present coverage >= % ").SetText(settings.PresentMinCoverage).SetFieldWidth(8)
-	partialCoverage := tview.NewInputField().SetLabel("partial coverage >= % ").SetText(settings.PartialMinCoverage).SetFieldWidth(8)
-	presentItems := tview.NewInputField().SetLabel("present evidence count >= ").SetText(settings.PresentMinMatchedItems).SetFieldWidth(8)
-	partialItems := tview.NewInputField().SetLabel("partial evidence count >= ").SetText(settings.PartialMinMatchedItems).SetFieldWidth(8)
-	for _, input := range []*tview.InputField{presentCoverage, partialCoverage, presentItems, partialItems} {
-		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-		input.SetLabelColor(tview.Styles.PrimaryTextColor)
-	}
+	compareInterProBox := newCheckboxModule("Compare the seven InterPro columns with the original query", func() bool {
+		return settings.CompareWithQuery
+	}, func() {
+		settings.CompareWithQuery = !settings.CompareWithQuery
+	})
+	compareInterProBox.SetBorder(false)
 
 	params := newButtonFlex()
 	params.SetBorder(true)
-	params.SetTitle(" InterPro status rules ")
+	params.SetTitle(" InterPro query comparison ")
 	params.SetTitleAlign(tview.AlignCenter)
-	params.AddItem(textBlock("These rules decide how the InterPro status column is labeled. They add evidence for review; they do not remove or hide BLAST rows."), 2, 0, false)
-	params.AddItem(sectionHeader("Identifier matches"), 1, 0, false)
-	for _, box := range settingBoxes[:3] {
-		params.AddItem(box, 1, 0, false)
-	}
-	params.AddItem(sectionHeader("Evidence quality checks"), 1, 0, false)
-	for _, box := range settingBoxes[3:] {
-		params.AddItem(box, 1, 0, false)
-	}
-	params.AddItem(sectionHeader("Status thresholds"), 1, 0, false)
-	thresholds := tview.NewFlex().SetDirection(tview.FlexRow)
-	presentThresholds := tview.NewFlex().SetDirection(tview.FlexColumn)
-	partialThresholds := tview.NewFlex().SetDirection(tview.FlexColumn)
-	presentThresholds.AddItem(presentCoverage, 0, 1, true)
-	presentThresholds.AddItem(presentItems, 0, 1, false)
-	partialThresholds.AddItem(partialCoverage, 0, 1, false)
-	partialThresholds.AddItem(partialItems, 0, 1, false)
-	thresholds.AddItem(presentThresholds, 1, 0, true)
-	thresholds.AddItem(partialThresholds, 1, 0, false)
-	params.AddItem(thresholds, 2, 0, true)
-	params.AddItem(sectionHeader("Status meaning"), 1, 0, false)
-	params.AddItem(textBlock("present: strong conserved-region support. partial: related support exists but is weaker or shorter. missing: InterPro returned data but no expected conserved evidence was found. uncertain: evidence is too weak or ambiguous to judge."), 3, 0, false)
+	params.AddItem(compareInterProBox, 1, 0, true)
+	params.AddItem(textBlock("When enabled, PHgo colors hit InterPro values against the original query: green for exact matches, yellow for supersets or compatible shared regions, and red for identical region projects with different lengths. Coverage is green at 100%. Disable this switch to keep every InterPro cell uncolored."), 4, 0, false)
 	setFocusBorder(params.Box, false)
 	attachFocusBorder(params.Box)
 
@@ -8227,6 +8196,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		result.UseUniProt = useUniProt
 		result.UseInterPro = useInterPro
 		result.InterProSettings = InterProConservedRegionSettings{
+			CompareWithQuery:       settings.CompareWithQuery,
 			UsePfamAccession:       settings.UsePfamAccession,
 			UseInterProAccession:   settings.UseInterProAccession,
 			UseSignatureAccession:  settings.UseSignatureAccession,
@@ -8234,20 +8204,16 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 			UseEntryName:           settings.UseEntryName,
 			UseCoverage:            settings.UseCoverage,
 			UseMatchRegions:        settings.UseMatchRegions,
-			PresentMinCoverage:     presentCoverage.GetText(),
-			PartialMinCoverage:     partialCoverage.GetText(),
-			PresentMinMatchedItems: presentItems.GetText(),
-			PartialMinMatchedItems: partialItems.GetText(),
+			PresentMinCoverage:     settings.PresentMinCoverage,
+			PartialMinCoverage:     settings.PartialMinCoverage,
+			PresentMinMatchedItems: settings.PresentMinMatchedItems,
+			PartialMinMatchedItems: settings.PartialMinMatchedItems,
 		}
 		result.MotifChecker = model.MotifCheckerSettings{Enabled: useMotifChecker, Motifs: strings.TrimSpace(motifInput.GetText())}
 		app.Stop()
 	}
 
-	interProControls := []tview.Primitive{interProBox}
-	for _, box := range settingBoxes {
-		interProControls = append(interProControls, box)
-	}
-	interProControls = append(interProControls, presentCoverage, presentItems, partialCoverage, partialItems)
+	interProControls := []tview.Primitive{interProBox, compareInterProBox}
 	motifControls := []tview.Primitive{motifBox, motifInput}
 	topIndex := 0
 	interProIndex := 0
@@ -9003,8 +8969,8 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	groupedList.ShowSecondaryText(false)
 	groupedList.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	groupedList.SetSelectedFocusOnly(true)
-	groupedList.SetSelectedTextColor(tcell.ColorWhite)
-	groupedList.SetSelectedBackgroundColor(tcell.ColorBlue)
+	groupedList.SetSelectedTextColor(colorActionText)
+	groupedList.SetSelectedBackgroundColor(colorAction)
 	setFocusBorder(groupedList.Box, true)
 
 	rightList := tview.NewList()
@@ -9012,8 +8978,8 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 	rightList.ShowSecondaryText(false)
 	rightList.SetMainTextColor(tview.Styles.PrimaryTextColor)
 	rightList.SetSelectedFocusOnly(true)
-	rightList.SetSelectedTextColor(tcell.ColorWhite)
-	rightList.SetSelectedBackgroundColor(tcell.ColorBlue)
+	rightList.SetSelectedTextColor(colorActionText)
+	rightList.SetSelectedBackgroundColor(colorAction)
 	setFocusBorder(rightList.Box, false)
 
 	statusView := hintView("")
@@ -10036,11 +10002,6 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	preferReviewed := newCheckboxModule("Prefer reviewed UniProt records", func() bool { return settings.PreferUniProtReviewed }, func() { settings.PreferUniProtReviewed = !settings.PreferUniProtReviewed })
 	rejectFragments := newCheckboxModule("Reject UniProt fragment records", func() bool { return settings.RejectUniProtFragments }, func() { settings.RejectUniProtFragments = !settings.RejectUniProtFragments })
 	rejectCautions := newCheckboxModule("Reject UniProt sequence cautions", func() bool { return settings.RejectUniProtSequenceCautions }, func() { settings.RejectUniProtSequenceCautions = !settings.RejectUniProtSequenceCautions })
-	requireInterPro := newCheckboxModule("Require InterPro conserved-region support", func() bool { return settings.RequireInterProConservedRegion }, func() { settings.RequireInterProConservedRegion = !settings.RequireInterProConservedRegion })
-	allowPartial := newCheckboxModule("Allow InterPro partial status", func() bool { return settings.AllowInterProPartial }, func() { settings.AllowInterProPartial = !settings.AllowInterProPartial })
-	rejectMissing := newCheckboxModule("Reject InterPro status: missing", func() bool { return settings.RejectInterProMissing }, func() { settings.RejectInterProMissing = !settings.RejectInterProMissing })
-	rejectUncertain := newCheckboxModule("Reject InterPro status: uncertain", func() bool { return settings.RejectInterProUncertain }, func() { settings.RejectInterProUncertain = !settings.RejectInterProUncertain })
-	requireInterProCoverage := newCheckboxModule("Reject rows missing InterPro coverage when cutoff is used", func() bool { return settings.RequireInterProCoverageWhenUsed }, func() { settings.RequireInterProCoverageWhenUsed = !settings.RequireInterProCoverageWhenUsed })
 	strongFallback := newCheckboxModule("Let very strong BLAST evidence rescue weak references", func() bool { return settings.AllowStrongBlastFallbackWithoutReferences }, func() {
 		settings.AllowStrongBlastFallbackWithoutReferences = !settings.AllowStrongBlastFallbackWithoutReferences
 	})
@@ -10056,10 +10017,6 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	familySemanticBypass := newCheckboxModule("Let strong reference evidence override name mismatch", func() bool { return settings.FamilySemanticAllowStrongReferenceBypass }, func() {
 		settings.FamilySemanticAllowStrongReferenceBypass = !settings.FamilySemanticAllowStrongReferenceBypass
 	})
-	interProAnyDomain := newCheckboxModule("InterPro rule: accept any domain evidence", func() bool { return strings.EqualFold(settings.InterProDomainMode, "any_domain") }, func() { settings.InterProDomainMode = "any_domain" })
-	interProConservedDomain := newCheckboxModule("InterPro rule: use conserved-region status", func() bool { return strings.EqualFold(settings.InterProDomainMode, "conserved_region") }, func() { settings.InterProDomainMode = "conserved_region" })
-	interProConsensusDomain := newCheckboxModule("InterPro rule: require family consensus domain", func() bool { return strings.EqualFold(settings.InterProDomainMode, "family_consensus_domain") }, func() { settings.InterProDomainMode = "family_consensus_domain" })
-	interProOff := newCheckboxModule("InterPro rule: ignore InterPro domain evidence", func() bool { return strings.EqualFold(settings.InterProDomainMode, "off") }, func() { settings.InterProDomainMode = "off" })
 	keepBestIsoform := newCheckboxModule("Keep only the best isoform per target gene", func() bool { return settings.KeepBestIsoformPerTargetGene }, func() { settings.KeepBestIsoformPerTargetGene = !settings.KeepBestIsoformPerTargetGene })
 	keepTopHits := newCheckboxModule("Keep only the top-ranked rows per query", func() bool { return settings.KeepTopHitsPerQuery }, func() { settings.KeepTopHitsPerQuery = !settings.KeepTopHitsPerQuery })
 	rankingOrder := newInput("order", settings.RankingTieBreakerOrder, 24)
@@ -10072,7 +10029,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	hardFail := newCheckboxModule("Reject when any enabled hard rule fails", func() bool { return settings.RejectIfAnyHardRuleFails }, func() { settings.RejectIfAnyHardRuleFails = !settings.RejectIfAnyHardRuleFails })
 	enableSoftScore := newCheckboxModule("Enable soft evidence score", func() bool { return settings.EnableSoftScore }, func() { settings.EnableSoftScore = !settings.EnableSoftScore })
 
-	for _, box := range []*checkboxModule{identityBox, coverageBox, eValueBox, lengthBox, targetQueryLengthBox, requireLengthRatio, requireTargetQueryRatio, requireUniProt, preferReviewed, rejectFragments, rejectCautions, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, strongFallback, requireFallbackConsensus, useFamilySemantic, requireFamilySemantic, familySemanticBypass, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, keepBestIsoform, keepTopHits, preferEValue, preferIdentity, preferCoverage, preferReference, preferFilterScore, preferBitscore, hardFail, enableSoftScore} {
+	for _, box := range []*checkboxModule{identityBox, coverageBox, eValueBox, lengthBox, targetQueryLengthBox, requireLengthRatio, requireTargetQueryRatio, requireUniProt, preferReviewed, rejectFragments, rejectCautions, strongFallback, requireFallbackConsensus, useFamilySemantic, requireFamilySemantic, familySemanticBypass, keepBestIsoform, keepTopHits, preferEValue, preferIdentity, preferCoverage, preferReference, preferFilterScore, preferBitscore, hardFail, enableSoftScore} {
 		box.SetBorder(false)
 	}
 
@@ -10135,14 +10092,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	for _, primitive := range []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions} {
 		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
 	}
-	referenceModule.AddItem(sectionHeader("How to use InterPro"), 1, 0, false)
-	for _, primitive := range []tview.Primitive{interProConservedDomain, interProAnyDomain, interProConsensusDomain, interProOff} {
-		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
-	}
-	referenceModule.AddItem(sectionHeader("InterPro status handling"), 1, 0, false)
-	for _, primitive := range []tview.Primitive{requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage} {
-		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, primitive == minInterProCoverage)
-	}
+	referenceModule.AddItem(textBlock("InterPro conserved-region status is retired from the active filter UI and runtime. The seven active InterPro annotation columns remain available in BLAST results when InterPro enrichment is enabled."), 3, 0, false)
 	referenceModule.AddItem(sectionHeader("Fallback rescue for very strong BLAST hits"), 1, 0, false)
 	for _, primitive := range []tview.Primitive{strongFallback, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, requireFallbackConsensus, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent} {
 		referenceModule.AddItem(primitive, filterControlHeight(primitive), 0, false)
@@ -10212,7 +10162,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 		controls []tview.Primitive
 	}{
 		{page: 0, box: thresholdModule, controls: []tview.Primitive{identityBox, minIdentity, coverageBox, minQueryCoverage, eValueBox, maxEValue, targetQueryLengthBox, requireTargetQueryRatio, minTargetQueryRatio, maxTargetQueryRatio, lengthBox, requireLengthRatio, minLengthRatio, maxLengthRatio}},
-		{page: 0, box: referenceModule, controls: []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, interProAnyDomain, interProConservedDomain, interProConsensusDomain, interProOff, requireInterPro, allowPartial, rejectMissing, rejectUncertain, requireInterProCoverage, minInterProCoverage, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent}},
+		{page: 0, box: referenceModule, controls: []tview.Primitive{requireUniProt, preferReviewed, rejectFragments, rejectCautions, strongFallback, requireFallbackConsensus, strongFallbackMinIdentity, strongFallbackMaxEValue, strongFallbackMinTargetQuery, strongFallbackMaxTargetQuery, strongFallbackMinConsensusSupport, strongFallbackMinConsensusPercent}},
 		{page: 0, box: semanticModule, controls: []tview.Primitive{useFamilySemantic, requireFamilySemantic, familySemanticBypass, familySemanticMinMatches, familySemanticMinPercent}},
 		{page: 1, box: rankingModule, controls: []tview.Primitive{keepBestIsoform, keepTopHits, topHitsPerQuery, rankingOrder, preferFilterScore, preferEValue, preferIdentity, preferCoverage, preferReference, preferBitscore, hardFail, enableSoftScore, minSoftScore}},
 		{page: 1, box: softScoreModule, controls: []tview.Primitive{identityWeight, coverageWeight, lengthWeight, targetQueryLengthWeight, interProWeight, interProPartialWeight, interProCoverageWeight, reviewedWeight, annotationWeight, familySemanticWeight, sequenceCautionPenalty, fragmentPenalty}},
@@ -10519,6 +10469,9 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 }
 
 func normalizeTUIInterProSettings(settings InterProConservedRegionSettings) InterProConservedRegionSettings {
+	if !settings.CompareWithQuery && settings.PresentMinCoverage == "" && settings.PartialMinCoverage == "" {
+		settings.CompareWithQuery = true
+	}
 	if !settings.UsePfamAccession && !settings.UseInterProAccession && !settings.UseSignatureAccession && !settings.UseEntryType && !settings.UseEntryName && !settings.UseCoverage && !settings.UseMatchRegions {
 		settings.UsePfamAccession = true
 		settings.UseInterProAccession = true
@@ -10908,13 +10861,13 @@ phgo_motif_matches 列は完全一致した motif の 1 始まり番号を表示
 	}
 }
 
-func interProParameterHelpPages() []localizedHelpPage {
+func interProParameterHelpPagesLegacy() []localizedHelpPage {
 	return []localizedHelpPage{
 		{
 			Label:    "English",
 			Shortcut: "1",
 			Title:    "InterPro parameter help",
-			Text: strings.TrimSpace(`InterPro conserved region status is an external-reference judgment used to mark whether a BLAST hit still carries conserved-region evidence expected from the query protein or, when no query template is available, whether the hit itself has credible conserved-domain evidence. It is a reference column, not a filter; it helps you decide whether a hit is biologically plausible before exporting or running follow-up searches.
+			Text: strings.TrimSpace(`InterPro comparison controls apply only to the seven active InterPro annotation columns. The legacy conserved-region status field is retained for old snapshots but is not executed or displayed in new BLAST tables.
 
 Use Pfam accession match gives the strongest evidence weight. Pfam accessions are stable member-database identifiers for protein families and domains. When a query match and a hit match share a Pfam accession, the hit is very likely to preserve the same conserved family/domain signal.
 
@@ -10942,7 +10895,7 @@ partial min matched items is the minimum number of conserved evidence items requ
 			Label:    "中文",
 			Shortcut: "2",
 			Title:    "InterPro 参数帮助",
-			Text: strings.TrimSpace(`InterPro conserved region status 是一个外部参考判断，用来标记 BLAST 命中蛋白是否仍然带有 query 蛋白预期的保守区域证据；如果没有可用的 query 模板，就保守地判断命中蛋白自身是否有可信的保守结构域证据。它是参考列，不是筛选器；用途是在导出或继续搜索前帮助判断命中是否具有生物学可信度。
+			Text: strings.TrimSpace(`InterPro 对比开关只作用于七个活动 InterPro 注释列。旧的 conserved region status 字段仅为历史快照保留，新 BLAST 表格不会执行或显示它。
 
 Use Pfam accession match 是权重最高的证据项。Pfam accession 是蛋白家族和结构域的稳定成员数据库编号。如果 query 与 hit 共享同一个 Pfam accession，通常说明 hit 保留了相同的保守家族或结构域信号。
 
@@ -10970,7 +10923,7 @@ partial min matched items 是判定 partial 所需的最少保守证据项数量
 			Label:    "日本語",
 			Shortcut: "3",
 			Title:    "InterPro パラメータヘルプ",
-			Text: strings.TrimSpace(`InterPro conserved region status は外部参照としての判定列です。BLAST ヒットが query タンパク質で期待される保存領域の証拠を保持しているか、query テンプレートがない場合はヒット自身に信頼できる保存ドメイン証拠があるかを示します。これはフィルターではなく参照列であり、エクスポートや追加検索の前に生物学的に妥当なヒットかを判断するために使います。
+			Text: strings.TrimSpace(`InterPro の比較スイッチは 7 つの有効な InterPro 注釈列だけに適用されます。旧 conserved region status フィールドは過去のスナップショット互換性のために保持されますが、新しい BLAST 表では実行も表示もされません。
 
 Use Pfam accession match は最も強い証拠として扱われます。Pfam accession はタンパク質ファミリーやドメインの安定したメンバーデータベース ID です。query と hit が同じ Pfam accession を共有する場合、hit は同じ保存ファミリーまたはドメインのシグナルを保持している可能性が高くなります。
 
@@ -10994,6 +10947,14 @@ present min matched items は present と判定するために必要な保存証
 
 partial min matched items は partial と判定するために必要な保存証拠項目数の下限です。既定値は 1 で、信頼できるが不完全な保存マッチを partial として残し、人が確認できるようにします。`),
 		},
+	}
+}
+
+func interProParameterHelpPages() []localizedHelpPage {
+	return []localizedHelpPage{
+		{Label: "English", Shortcut: "1", Title: "InterPro comparison help", Text: "InterPro enrichment keeps seven active columns and also looks up the original query. The comparison switch is on by default. Exact values are green, supersets or compatible shared regions are yellow, identical region projects with different lengths are red, and 100% coverage is green. Turning the switch off keeps the InterPro data but removes comparison colors. The legacy conserved-region status field is not executed or displayed."},
+		{Label: "中文", Shortcut: "2", Title: "InterPro 对比帮助", Text: "InterPro enrichment 保留七个活动列，并同时查询 BLAST 原序列。对比开关默认开启：完全相同为绿色，包含原序列全部内容但多出项目或共享区域长度相同为黄色，区域项目相同但长度不同为红色，coverage 为 100% 时为绿色。关闭开关后仍保留 InterPro 数据，只移除颜色。旧 conserved-region status 字段不会执行或显示。"},
+		{Label: "日本語", Shortcut: "3", Title: "InterPro 比較ヘルプ", Text: "InterPro enrichment は 7 つの有効な列を保持し、元の BLAST query も検索します。比較スイッチは既定でオンです。完全一致は緑、query の全項目を含む追加項目または同じ長さの共有領域は黄、同じ領域項目で長さが異なる場合は赤、coverage 100% は緑です。オフにしても InterPro データは残り、色だけが消えます。旧 conserved-region status は実行も表示もされません。"},
 	}
 }
 
@@ -11357,18 +11318,6 @@ func tableCellColor(column TableColumn, value string) tcell.Color {
 			return colorSelectionOn
 		case "unreviewed":
 			return colorMuted
-		}
-	}
-	if column.ID == "interpro_conserved_region_status" {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "present":
-			return colorSelectionOn
-		case "partial":
-			return colorMuted
-		case "missing":
-			return colorSelectionOff
-		case "uncertain":
-			return colorAction
 		}
 	}
 	return tview.Styles.PrimaryTextColor
@@ -12441,7 +12390,7 @@ func externalReferenceInterProRows() int {
 	const (
 		outerBorderRows = 2
 		checkboxRows    = 1
-		paramsRows      = 20
+		paramsRows      = 7
 	)
 	return outerBorderRows + checkboxRows + paramsRows
 }
@@ -13106,7 +13055,7 @@ func (b *buttonRowPrimitive) Draw(screen tcell.Screen) {
 			style = tcell.StyleDefault.Background(colorAction).Foreground(colorActionText).Bold(true)
 		}
 		if b.HasFocus() && pos.index == b.selected {
-			style = tcell.StyleDefault.Background(colorAction).Foreground(colorText).Bold(true)
+			style = tcell.StyleDefault.Background(colorAction).Foreground(colorActionText).Bold(true)
 		}
 		printStyledText(screen, x+pos.left, drawY, pos.right-pos.left, style, " "+pos.label+" ")
 	}

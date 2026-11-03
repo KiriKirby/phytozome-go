@@ -40,6 +40,38 @@ func TestStopReleasesSaturatedQueues(t *testing.T) {
 	}
 }
 
+func TestQueueEventBoundsUnmodifiedNavigationRepeat(t *testing.T) {
+	app := NewApplication()
+	for index := 0; index < queueSize*2; index++ {
+		app.QueueEvent(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone))
+	}
+	if got := len(app.events); got != navigationEventQueueLimit {
+		t.Fatalf("queued navigation repeats = %d, want bounded tail %d", got, navigationEventQueueLimit)
+	}
+}
+
+func TestQueueEventPreservesModifiedAndNonNavigationKeys(t *testing.T) {
+	app := NewApplication()
+	for index := 0; index < navigationEventQueueLimit+4; index++ {
+		app.QueueEvent(tcell.NewEventKey(tcell.KeyCtrlR, 0, tcell.ModNone))
+	}
+	if got := len(app.events); got != navigationEventQueueLimit+4 {
+		t.Fatalf("queued activation/control events = %d, want %d", got, navigationEventQueueLimit+4)
+	}
+}
+
+func TestNavigationEventClassification(t *testing.T) {
+	if !isNavigationEventKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModNone)) {
+		t.Fatal("plain right arrow should be classified as navigation")
+	}
+	if isNavigationEventKey(tcell.NewEventKey(tcell.KeyRight, 0, tcell.ModCtrl)) {
+		t.Fatal("modified right arrow must remain lossless")
+	}
+	if isNavigationEventKey(tcell.NewEventKey(tcell.KeyRune, 'x', tcell.ModNone)) {
+		t.Fatal("text input must remain lossless")
+	}
+}
+
 func runTestApplication(t *testing.T, root Primitive) (*Application, tcell.SimulationScreen, <-chan error) {
 	t.Helper()
 	screen := tcell.NewSimulationScreen("UTF-8")

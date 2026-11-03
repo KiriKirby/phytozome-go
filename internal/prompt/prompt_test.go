@@ -18,6 +18,7 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/model"
 	"github.com/KiriKirby/phytozome-go/internal/phylo"
 	"github.com/KiriKirby/phytozome-go/internal/tui"
+	"github.com/gdamore/tcell/v2"
 )
 
 func TestIdentityRowOrder(t *testing.T) {
@@ -1031,17 +1032,44 @@ func TestBlastDisplayLeavesUniProtCellsBlankWithoutUniProtData(t *testing.T) {
 		t.Fatalf("detail should blank UniProt values without accession: %s", detail)
 	}
 	pages := blastRowDetailPages(rows[0])
-	if len(pages) != 3 {
-		t.Fatalf("detail pages = %d, want 3", len(pages))
+	if len(pages) != 4 {
+		t.Fatalf("detail pages = %d, want 4", len(pages))
 	}
-	if pages[0].Title != "Source" || pages[1].Title != "UniProt" || pages[2].Title != "FASTA" {
+	if pages[0].Title != "Source" || pages[1].Title != "Query Metadata" || pages[2].Title != "UniProt" || pages[3].Title != "FASTA" {
 		t.Fatalf("unexpected page titles: %#v", pages)
 	}
-	if got := pages[1].Items[0].Value; got != "" {
+	if got := pages[2].Items[0].Value; got != "" {
 		t.Fatalf("expected blank UniProt detail cell without accession, got %q", got)
 	}
-	if !pages[2].Items[0].AutoLoad {
+	if !pages[3].Items[0].AutoLoad {
 		t.Fatal("expected blast FASTA page to auto-load")
+	}
+}
+
+func TestBlastDisplayAppliesInterProQueryComparisonColors(t *testing.T) {
+	rows := []model.BlastResultRow{{
+		SourceDatabase:                 "phytozome",
+		InterProReferenceEnabled:       true,
+		InterProEntryName:              "Domain A",
+		InterProMatchRegions:           "IPR1:1-10",
+		InterProAccessions:             "IPR1",
+		InterProEntryNameComparison:    "green",
+		InterProMatchRegionsComparison: "yellow",
+		InterProAccessionsComparison:   "red",
+	}}
+	columns, tableRows := buildBlastSelectionTable(rows)
+	if len(tableRows) != 1 || len(tableRows[0].CellColors) != len(columns) {
+		t.Fatalf("unexpected InterPro color row: %#v", tableRows)
+	}
+	wants := map[string]tcell.Color{
+		"interpro_entry_name":    tcell.ColorGreen,
+		"interpro_match_regions": tcell.ColorYellow,
+		"interpro_accessions":    tcell.ColorRed,
+	}
+	for i, column := range columns {
+		if want, ok := wants[column.ID]; ok && tableRows[0].CellColors[i] != want {
+			t.Fatalf("%s color = %v, want %v", column.ID, tableRows[0].CellColors[i], want)
+		}
 	}
 }
 

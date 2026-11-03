@@ -520,6 +520,38 @@ func TestLeftPrimaryButtonUsesNormalStyle(t *testing.T) {
 	}
 }
 
+func TestPrimaryButtonUsesBlackTextOnPaleBlueBackground(t *testing.T) {
+	configStyles()
+	row := buttonRow(buttonSpec{Label: "Create canvas", Shortcut: "F3", Visible: true, Primary: true})
+	row.SetRect(0, 0, 40, row.requiredHeight(40))
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(40, 2)
+	row.Draw(screen)
+	positions := row.buttonPositions(40)
+	if len(positions) != 1 {
+		t.Fatalf("unexpected button count: %d", len(positions))
+	}
+	x := positions[0].left + 1
+	y := positions[0].row
+	_, _, style, _ := screen.GetContent(x, y)
+	fg, bg, _ := style.Decompose()
+	if fg != tcell.ColorBlack || bg != colorAction {
+		t.Fatalf("primary button style = fg=%v bg=%v, want black on pale blue", fg, bg)
+	}
+}
+
+func TestPaleHighlightTextColorsAreBlack(t *testing.T) {
+	if colorActionText != tcell.ColorBlack {
+		t.Fatalf("pale-blue highlight text = %v, want black", colorActionText)
+	}
+	if colorTreeActionText != tcell.ColorBlack {
+		t.Fatalf("pale-yellow highlight text = %v, want black", colorTreeActionText)
+	}
+}
+
 func TestButtonFlexInvalidateLayoutRecomputesWrappedButtonRows(t *testing.T) {
 	body := newButtonFlex()
 	row := buttonRow(
