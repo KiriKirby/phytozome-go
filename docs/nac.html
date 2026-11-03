@@ -7,6 +7,36 @@
 
 <body bgcolor="#FFFFFF">
 
+<p>phytozome GO v20261103T110357Z</p>
+<p>Release v20261103T110357Z</p>
+<p>Performance and UI reliability update:</p>
+<p>- Reduced redraw and layout work for large windows and many tabs.</p>
+<p>- Added bounded, cancellable background workers for search, task progress, clipboard, detail loading, and resize handling.</p>
+<p>- Improved application shutdown and queue cleanup to prevent long-running degradation.</p>
+<p>- Standardized keyboard and mouse navigation, focus styling, colors, and one-line shortcut hints.</p>
+<p>- Added a central shortcut registry and UI interaction documentation.</p>
+<p>- Updated the bundled tview fork and WezTerm integration for safer input and rendering.</p>
+<p>Validation:</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- go test -race ./internal/tui github.com/rivo/tview</p>
+<p>- go build ./...</p>
+<p>- Reactree viewer tests and production build</p>
+<p>&nbsp;</p>
+<p>phytozome GO v20261103T002927Z</p>
+<p>## Changes</p>
+<p>- Skip cache cleanup, GitHub Release checks, and symbol-name database checks when another instance from the same bundle is already running.</p>
+<p>- Serialize concurrent startup helpers with a bundle maintenance lease; secondary launches wait for active maintenance and then open the main program safely.</p>
+<p>- Updater relaunch now skips all startup maintenance, including symbol-name checks.</p>
+<p>- Remove the main program&#39;s whole-cache reset API; user-created tabs continue to launch core.bin directly without startup cleanup.</p>
+<p>- Repair NCBI/keyword result transfer into Phytozome BLAST by preparing query sequences before the child tab opens and persisting them through handoff/session snapshots.</p>
+<p>## Verification</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- git diff --check</p>
+<p>- Windows amd64 WezTerm bundle contents and embedded version verified</p>
+<p>SHA-256: E7502BCF06E3D19E42549466B4669A58ECB66C88B88950A34DB9239B0AACAFE4</p>
+<p>&nbsp;</p>
 <p>phytozome GO external reference layout update</p>
 <p>External reference modal layout and motif input update</p>
 <p>Changes:</p>
