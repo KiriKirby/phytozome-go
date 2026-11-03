@@ -259,7 +259,7 @@ type RowSelectionPage struct {
 	DetailAction  string
 	Hints         []string
 	State         RowSelectionState
-	LoadDetail    func(rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
+	LoadDetail    func(ctx context.Context, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
 	AliasColumnID string
 	LoadAliases   func(rowIndex int) RowAliasChoices
 	ApplyAlias    func(rowIndex int, alias string) (TableRow, error)
@@ -343,7 +343,7 @@ type BlastRunSelectionPage struct {
 	DetailAction                string
 	Hints                       []string
 	State                       BlastRunSelectionState
-	LoadDetail                  func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
+	LoadDetail                  func(ctx context.Context, runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
 	AliasColumnID               string
 	LoadAliases                 func(runIndex int, rowIndex int) RowAliasChoices
 	ApplyAlias                  func(runIndex int, rowIndex int, alias string) (TableRow, error)
@@ -469,7 +469,7 @@ type CanvasPage struct {
 	SetExternalSelectionUpdater func(func(selected [][]bool, msaFlags [][]bool))
 	ExternalSelectionApplied    func(selected [][]bool, msaFlags [][]bool)
 	SetExternalRefreshUpdater   func(func(refreshing bool, message string))
-	LoadDetail                  func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
+	LoadDetail                  func(ctx context.Context, runIndex int, rowIndex int, pageIndex int, itemIndex int) (DetailItem, bool, error)
 	TreePanel                   CanvasTreePanel
 	TreePanelChanged            func(state CanvasTreePanelState, opened bool)
 }
@@ -611,7 +611,8 @@ func RunCanvasPage(page CanvasPage) (CanvasResult, error) {
 
 type buttonRowPrimitive struct {
 	*tview.Box
-	buttons []buttonSpec
+	buttons  []buttonSpec
+	selected int
 }
 
 type buttonFlex struct {
@@ -671,9 +672,13 @@ type detailOverlay struct {
 	buttons *buttonRowPrimitive
 	pages   []DetailPage
 	current int
-	load    func(pageIndex int, itemIndex int) (DetailItem, bool, error)
+	load    func(ctx context.Context, pageIndex int, itemIndex int) (DetailItem, bool, error)
 	extra   func(pageIndex int, itemIndex int)
 	app     *tview.Application
+	ctx     context.Context
+	cancel  context.CancelFunc
+	workers sync.WaitGroup
+	closed  atomic.Bool
 }
 
 type clippedPrimitive struct {
@@ -721,6 +726,7 @@ type blastRunSidebar struct {
 type pasteStatus struct {
 	view  *tview.TextView
 	seq   atomic.Uint64
+	busy  atomic.Bool
 	focus func()
 }
 
@@ -1653,7 +1659,7 @@ func (c *canvasTreePanelPrimitive) newDisplayNameDropDown(current string, onChan
 	})
 	dropDown.SetFieldBackgroundColor(colorPanel)
 	dropDown.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	dropDown.SetLabelColor(tview.Styles.SecondaryTextColor)
+	dropDown.SetLabelColor(tview.Styles.PrimaryTextColor)
 	return dropDown
 }
 
@@ -1678,7 +1684,7 @@ func (c *canvasTreePanelPrimitive) newChoiceDropDown(label string, methods []Can
 	})
 	dropDown.SetFieldBackgroundColor(colorPanel)
 	dropDown.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	dropDown.SetLabelColor(tview.Styles.SecondaryTextColor)
+	dropDown.SetLabelColor(tview.Styles.PrimaryTextColor)
 	return dropDown
 }
 
@@ -1727,7 +1733,7 @@ func (c *canvasTreePanelPrimitive) controlForParam(param CanvasTreeParameter, pa
 		})
 		dropDown.SetFieldBackgroundColor(colorPanel)
 		dropDown.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-		dropDown.SetLabelColor(tview.Styles.SecondaryTextColor)
+		dropDown.SetLabelColor(tview.Styles.PrimaryTextColor)
 		return dropDown, canvasTreePanelField{primitive: dropDown, group: 0}, 1
 	}
 	input := tview.NewInputField().
@@ -1735,7 +1741,7 @@ func (c *canvasTreePanelPrimitive) controlForParam(param CanvasTreeParameter, pa
 		SetText(value).
 		SetFieldWidth(10)
 	input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	input.SetLabelColor(tview.Styles.SecondaryTextColor)
+	input.SetLabelColor(tview.Styles.PrimaryTextColor)
 	input.SetFieldBackgroundColor(colorPanel)
 	input.SetChangedFunc(func(text string) {
 		onChange(strings.TrimSpace(text))
@@ -1771,7 +1777,7 @@ func canvasTreePanelCanOpen(screenWidth int) bool {
 }
 
 func canvasTreePanelWidthMessage(screenWidth int) string {
-	return fmt.Sprintf("The system tree tools need at least %d terminal columns so the Canvas table remains usable with the fixed %d-column tree panel. Current width: %d. Please widen the terminal and press Ctrl+T again.", canvasTreePanelWidth+canvasTreeMinimumLeftWidth, canvasTreePanelWidth, maxInt(0, screenWidth))
+	return fmt.Sprintf("The system tree tools need at least %d terminal columns so the Canvas table remains usable with the fixed %d-column tree panel. Current width: %d. Please widen the terminal and press %s again.", canvasTreePanelWidth+canvasTreeMinimumLeftWidth, canvasTreePanelWidth, maxInt(0, screenWidth), ShortcutTreeTools)
 }
 
 func newCheckboxModule(label string, checked func() bool, toggle func()) *checkboxModule {
@@ -3126,6 +3132,13 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 	resultRowOffset := 0
 	var filterSeq atomic.Uint64
 	var closed atomic.Bool
+	filterCtx, cancelFilter := context.WithCancel(context.Background())
+	filterDone := make(chan struct{})
+	defer func() {
+		closed.Store(true)
+		cancelFilter()
+		<-filterDone
+	}()
 	filterReady := true
 	stopApp := func() {
 		if closed.CompareAndSwap(false, true) {
@@ -3370,11 +3383,64 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		pageBar.matches = len(filtered)
 	}
 	refresh = func() {
-		if filterReady {
-			applyFilter()
-		}
 		renderSearchResults()
 	}
+	type filterRequest struct {
+		text string
+		seq  uint64
+	}
+	requests := make(chan filterRequest, 1)
+	go func() {
+		defer close(filterDone)
+		for {
+			var request filterRequest
+			select {
+			case <-filterCtx.Done():
+				return
+			case request = <-requests:
+			}
+			timer := time.NewTimer(searchDebounceDelay())
+		debounce:
+			for {
+				select {
+				case <-filterCtx.Done():
+					timer.Stop()
+					return
+				case request = <-requests:
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(searchDebounceDelay())
+				case <-timer.C:
+					break debounce
+				}
+			}
+			var next []Choice
+			if page.Filter != nil {
+				next = page.Filter(request.text, page.Choices)
+			} else {
+				next = defaultChoiceFilter(request.text, page.Choices)
+			}
+			if filterCtx.Err() != nil || filterSeq.Load() != request.seq {
+				continue
+			}
+			next = append([]Choice(nil), next...)
+			if !app.QueueUpdateDrawContext(filterCtx, func() {
+				if closed.Load() || filterSeq.Load() != request.seq {
+					return
+				}
+				filterReady = true
+				filtered = next
+				clampSearchPage()
+				renderSearchResults()
+			}) {
+				return
+			}
+		}
+	}()
 
 	input.SetChangedFunc(func(text string) {
 		query = text
@@ -3384,39 +3450,17 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		id := filterSeq.Add(1)
 		if len(page.Choices) < 1000 {
 			filterReady = true
+			applyFilter()
 			refresh()
 			return
 		}
 		filterReady = false
 		refresh()
-		go func(querySnapshot string, seq uint64) {
-			time.Sleep(searchDebounceDelay())
-			if filterSeq.Load() != seq {
-				return
-			}
-			var next []Choice
-			if page.Filter != nil {
-				next = page.Filter(querySnapshot, page.Choices)
-			} else {
-				next = defaultChoiceFilter(querySnapshot, page.Choices)
-			}
-			next = append([]Choice(nil), next...)
-			if closed.Load() {
-				return
-			}
-			_ = app.QueueUpdateDraw(func() {
-				if closed.Load() {
-					return
-				}
-				if filterSeq.Load() != seq {
-					return
-				}
-				filterReady = true
-				filtered = next
-				clampSearchPage()
-				renderSearchResults()
-			})
-		}(text, id)
+		select {
+		case <-requests:
+		default:
+		}
+		requests <- filterRequest{text, id}
 	})
 	input.SetDoneFunc(func(key tcell.Key) {
 		if key == tcell.KeyEnter {
@@ -3451,8 +3495,9 @@ func RunSearchPage(page SearchPage) (SearchResult, error) {
 		buttonSpec{Label: ButtonPaste, Shortcut: ShortcutPaste, Action: paste, Visible: true},
 		buttonSpec{Label: ButtonSelect, Shortcut: ShortcutConfirm, Action: confirmCurrent, Visible: true, Primary: true},
 	))
-	addHints(body, append(page.Hints, "Type, delete, paste, and move the cursor at any time. Paste (Ctrl+V) reads from the clipboard. Up/Down choose a result. Enter uses the selected result. Tab/PgUp/PgDn changes page."))
+	addHints(body, append(page.Hints, "Up/Down select | Enter confirms | Tab/PageDown next page | Shift+Tab/PageUp previous page | Ctrl+V paste"))
 
+	applyFilter()
 	refresh()
 	root := pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	setPageRoot(app, root)
@@ -3564,10 +3609,6 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	setFocusBorder(table.Box, true)
 	attachFocusBorder(table.Box)
 
-	modeText := tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextColor(tview.Styles.SecondaryTextColor).
-		SetTextAlign(tview.AlignCenter)
 	controlHeaders := false
 	headerColumn := rowSelectionFirstSortableColumn(page.Columns)
 	if headerColumn < -1 {
@@ -3617,6 +3658,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	modalOpen := false
 	var modalText *tview.TextView
 	var detailModal *detailOverlay
+	defer func() { detailModal.Close() }()
 	var aliasModalCapture inputCaptureFunc
 	var exportScopeCapture inputCaptureFunc
 	var copyButtonRow *buttonRowPrimitive
@@ -3646,6 +3688,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		}
 		addButtonRow(modalBody, closeOnlyModalButtons(nil, true, ButtonOK, "Enter", closeModal, closeModal))
 		modalOpen = true
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = nil
 		if pageRoot == nil {
@@ -3658,6 +3701,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -3675,11 +3719,8 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		app.SetFocus(helpModal.TextView())
 	}
 	updateModeText := func() {
-		if controlHeaders {
-			modeText.SetText("[yellow]Header control[white]  Left/Right choose sortable headers  Up/Down changes sort  Tab returns to cells")
-			return
-		}
-		modeText.SetText("[yellow]Table control[white]  Arrow keys move by cell  Space toggles row  Tab controls headers")
+		// Mode is reflected in the single bottom hint row. Keeping a separate
+		// status line would duplicate shortcut help and consume another row.
 	}
 	updateModeText()
 
@@ -3871,6 +3912,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			if pageRoot != nil {
@@ -3891,11 +3933,11 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			}
 			return nil
 		}
-		loadDetailItem := func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+		loadDetailItem := func(ctx context.Context, pageIndex int, itemIndex int) (DetailItem, bool, error) {
 			if page.LoadDetail == nil {
 				return DetailItem{}, false, nil
 			}
-			return page.LoadDetail(originalRow, pageIndex, itemIndex)
+			return page.LoadDetail(ctx, originalRow, pageIndex, itemIndex)
 		}
 		detailAction := strings.TrimSpace(page.DetailAction)
 		if detailAction == "" && len(extraActions) > 0 {
@@ -4051,6 +4093,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			if pageRoot != nil {
@@ -4101,6 +4144,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 				modalOpen = false
 				modalText = nil
 				helpModal = nil
+				detailModal.Close()
 				detailModal = nil
 				aliasModalCapture = nil
 				if pageRoot != nil {
@@ -4138,6 +4182,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 			modalOpen = true
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = singleLineInputCapture(app, buttons, input)
 			if pageRoot == nil {
@@ -4161,6 +4206,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = closeAliasModal
 		modalOpen = true
 		helpModal = nil
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
@@ -4540,6 +4586,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeExportScope := func() {
 			modalOpen = false
 			modalText = nil
+			detailModal.Close()
 			detailModal = nil
 			helpModal = nil
 			aliasModalCapture = nil
@@ -4570,6 +4617,7 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 		closeModal = closeExportScope
 		modalOpen = true
 		modalText = nil
+		detailModal.Close()
 		detailModal = nil
 		helpModal = nil
 		aliasModalCapture = nil
@@ -4729,12 +4777,11 @@ func RunRowSelectionPage(page RowSelectionPage) (RowSelectionResult, error) {
 	table.SetSelectionChangedFunc(func(row int, column int) {
 		updateAliasButtonVisibility()
 	})
-	body.AddItem(modeText, 1, 0, false)
-	shortcutHint := "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens the new universal filter | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+	shortcutHint := "Ctrl+A select all | F4 clear | Ctrl+F filter | Ctrl+Y copy | Tab headers | Left/Right header | Up/Down sort"
 	if page.LoadAliases != nil && page.ApplyAlias != nil {
-		shortcutHint = "Ctrl+A selects all | Ctrl+Shift+N clears all | Ctrl+F opens the new universal filter | Ctrl+L opens aliases on label_name cells | Ctrl+Y copies current cell | Header control: Left/Right choose sortable headers | Up/Down changes sort | Tab returns to cells"
+		shortcutHint = "Ctrl+A select all | F4 clear | Ctrl+F filter | Ctrl+L aliases | Ctrl+Y copy | Tab headers | Left/Right header | Up/Down sort"
 	}
-	addHints(body, append(page.Hints, "Table control: Arrow keys move by cell | Space toggles row | Tab controls headers", shortcutHint))
+	addHints(body, append(page.Hints, shortcutHint))
 
 	pageRoot = pageFrame(pageBreadcrumb(page.Breadcrumb, page.Path), body)
 	setPageRoot(app, pageRoot)
@@ -5029,6 +5076,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 	var modalText *tview.TextView
 	var helpModal *localizedHelpModal
 	var detailModal *detailOverlay
+	defer func() { detailModal.Close() }()
 	var aliasModalCapture inputCaptureFunc
 	var exportScopeCapture inputCaptureFunc
 	var actionButtonRow *buttonRowPrimitive
@@ -5112,6 +5160,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -5195,6 +5244,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		modalOpen = true
 		modalText = nil
 		helpModal = nil
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
@@ -5356,11 +5406,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		if len(item.RowNumbers) == len(item.Rows) {
 			return item.RowNumbers
 		}
-		out := make([]int, len(item.Rows))
-		for i := range out {
-			out[i] = i + 1
-		}
-		return out
+		return nil
 	}
 	currentSelected := func() []bool {
 		return selectedByRun[currentRun]
@@ -5533,6 +5579,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			if pageRoot != nil {
@@ -5549,6 +5596,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			if pageRoot != nil {
@@ -5595,6 +5643,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		closeModal = func() {
 			modalOpen = false
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			if pageRoot != nil {
@@ -5619,11 +5668,11 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			}
 			return nil
 		}
-		loadDetailItem := func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+		loadDetailItem := func(ctx context.Context, pageIndex int, itemIndex int) (DetailItem, bool, error) {
 			if page.LoadDetail == nil {
 				return DetailItem{}, false, nil
 			}
-			return page.LoadDetail(runIndex, originalRow, pageIndex, itemIndex)
+			return page.LoadDetail(ctx, runIndex, originalRow, pageIndex, itemIndex)
 		}
 		detailAction := strings.TrimSpace(page.DetailAction)
 		if detailAction == "" && len(extraActions) > 0 {
@@ -5937,6 +5986,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -5978,6 +6028,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = true
 			modalText = externalRefreshText
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -6064,6 +6115,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -6094,6 +6146,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		modalOpen = true
 		modalText = nil
 		helpModal = nil
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = nil
 		exportScopeCapture = func(event *tcell.EventKey) *tcell.EventKey {
@@ -6336,6 +6389,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -6394,6 +6448,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 				modalOpen = false
 				modalText = nil
 				helpModal = nil
+				detailModal.Close()
 				detailModal = nil
 				aliasModalCapture = nil
 				exportScopeCapture = nil
@@ -6432,6 +6487,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = true
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = singleLineInputCapture(app, buttons, input)
 			setPageRoot(app, overlayRootOn(pageRoot, box, renameDialogWidth, renameDialogHeight))
@@ -6452,6 +6508,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		closeModal = closeAliasModal
 		modalOpen = true
 		helpModal = nil
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = func(event *tcell.EventKey) *tcell.EventKey {
 			if event == nil {
@@ -6516,6 +6573,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			modalOpen = false
 			modalText = nil
 			helpModal = nil
+			detailModal.Close()
 			detailModal = nil
 			aliasModalCapture = nil
 			exportScopeCapture = nil
@@ -6581,6 +6639,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		modalOpen = true
 		modalText = nil
 		helpModal = nil
+		detailModal.Close()
 		detailModal = nil
 		aliasModalCapture = singleLineInputCapture(app, buttons, input)
 		setPageRoot(app, overlayRootOn(pageRoot, box, renameDialogWidth, renameDialogHeight))
@@ -6591,7 +6650,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		{Label: ButtonHome, Shortcut: ShortcutHome, Action: func() { result.Nav = NavHome; result.State = captureState(); app.Stop() }, Visible: page.AllowHome},
 		{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: copyCurrent, Visible: true},
 		{Label: conciseActionLabel(page.FilterText, ButtonFilter), Shortcut: ShortcutFilter, Action: requestFilter, Visible: true},
-		{Label: "Show tree tools", Shortcut: "Ctrl+T", Action: toggleTreeTools, Visible: page.TreePanel.Available, Primary: true},
+		{Label: "Show tree tools", Shortcut: ShortcutTreeTools, Action: toggleTreeTools, Visible: page.TreePanel.Available, Primary: true},
 	}
 	primaryActions := []buttonSpec{}
 	for _, extra := range orderedExtraActions {
@@ -6643,7 +6702,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 		hasItems := len(page.Items) > 0
 		for i := range actionButtonRow.buttons {
 			button := &actionButtonRow.buttons[i]
-			if strings.EqualFold(strings.TrimSpace(button.Shortcut), "Ctrl+T") {
+			if strings.EqualFold(strings.TrimSpace(button.Shortcut), ShortcutTreeTools) {
 				button.Visible = page.TreePanel.Available
 				if treeExpanded() {
 					button.Label = "Hide tree tools"
@@ -6850,7 +6909,7 @@ func RunBlastRunSelectionPage(page BlastRunSelectionPage) (BlastRunSelectionResu
 			showAliasModal()
 			return nil
 		}
-		if shortcutMatchesEvent("Ctrl+T", event) && page.TreePanel.Available {
+		if shortcutMatchesEvent(ShortcutTreeTools, event) && page.TreePanel.Available {
 			toggleTreeTools()
 			return nil
 		}
@@ -7218,7 +7277,7 @@ func RunSmallTextInputModal(page SmallTextInputModalPage) (SmallTextInputModalRe
 	var result SmallTextInputModalResult
 	input := tview.NewInputField().SetLabel(firstNonEmptyText(strings.TrimSpace(page.Label), "name") + " ").SetText(strings.TrimSpace(page.Initial)).SetFieldWidth(24)
 	input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	input.SetLabelColor(tview.Styles.SecondaryTextColor)
+	input.SetLabelColor(tview.Styles.PrimaryTextColor)
 	input.SetFieldBackgroundColor(colorPanel)
 	message := hintView("")
 	confirm := func() {
@@ -7540,7 +7599,7 @@ func RunExportSettingsModal(page ExportSettingsPage) (ExportSettingsResult, erro
 	fastaHeaderDropDown.SetCurrentOption(tuiFastaHeaderModeIndex(fastaHeaderMode, fastaHeaderValues))
 	fastaHeaderDropDown.SetFieldBackgroundColor(colorPanel)
 	fastaHeaderDropDown.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	fastaHeaderDropDown.SetLabelColor(tview.Styles.SecondaryTextColor)
+	fastaHeaderDropDown.SetLabelColor(tview.Styles.PrimaryTextColor)
 	for _, box := range []*checkboxModule{outputTextBox, outputAllRowsBox, outputExcelBox, outputRawBox, prependFirstBox} {
 		box.SetBorder(false)
 	}
@@ -8074,7 +8133,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	attachFocusBorder(motifBox.Box)
 	motifInput := tview.NewInputField().SetLabel("Motifs (comma-separated)").SetText(motifPatterns).SetFieldWidth(60)
 	motifInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	motifInput.SetLabelColor(tview.Styles.SecondaryTextColor)
+	motifInput.SetLabelColor(tview.Styles.PrimaryTextColor)
 	motifPasteStatus := newPasteStatus(func() { app.SetFocus(motifInput) })
 	pasteMotifs := func() {
 		runInputFieldPaste(app, motifInput, motifPasteStatus)
@@ -8105,7 +8164,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	partialItems := tview.NewInputField().SetLabel("partial evidence count >= ").SetText(settings.PartialMinMatchedItems).SetFieldWidth(8)
 	for _, input := range []*tview.InputField{presentCoverage, partialCoverage, presentItems, partialItems} {
 		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-		input.SetLabelColor(tview.Styles.SecondaryTextColor)
+		input.SetLabelColor(tview.Styles.PrimaryTextColor)
 	}
 
 	params := newButtonFlex()
@@ -8348,8 +8407,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), "Enter", func() { closeWithNav(NavBack) }, confirm))
 	addHints(modalBody, []string{
-		"Tab switches between BLAST labels, UniProt, InterPro, and Motif checker. Up/Down moves within the active settings. Space toggles a checkbox.",
-		"Ctrl+V pastes motifs. Enter applies. F1 opens context help.",
+		"Tab sections | Up/Down controls | Space toggle | Ctrl+V pastes motifs | Enter apply | F1 help",
 	})
 
 	messageHeight := 0
@@ -8479,10 +8537,10 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	minGroupInput := tview.NewInputField().SetLabel("minimum queries in a family ").SetText(settings.MinimumGroupSize).SetFieldWidth(8)
 	rankingOrderInput := tview.NewInputField().SetLabel("best-hit ranking order ").SetText(settings.RankingTieBreakerOrder).SetFieldWidth(36)
 	minGroupInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	minGroupInput.SetLabelColor(tview.Styles.SecondaryTextColor)
+	minGroupInput.SetLabelColor(tview.Styles.PrimaryTextColor)
 	minGroupInput.SetFieldBackgroundColor(colorPanel)
 	rankingOrderInput.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	rankingOrderInput.SetLabelColor(tview.Styles.SecondaryTextColor)
+	rankingOrderInput.SetLabelColor(tview.Styles.PrimaryTextColor)
 	rankingOrderInput.SetFieldBackgroundColor(colorPanel)
 
 	buildPreviewLines := func() []string {
@@ -8643,7 +8701,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 	body.AddItem(contentRow, 0, 1, true)
 	actionButtons := closeOnlyModalButtons([]buttonSpec{
 		buttonSpec{Label: ButtonHelp, Shortcut: ShortcutHelp, Action: showHelp, Visible: true},
-		buttonSpec{Label: "Refresh", Shortcut: "Ctrl+Shift+R", Action: func() {
+		buttonSpec{Label: "Refresh", Shortcut: ShortcutRefresh, Action: func() {
 			result.Settings = captureSettings()
 			result.Nav = NavRefresh
 			app.Stop()
@@ -8651,7 +8709,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 		buttonSpec{Label: "Customize groups", Shortcut: "Ctrl+G", Action: customizeGroups, Visible: true, Primary: true},
 	}, true, firstNonEmptyText(page.ConfirmText, ButtonApply), ShortcutApply, func() { closeWithNav(NavBack) }, confirm)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Up/Down moves through options. Space toggles a checkbox. Ctrl+Shift+R refreshes the preview after changing grouping or merging rules. Ctrl+G opens the group editor. Enter applies. F1 opens help."})
+	addHints(body, []string{"Up/Down options | Space toggle | F5 refresh | Ctrl+G groups | Enter apply | F1 help"})
 
 	buttonHeight := 1
 	if actionButtons != nil {
@@ -8675,7 +8733,7 @@ func RunFamilyBlastModal(page FamilyBlastPage) (FamilyBlastResult, error) {
 			showHelp()
 			return nil
 		}
-		if event.Key() == tcell.KeyCtrlR {
+		if shortcutMatchesEvent(ShortcutRefresh, event) {
 			result.Settings = captureSettings()
 			result.Nav = NavRefresh
 			app.Stop()
@@ -8820,7 +8878,7 @@ func familyBlastMemberInlineDisplay(member FamilyBlastMember) string {
 	if proteinID == "" {
 		return tview.Escape(label)
 	}
-	return tview.Escape(label) + " [yellow][" + tview.Escape(proteinID) + "][-]"
+	return tview.Escape(label) + " [white][" + tview.Escape(proteinID) + "][-]"
 }
 
 func familyBlastPreviewMemberText(member FamilyBlastMember) string {
@@ -9742,7 +9800,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 
 	actionButtons := buttonRow(
 		buttonSpec{Label: ButtonBack, Shortcut: ShortcutBack, Action: func() { result.Nav = NavBack; app.Stop() }, Visible: page.AllowBack},
-		buttonSpec{Label: "New group", Shortcut: "Ctrl+Shift+N", Action: createGroup, Visible: true},
+		buttonSpec{Label: "New group", Shortcut: ShortcutNewGroup, Action: createGroup, Visible: true},
 		buttonSpec{Label: "Rename", Shortcut: "F2", Action: renameSelected, Visible: true},
 		buttonSpec{Label: "Aliases", Shortcut: "Ctrl+L", Action: showSelectedAliases, Visible: true},
 		buttonSpec{Label: "Remove / delete", Shortcut: "Del", Action: removeOrDeleteSelected, Visible: true},
@@ -9750,7 +9808,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 		buttonSpec{Label: conciseActionLabel(firstNonEmptyText(page.ConfirmText, ButtonApply), ButtonApply), Shortcut: "Ctrl+R", Action: confirm, Visible: true, Primary: true},
 	)
 	addButtonRow(body, actionButtons)
-	addHints(body, []string{"Tab switches panes. Up/Down chooses items. Enter removes a grouped member or adds an ungrouped item. F2 renames the selected group/item. Ctrl+L opens item aliases. Ctrl+Y copies an alias in the alias dialog. Delete removes/deletes. Ctrl+Shift+N creates a group. Ctrl+R applies."})
+	addHints(body, []string{"Tab panes | Up/Down select | Enter move item | F2 rename | Ctrl+L aliases | Ctrl+Y copy | Del delete | F4 new group | Ctrl+R apply"})
 
 	mainRoot = infoModalRoot(modalFramePage(page.Breadcrumb, page.Path, page.Title), body, 148, 36)
 	refreshGroupedList()
@@ -9833,7 +9891,7 @@ func buildFamilyBlastCustomizeModal(page FamilyBlastCustomizePage, app *tview.Ap
 				return nil
 			}
 		}
-		if shortcutMatchesEvent("Ctrl+Shift+N", event) {
+		if shortcutMatchesEvent(ShortcutNewGroup, event) {
 			createGroup()
 			return nil
 		}
@@ -9879,7 +9937,7 @@ func RunBlastFilterModal(page BlastFilterPage) (BlastFilterResult, error) {
 	newInput := func(label string, text string, width int) *tview.InputField {
 		input := tview.NewInputField().SetLabel(label + " ").SetText(text).SetFieldWidth(width)
 		input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-		input.SetLabelColor(tview.Styles.SecondaryTextColor)
+		input.SetLabelColor(tview.Styles.PrimaryTextColor)
 		input.SetFieldBackgroundColor(colorPanel)
 		return input
 	}
@@ -10961,161 +11019,7 @@ func RunTaskValue[T any](page TaskPage, task func(update func(string)) (T, error
 }
 
 func runTaskValue[T any](page TaskPage, task func(ctx context.Context, update func(string)) (T, error)) (T, error) {
-	app := newApp()
-	var zero T
-	var result T
-	var taskErr error
-	var cancelled atomic.Bool
-	var stopped atomic.Bool
-	taskCtx, cancelTaskContext := context.WithCancel(context.Background())
-	defer cancelTaskContext()
-
-	status := strings.TrimSpace(page.Initial)
-	if status == "" {
-		status = strings.TrimSpace(page.Description)
-	}
-	if status == "" {
-		status = strings.TrimSpace(page.Title)
-	}
-
-	statusView := tview.NewTextView().
-		SetDynamicColors(true).
-		SetWrap(true).
-		SetTextColor(tview.Styles.PrimaryTextColor)
-	statusView.SetText(status)
-
-	modalBody := tview.NewFlex().SetDirection(tview.FlexRow)
-	modalBody.SetBorder(true)
-	modalBody.SetTitle(" " + trimColon(page.Title) + " ")
-	modalBody.SetTitleAlign(tview.AlignCenter)
-	setFocusBorder(modalBody.Box, true)
-	attachFocusBorder(modalBody.Box)
-	if strings.TrimSpace(page.Description) != "" {
-		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
-	}
-	modalBody.AddItem(statusView, 0, 1, true)
-	allowCancel := taskPageAllowCancel(page)
-	cancelTask := func() {
-		if cancelled.CompareAndSwap(false, true) {
-			cancelTaskContext()
-			statusView.SetText("Cancelling task...")
-		}
-	}
-	if allowCancel {
-		addButtonRow(modalBody, closeOnlyModalButtons(nil, false, "", "", cancelTask, nil))
-	}
-	setPageRoot(app, taskModalRoot(page, modalBody, 90, 14))
-	app.SetFocus(modalBody)
-	taskReady := make(chan struct{})
-	var taskReadyOnce sync.Once
-	afterDraw := app.GetAfterDrawFunc()
-	app.SetAfterDrawFunc(func(screen tcell.Screen) {
-		if afterDraw != nil {
-			afterDraw(screen)
-		}
-		taskReadyOnce.Do(func() {
-			close(taskReady)
-		})
-	})
-
-	var mu sync.Mutex
-	lastDraw := time.Time{}
-	setStatus := func(text string) {
-		if cancelled.Load() {
-			return
-		}
-		now := time.Now()
-		mu.Lock()
-		status = strings.TrimSpace(text)
-		if now.Sub(lastDraw) < uiThrottleDelay() {
-			mu.Unlock()
-			return
-		}
-		lastDraw = now
-		mu.Unlock()
-		app.QueueUpdateDraw(func() {
-			if cancelled.Load() {
-				return
-			}
-			statusView.SetText(status)
-		})
-	}
-
-	done := make(chan struct{})
-	var stopAnimation sync.Once
-	stop := func() {
-		stopAnimation.Do(func() {
-			close(done)
-		})
-	}
-	go func() {
-		if !waitForTaskStart(taskCtx, taskReady) {
-			return
-		}
-		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(uiAnimationDelay())
-		defer ticker.Stop()
-		frame := 0
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				mu.Lock()
-				text := status
-				mu.Unlock()
-				app.QueueUpdateDraw(func() {
-					statusView.SetText(fmt.Sprintf("[yellow]%s[white] %s", frames[frame%len(frames)], text))
-				})
-				frame++
-			}
-		}
-	}()
-
-	taskDone := make(chan struct{})
-	go func() {
-		defer close(taskDone)
-		if !waitForTaskStart(taskCtx, taskReady) {
-			taskErr = taskCtx.Err()
-			app.QueueUpdateDraw(func() {
-				if stopped.CompareAndSwap(false, true) {
-					app.Stop()
-				}
-			})
-			return
-		}
-		result, taskErr = task(taskCtx, setStatus)
-		app.QueueUpdateDraw(func() {
-			if stopped.CompareAndSwap(false, true) {
-				app.Stop()
-			}
-		})
-	}()
-
-	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if allowCancel && event.Key() == tcell.KeyEscape {
-			cancelTask()
-			return nil
-		}
-		return event
-	})
-	if err := runApp(app); err != nil {
-		cancelTaskContext()
-		<-taskDone
-		stop()
-		return zero, err
-	}
-	if cancelled.Load() {
-		<-taskDone
-		stop()
-		return zero, taskCancelError(page)
-	}
-	<-taskDone
-	stop()
-	if taskErr != nil {
-		return zero, taskErr
-	}
-	return result, nil
+	return runTaskValueInMainProcess(page, task)
 }
 
 func RunProgressTaskValue[T any](page TaskPage, task func(update func(current int, message string)) (T, error)) (T, error) {
@@ -11125,189 +11029,7 @@ func RunProgressTaskValue[T any](page TaskPage, task func(update func(current in
 }
 
 func runProgressTaskValue[T any](page TaskPage, task func(ctx context.Context, update func(current int, message string)) (T, error)) (T, error) {
-	app := newApp()
-	var zero T
-	var result T
-	var taskErr error
-	var cancelled atomic.Bool
-	var stopped atomic.Bool
-	taskCtx, cancelTaskContext := context.WithCancel(context.Background())
-	defer cancelTaskContext()
-	current := 0
-	status := strings.TrimSpace(page.Initial)
-	if status == "" {
-		status = strings.TrimSpace(page.Description)
-	}
-	if status == "" {
-		status = strings.TrimSpace(page.Title)
-	}
-	total := page.Total
-
-	statusView := tview.NewTextView().
-		SetDynamicColors(true).
-		SetWrap(true).
-		SetTextColor(tview.Styles.PrimaryTextColor)
-
-	render := func(frame string) string {
-		if total <= 0 {
-			return fmt.Sprintf("[yellow]%s[white] %s", frame, status)
-		}
-		ratio := float64(current) / float64(total)
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		width := 32
-		filled := int(ratio * float64(width))
-		return fmt.Sprintf("[yellow]%s[white] %s\n\n[deepskyblue]%s[white]%s  %d/%d (%3.0f%%)",
-			frame,
-			status,
-			strings.Repeat("#", filled),
-			strings.Repeat("-", width-filled),
-			current,
-			total,
-			ratio*100,
-		)
-	}
-	statusView.SetText(render("|"))
-
-	modalBody := tview.NewFlex().SetDirection(tview.FlexRow)
-	modalBody.SetBorder(true)
-	modalBody.SetTitle(" " + trimColon(page.Title) + " ")
-	modalBody.SetTitleAlign(tview.AlignCenter)
-	setFocusBorder(modalBody.Box, true)
-	attachFocusBorder(modalBody.Box)
-	if strings.TrimSpace(page.Description) != "" {
-		modalBody.AddItem(textBlock(page.Description), 2, 0, false)
-	}
-	modalBody.AddItem(statusView, 0, 1, true)
-	allowCancel := taskPageAllowCancel(page)
-	cancelTask := func() {
-		if cancelled.CompareAndSwap(false, true) {
-			cancelTaskContext()
-			statusView.SetText(render("|") + "\n\nCancelling task...")
-		}
-	}
-	if allowCancel {
-		addButtonRow(modalBody, closeOnlyModalButtons(nil, false, "", "", cancelTask, nil))
-	}
-	setPageRoot(app, taskModalRoot(page, modalBody, 90, 14))
-	app.SetFocus(modalBody)
-	taskReady := make(chan struct{})
-	var taskReadyOnce sync.Once
-	afterDraw := app.GetAfterDrawFunc()
-	app.SetAfterDrawFunc(func(screen tcell.Screen) {
-		if afterDraw != nil {
-			afterDraw(screen)
-		}
-		taskReadyOnce.Do(func() {
-			close(taskReady)
-		})
-	})
-
-	var mu sync.Mutex
-	lastDraw := time.Time{}
-	updateStatus := func(next int, message string) {
-		if cancelled.Load() {
-			return
-		}
-		now := time.Now()
-		mu.Lock()
-		current = next
-		if strings.TrimSpace(message) != "" {
-			status = strings.TrimSpace(message)
-		}
-		if now.Sub(lastDraw) < uiThrottleDelay() && next < total {
-			mu.Unlock()
-			return
-		}
-		lastDraw = now
-		mu.Unlock()
-		app.QueueUpdateDraw(func() {
-			if cancelled.Load() {
-				return
-			}
-			statusView.SetText(render("|"))
-		})
-	}
-
-	done := make(chan struct{})
-	var stopAnimation sync.Once
-	stop := func() {
-		stopAnimation.Do(func() {
-			close(done)
-		})
-	}
-	go func() {
-		if !waitForTaskStart(taskCtx, taskReady) {
-			return
-		}
-		frames := []string{"|", "/", "-", "\\"}
-		ticker := time.NewTicker(uiAnimationDelay())
-		defer ticker.Stop()
-		frame := 0
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				mu.Lock()
-				text := render(frames[frame%len(frames)])
-				mu.Unlock()
-				app.QueueUpdateDraw(func() {
-					statusView.SetText(text)
-				})
-				frame++
-			}
-		}
-	}()
-
-	taskDone := make(chan struct{})
-	go func() {
-		defer close(taskDone)
-		if !waitForTaskStart(taskCtx, taskReady) {
-			taskErr = taskCtx.Err()
-			app.QueueUpdateDraw(func() {
-				if stopped.CompareAndSwap(false, true) {
-					app.Stop()
-				}
-			})
-			return
-		}
-		result, taskErr = task(taskCtx, updateStatus)
-		app.QueueUpdateDraw(func() {
-			if stopped.CompareAndSwap(false, true) {
-				app.Stop()
-			}
-		})
-	}()
-
-	installInputCapture(app, func(event *tcell.EventKey) *tcell.EventKey {
-		if allowCancel && event.Key() == tcell.KeyEscape {
-			cancelTask()
-			return nil
-		}
-		return event
-	})
-	if err := runApp(app); err != nil {
-		cancelTaskContext()
-		<-taskDone
-		stop()
-		return zero, err
-	}
-	if cancelled.Load() {
-		<-taskDone
-		stop()
-		return zero, taskCancelError(page)
-	}
-	<-taskDone
-	stop()
-	if taskErr != nil {
-		return zero, taskErr
-	}
-	return result, nil
+	return runProgressTaskValueInMainProcess(page, task)
 }
 
 func pageBreadcrumb(fallback string, path []string) string {
@@ -11582,7 +11304,21 @@ func rowSelectionColumnWidths(columns []TableColumn, rows []TableRow, layout row
 }
 
 func taggedPaddedWidth(text string) int {
+	if plainASCIIWidth, ok := plainASCIITerminalWidth(text); ok {
+		return plainASCIIWidth + 4
+	}
 	return tview.TaggedStringWidth("  " + text + "  ")
+}
+
+func plainASCIITerminalWidth(text string) (int, bool) {
+	for i := 0; i < len(text); i++ {
+		// '[' may begin a tview color/style tag. Controls, DEL, and non-ASCII
+		// bytes need the full grapheme/tag-aware width implementation.
+		if text[i] < 0x20 || text[i] >= 0x7f || text[i] == '[' {
+			return 0, false
+		}
+	}
+	return len(text), true
 }
 
 func textViewLineCount(text string) int {
@@ -12302,8 +12038,9 @@ func (d *detailListPrimitive) MouseHandler() func(action tview.MouseAction, even
 	})
 }
 
-func newDetailOverlay(app *tview.Application, title string, pages []DetailPage, onCopy func() error, load func(pageIndex int, itemIndex int) (DetailItem, bool, error), extra func(pageIndex int, itemIndex int), close func()) *detailOverlay {
-	overlay := &detailOverlay{pages: append([]DetailPage(nil), pages...), load: load, extra: extra, app: app}
+func newDetailOverlay(app *tview.Application, title string, pages []DetailPage, onCopy func() error, load func(ctx context.Context, pageIndex int, itemIndex int) (DetailItem, bool, error), extra func(pageIndex int, itemIndex int), close func()) *detailOverlay {
+	ctx, cancel := context.WithCancel(context.Background())
+	overlay := &detailOverlay{pages: append([]DetailPage(nil), pages...), load: load, extra: extra, app: app, ctx: ctx, cancel: cancel}
 	titles := make([]string, 0, len(overlay.pages))
 	for _, page := range overlay.pages {
 		titles = append(titles, sanitizeDetailTabTitle(page.Title))
@@ -12321,7 +12058,7 @@ func newDetailOverlay(app *tview.Application, title string, pages []DetailPage, 
 	overlay.body.AddItem(overlay.tabs, 1, 0, false)
 	overlay.body.AddItem(overlay.list, 0, 1, true)
 	overlay.buttons = buttonRow(
-		buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: close, Visible: true},
+		buttonSpec{Label: ButtonClose, Shortcut: ShortcutBack, Action: func() { overlay.Close(); close() }, Visible: true},
 		buttonSpec{Label: ButtonCopy, Shortcut: ShortcutCopy, Action: func() { _ = onCopy() }, Visible: true},
 		buttonSpec{Label: ButtonRunBLAST, Shortcut: ShortcutBlast, Action: func() {
 			if overlay.extra == nil {
@@ -12335,6 +12072,15 @@ func newDetailOverlay(app *tview.Application, title string, pages []DetailPage, 
 	addHints(overlay.body, []string{"Up/Down chooses items. Mouse wheel or touchpad scroll moves the page content. Left/Right or Tab switches pages. FASTA starts loading automatically when its page opens. Enter reloads the selected loadable item. Ctrl+Y copies the selected item."})
 	overlay.SetPage(0)
 	return overlay
+}
+
+// Close stops spinner/result workers before the overlay is removed. It is
+// safe to call from either a UI callback or a navigation handler.
+func (d *detailOverlay) Close() {
+	if d == nil || !d.closed.CompareAndSwap(false, true) {
+		return
+	}
+	d.cancel()
 }
 
 func (d *detailOverlay) SetPage(index int) {
@@ -12376,6 +12122,9 @@ func (d *detailOverlay) CurrentIndexes() (int, int) {
 }
 
 func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
+	if d == nil || d.closed.Load() {
+		return false, context.Canceled
+	}
 	if d.load == nil {
 		return false, nil
 	}
@@ -12395,7 +12144,7 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 	d.pages[pageIndex].Items[itemIndex] = item
 	d.list.SetItems(d.pages[pageIndex].Items)
 	if d.app == nil {
-		updated, handled, err := d.load(pageIndex, itemIndex)
+		updated, handled, err := d.load(d.ctx, pageIndex, itemIndex)
 		if err != nil {
 			item.Loading = false
 			d.pages[pageIndex].Items[itemIndex] = item
@@ -12403,12 +12152,18 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 			return handled, err
 		}
 		if handled {
+			updated.Loading = false
 			d.pages[pageIndex].Items[itemIndex] = updated
 			d.list.SetItems(d.pages[pageIndex].Items)
+		} else {
+			item.Loading = false
+			d.pages[pageIndex].Items[itemIndex] = item
 		}
 		return handled, nil
 	}
+	d.workers.Add(2)
 	go func() {
+		defer d.workers.Done()
 		ticker := time.NewTicker(120 * time.Millisecond)
 		defer ticker.Stop()
 		done := make(chan struct{})
@@ -12416,7 +12171,8 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 		var handled bool
 		var loadErr error
 		go func() {
-			updated, handled, loadErr = d.load(pageIndex, itemIndex)
+			defer d.workers.Done()
+			updated, handled, loadErr = d.load(d.ctx, pageIndex, itemIndex)
 			close(done)
 		}()
 		step := 0
@@ -12425,9 +12181,11 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 			select {
 			case <-done:
 				break loop
+			case <-d.ctx.Done():
+				return
 			case <-ticker.C:
 				step++
-				_ = d.app.QueueUpdateDraw(func() {
+				if !d.app.QueueUpdateDrawContext(d.ctx, func() {
 					current := d.pages[pageIndex].Items[itemIndex]
 					if !current.Loading {
 						return
@@ -12437,10 +12195,12 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 					if d.current == pageIndex {
 						d.list.SetItems(d.pages[pageIndex].Items)
 					}
-				})
+				}) {
+					return
+				}
 			}
 		}
-		_ = d.app.QueueUpdateDraw(func() {
+		if !d.app.QueueUpdateDrawContext(d.ctx, func() {
 			if loadErr != nil {
 				current := d.pages[pageIndex].Items[itemIndex]
 				current.Loading = false
@@ -12450,12 +12210,18 @@ func (d *detailOverlay) TriggerCurrentLoad() (bool, error) {
 				current.ActionKey = ""
 				d.pages[pageIndex].Items[itemIndex] = current
 			} else if handled {
+				updated.Loading = false
 				d.pages[pageIndex].Items[itemIndex] = updated
+			} else {
+				item.Loading = false
+				d.pages[pageIndex].Items[itemIndex] = item
 			}
 			if d.current == pageIndex {
 				d.list.SetItems(d.pages[pageIndex].Items)
 			}
-		})
+		}) {
+			return
+		}
 	}()
 	return true, nil
 }
@@ -12643,7 +12409,7 @@ func scrollTextView(view *tview.TextView, delta int) {
 }
 
 func isCopyShortcut(event *tcell.EventKey) bool {
-	return shortcutMatchesEvent("Ctrl+C", event) || shortcutMatchesEvent("Ctrl+Shift+C", event) || shortcutMatchesEvent(ShortcutCopy, event)
+	return shortcutMatchesEvent(ShortcutCopy, event)
 }
 
 func maxInt(left, right int) int {
@@ -12860,12 +12626,16 @@ type flexAdder interface {
 }
 
 func addHints(body flexAdder, hints []string) {
+	lines := make([]string, 0, len(hints))
 	for _, hint := range hints {
 		hint = strings.TrimSpace(hint)
 		if hint == "" {
 			continue
 		}
-		body.AddItem(hintView(hint), 1, 0, false)
+		lines = append(lines, hint)
+	}
+	if len(lines) > 0 {
+		body.AddItem(hintView(strings.Join(lines, " | ")), 1, 0, false)
 	}
 }
 
@@ -13181,7 +12951,7 @@ func newNameInputField(initial string) *tview.InputField {
 		SetText(strings.TrimSpace(initial)).
 		SetFieldWidth(renameDialogFieldWidth)
 	input.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	input.SetLabelColor(tview.Styles.SecondaryTextColor)
+	input.SetLabelColor(tview.Styles.PrimaryTextColor)
 	input.SetFieldBackgroundColor(colorPanel)
 	return input
 }
@@ -13280,7 +13050,7 @@ func addButtonRow(body flexAdder, row *buttonRowPrimitive) {
 	if body == nil || row == nil {
 		return
 	}
-	body.AddItem(row, 1, 0, false)
+	body.AddItem(row, 1, 0, true)
 	if flex, ok := body.(*buttonFlex); ok {
 		flex.rows = append(flex.rows, row)
 	}
@@ -13335,6 +13105,9 @@ func (b *buttonRowPrimitive) Draw(screen tcell.Screen) {
 		if pos.button.Primary {
 			style = tcell.StyleDefault.Background(colorAction).Foreground(colorActionText).Bold(true)
 		}
+		if b.HasFocus() && pos.index == b.selected {
+			style = tcell.StyleDefault.Background(colorAction).Foreground(colorText).Bold(true)
+		}
 		printStyledText(screen, x+pos.left, drawY, pos.right-pos.left, style, " "+pos.label+" ")
 	}
 }
@@ -13351,7 +13124,30 @@ func (b *buttonRowPrimitive) InputHandler() func(event *tcell.EventKey, setFocus
 		if event == nil {
 			return
 		}
-		if event.Key() != tcell.KeyEnter && !(event.Key() == tcell.KeyRune && event.Rune() == ' ') {
+		_, _, width, _ := b.GetInnerRect()
+		positions := b.buttonPositions(maxInt(1, width))
+		if len(positions) == 0 {
+			return
+		}
+		if b.selected < 0 || b.selected >= len(positions) {
+			b.selected = 0
+		}
+		switch event.Key() {
+		case tcell.KeyLeft, tcell.KeyUp:
+			b.selected = (b.selected - 1 + len(positions)) % len(positions)
+			return
+		case tcell.KeyRight, tcell.KeyDown:
+			b.selected = (b.selected + 1) % len(positions)
+			return
+		case tcell.KeyRune:
+			if event.Rune() == ' ' {
+				if action := positions[b.selected].button.Action; action != nil {
+					action()
+				}
+			}
+			return
+		case tcell.KeyEnter:
+		default:
 			return
 		}
 		if button := b.primaryButton(); button != nil && button.Visible && button.Action != nil {
@@ -13630,7 +13426,11 @@ func (b *buttonRowPrimitive) MouseHandler() func(action tview.MouseAction, event
 				continue
 			}
 			if action == tview.MouseLeftDown {
-				return true, nil
+				return true, b
+			}
+			b.selected = pos.index
+			if setFocus != nil {
+				setFocus(b)
 			}
 			if pos.button.Action != nil {
 				pos.button.Action()
@@ -13643,6 +13443,7 @@ func (b *buttonRowPrimitive) MouseHandler() func(action tview.MouseAction, event
 
 type buttonPosition struct {
 	button buttonSpec
+	index  int
 	label  string
 	row    int
 	left   int
@@ -13735,6 +13536,9 @@ func (b *buttonRowPrimitive) buttonPositions(width int) []buttonPosition {
 			right = left - 1
 		}
 	}
+	for index := range positions {
+		positions[index].index = index
+	}
 	return positions
 }
 
@@ -13811,24 +13615,6 @@ func navCapture(app *tview.Application, allowBack bool, allowHome bool, nav func
 	}
 }
 
-func isLegacyCtrlModifiedEnter(event *tcell.EventKey) bool {
-	if event == nil {
-		return false
-	}
-	switch event.Key() {
-	case tcell.KeyEnter:
-		return event.Modifiers()&tcell.ModCtrl != 0
-	case tcell.KeyF13:
-		// Legacy compatibility for saved/custom shortcut definitions that use
-		// a control-modified Enter transport. Primary actions use Ctrl+R.
-		// This avoids Ctrl+J/Ctrl+M, which are indistinguishable from pasted
-		// LF/CR bytes in a terminal, and avoids CSI-u, unsupported by our tcell.
-		return event.Modifiers() == tcell.ModNone
-	default:
-		return false
-	}
-}
-
 // isCtrlRun is the canonical primary-action shortcut. Ctrl+R intentionally
 // uses the normal rune transport so it works consistently across terminals.
 func isCtrlRun(event *tcell.EventKey) bool {
@@ -13856,6 +13642,9 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 	if app == nil || status == nil || insert == nil {
 		return
 	}
+	if !status.busy.CompareAndSwap(false, true) {
+		return
+	}
 	id := status.seq.Add(1)
 	status.view.SetTextColor(tview.Styles.SecondaryTextColor)
 	status.view.SetText("Reading clipboard...")
@@ -13863,6 +13652,7 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 		status.focus()
 	}
 	go func() {
+		defer status.busy.Store(false)
 		text, err := pasteClipboardText()
 		if err == nil {
 			text, err = sanitizePastedText(text)
@@ -13872,8 +13662,7 @@ func runInlinePaste(app *tview.Application, status *pasteStatus, insert func(str
 				return
 			}
 			if err != nil {
-				status.view.SetTextColor(colorMuted)
-				status.view.SetText("Paste failed: " + err.Error())
+				status.view.SetText("[yellow]Paste failed: " + tview.Escape(err.Error()))
 				if status.focus != nil {
 					status.focus()
 				}
@@ -14082,160 +13871,4 @@ func conciseActionLabel(value string, fallback string) string {
 	default:
 		return value
 	}
-}
-
-func shortcutMatchesEvent(shortcut string, event *tcell.EventKey) bool {
-	if event == nil {
-		return false
-	}
-	shortcut = strings.ToLower(strings.TrimSpace(shortcut))
-	if shortcut == "" {
-		return false
-	}
-	parts := strings.Split(shortcut, "+")
-	wantCtrl := false
-	wantShift := false
-	wantAlt := false
-	keyName := ""
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		switch part {
-		case "ctrl":
-			wantCtrl = true
-		case "shift":
-			wantShift = true
-		case "alt":
-			wantAlt = true
-		case "":
-		default:
-			if keyName != "" {
-				return false
-			}
-			keyName = part
-		}
-	}
-	if wantAlt {
-		return false
-	}
-	switch keyName {
-	case "f1":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF1
-	case "f2":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF2
-	case "f3":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF3
-	case "f4":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF4
-	case "f5":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF5
-	case "f6":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF6
-	case "f7":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF7
-	case "f8":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF8
-	case "f9":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF9
-	case "f10":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF10
-	case "f11":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF11
-	case "f12":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyF12
-	case "esc", "escape":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyEscape
-	case "enter":
-		if wantCtrl {
-			return isLegacyCtrlModifiedEnter(event)
-		}
-		return event.Key() == tcell.KeyEnter && ((event.Modifiers()&tcell.ModCtrl) != 0) == wantCtrl && ((event.Modifiers()&tcell.ModShift) != 0) == wantShift
-	case "space":
-		return !wantCtrl && !wantShift && event.Key() == tcell.KeyRune && event.Rune() == ' '
-	case "del", "delete":
-		return !wantCtrl && !wantShift && (event.Key() == tcell.KeyDelete || event.Key() == tcell.KeyDEL)
-	case "":
-		return false
-	}
-	if wantCtrl {
-		if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModCtrl != 0 {
-			if strings.EqualFold(string(event.Rune()), keyName) {
-				if !wantShift {
-					return true
-				}
-				if event.Modifiers()&tcell.ModShift != 0 || strings.ToUpper(string(event.Rune())) == keyName {
-					return true
-				}
-			}
-		}
-		switch keyName {
-		case "a":
-			return event.Key() == tcell.KeyCtrlA
-		case "b":
-			return event.Key() == tcell.KeyCtrlB
-		case "c":
-			return event.Key() == tcell.KeyCtrlC
-		case "d":
-			return event.Key() == tcell.KeyCtrlD
-		case "e":
-			return event.Key() == tcell.KeyCtrlE
-		case "g":
-			return event.Key() == tcell.KeyCtrlG
-		case "h":
-			return event.Key() == tcell.KeyCtrlH
-		case "j":
-			return event.Key() == tcell.KeyCtrlJ && !strings.EqualFold(keyName, "enter")
-		case "k":
-			return event.Key() == tcell.KeyCtrlK
-		case "l":
-			return event.Key() == tcell.KeyCtrlL
-		case "n":
-			// Bare Ctrl+N is intentionally not a valid application shortcut;
-			// terminals may emit it while streaming multiline paste.
-			return false
-		case "m":
-			// Ctrl+M is carriage return in terminal input and must never be
-			// bound as an application shortcut.
-			return false
-		case "o":
-			return event.Key() == tcell.KeyCtrlO
-		case "r":
-			return event.Key() == tcell.KeyCtrlR
-		case "u":
-			return event.Key() == tcell.KeyCtrlU
-		case "v":
-			return event.Key() == tcell.KeyCtrlV
-		case "w":
-			return event.Key() == tcell.KeyCtrlW
-		case "y":
-			return event.Key() == tcell.KeyCtrlY
-		case "1":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '1'
-		case "2":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '2'
-		case "3":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '3'
-		case "4":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '4'
-		case "5":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '5'
-		case "6":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '6'
-		case "7":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '7'
-		case "8":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '8'
-		case "9":
-			return wantCtrl && event.Key() == tcell.KeyRune && event.Rune() == '9'
-		default:
-			return false
-		}
-	}
-	if wantShift || event.Key() != tcell.KeyRune {
-		return false
-	}
-	key := strings.ToLower(string(event.Rune()))
-	if key == "" {
-		return false
-	}
-	return keyName == key
 }

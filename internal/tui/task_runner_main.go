@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -50,7 +51,7 @@ func runTaskModal[T any](page TaskPage, task func(ctx context.Context, update fu
 		body.AddItem(textBlock(description), 2, 0, false)
 	}
 	body.AddItem(statusView, 0, 1, true)
-	addHints(body, []string{"Esc requests cancellation. Concurrent work is shown in up to 5 live progress rows."})
+	addHints(body, []string{"Esc cancels"})
 
 	root, overlay := newTaskModalRoot(page, body, 118, 18)
 	setPageRoot(app, root)
@@ -75,7 +76,10 @@ func runTaskModal[T any](page TaskPage, task func(ctx context.Context, update fu
 	)
 
 	refresh := func() {
-		slots := sharedTaskOverlay.snapshot(5, parentID, currentSlot)
+		mu.Lock()
+		slot := currentSlot
+		mu.Unlock()
+		slots := sharedTaskOverlay.snapshot(5, parentID, slot)
 		statusView.SetText(renderTaskProgressSlots("|", slots))
 		overlay.SetSize(118, taskModalHeightForSlots(page, slots))
 	}
@@ -93,24 +97,22 @@ func runTaskModal[T any](page TaskPage, task func(ctx context.Context, update fu
 		currentSlot = next
 		updateParent(currentSlot)
 		mu.Unlock()
-		app.QueueUpdateDraw(refresh)
 	}
 
 	requestCancel := func() {
 		mu.Lock()
 		cancelRequested = true
+		currentSlot.Status = "Cancelling..."
+		updateParent(currentSlot)
 		mu.Unlock()
 		cancel()
-		updateCurrent(taskProgressSlot{
-			Status:  "Cancelling...",
-			Current: currentSlot.Current,
-			Total:   currentSlot.Total,
-			Active:  true,
-		})
+		// Input callbacks already run on the UI thread. Never synchronously
+		// queue back onto that same thread.
+		refresh()
 	}
 
 	addButtonRow(body, buttonRow(buttonSpec{
-		Label:    ButtonClose,
+		Label:    ButtonCancel,
 		Shortcut: ShortcutBack,
 		Action:   requestCancel,
 		Visible:  true,
@@ -122,17 +124,53 @@ func runTaskModal[T any](page TaskPage, task func(ctx context.Context, update fu
 		_, update, remove := sharedTaskOverlay.register(normalizedTaskProgressSlot(slot))
 		return func(next taskProgressSlot) {
 				update(normalizedTaskProgressSlot(next))
-				app.QueueUpdateDraw(refresh)
 			}, func() {
 				remove()
-				app.QueueUpdateDraw(refresh)
 			}
 	}))
 
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	afterDraw := app.GetAfterDrawFunc()
+	app.SetAfterDrawFunc(func(screen tcell.Screen) {
+		if afterDraw != nil {
+			afterDraw(screen)
+		}
+		readyOnce.Do(func() { close(ready) })
+	})
+	// One refresh worker coalesces progress from every producer. Task update
+	// frequency and child count cannot grow the UI queue or goroutine count.
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		if !waitForTaskStart(ctx, ready) {
+			return
+		}
+		ticker := time.NewTicker(uiAnimationDelay())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-app.Done():
+				return
+			case <-ticker.C:
+				if !app.QueueUpdateDrawContext(ctx, refresh) {
+					return
+				}
+			}
+		}
+	}()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		out, err := task(taskCtx, updateCurrent)
+		var out T
+		var err error
+		if waitForTaskStart(ctx, ready) {
+			out, err = task(taskCtx, updateCurrent)
+		} else {
+			err = ctx.Err()
+		}
 		mu.Lock()
 		result = out
 		if cancelRequested && (err == nil || errors.Is(err, context.Canceled)) {
@@ -170,22 +208,20 @@ func runTaskModal[T any](page TaskPage, task func(ctx context.Context, update fu
 		return event
 	})
 
-	if err := runApp(app); err != nil {
-		return zero, err
-	}
-
-	mu.Lock()
-	cancelled := cancelRequested
-	mu.Unlock()
-	if cancelled {
-		<-done
-	} else {
-		<-done
+	runErr := runApp(app)
+	cancel()
+	// Also release queues when an initialization error/test runner never
+	// entered Application.Run. Join both workers before returning.
+	app.Stop()
+	<-done
+	<-refreshDone
+	if runErr != nil {
+		return zero, runErr
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if cancelled && taskErr == nil {
+	if cancelRequested && taskErr == nil {
 		taskErr = taskCancelError(page)
 	}
 	return result, taskErr

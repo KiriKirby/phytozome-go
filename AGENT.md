@@ -247,7 +247,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - BLAST result table headers with ratio-style `/` labels must render as two physical header rows only in BLAST tables. Keep the numerator and trailing slash on the first row, for example `align_len /`, and put the denominator on the second row, for example `query_length (%)`. Non-BLAST tables must not split headers just because a `/` appears.
   - Do not draw scrollbars or hidden row/column status bars in table modules. The row-number header shows the total row count, for example `38 lines`, and the table itself handles vertical and horizontal navigation.
   - `View` in table-cell control means a large modal showing all available details for the currently focused normal data row, not a summary of all selected rows or the whole table. The row-number column is a valid row focus for row View. In column-header control, `View` shows a column explanation modal for the currently focused header, with English, Chinese, and Japanese explanations. On group/header rows outside header-control, on the checkbox column, or when no data row/column can be viewed, invalid view attempts should show a small OK-only modal instead of returning a workflow error.
-  - `Copy` in row-selection tables copies only the currently focused normal data cell to the clipboard. The row-number column is copyable and copies the row number. It is exposed as a button plus `Ctrl+Shift+C`, and is disabled with a small OK-only modal in header control, on checkbox/group/header cells, or when no copyable cell is selected.
+  - `Copy` in row-selection tables copies only the currently focused normal data cell to the clipboard. The row-number column is copyable and copies the row number. It is exposed as a button plus `Ctrl+Y`, and is disabled with a small OK-only modal in header control, on checkbox/group/header cells, or when no copyable cell is selected.
   - Copy success should be silent. Do not open a success modal, do not flash the Copy button, and do not call `Application.Draw()` directly from table/button callbacks; only failure or invalid-copy cases should open a small OK-only modal.
 - Keyword and BLAST result row-selection tables expose an `Aliases` action with `Ctrl+L` only when a normal `label_name` data cell is focused. It opens the same alias-labelname chooser semantics as the Family BLAST custom-group editor, including adaptive height from alias count, a `Rename`/`F2` single-input custom labelname dialog, and row updates to `label_name`, `labelname_type`, and pinned `phgo_alias` so later BLAST transfer, FASTA headers, Excel export, and reports consume the chosen label.
   - Display-column lists affect only the table view. Exports, generated files, and View row-detail dialogs must continue to use the full underlying model data.
@@ -345,7 +345,7 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - current startup sub-options: `Keyword` offers `Phytozome keyword` and `lemna keyword`; `Blast` offers `Phytozome blast` and `lemna blast`; `Tools` currently offers `Pathway search` as an entry placeholder only.
   - `Pathway search` must remain an inert/placeholder entry until its pathway implementation is added. It should not silently run keyword or BLAST behavior.
   - mouse clicks select/focus widgets only; mouse clicks on selection lists must not advance to the next module or enter the next page
-  - bottom hints use `TextView` lines for keyboard shortcuts and explanations not already visible as buttons
+  - bottom hints use exactly one non-wrapping `TextView` row per screen for keyboard shortcuts and explanations not already visible as buttons; concatenate hint fragments left-to-right and end overflow with `...`
 - Resize behavior:
   - let tview/tcell own resize handling through the default application and screen
   - on Windows, keep a lightweight resize sync fallback because maximizing, minimizing, or restoring `conhost.exe` can miss the normal resize event; the fallback should ask the active tcell screen to resync instead of rebuilding page state
@@ -376,8 +376,8 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
     - modal dismissal: `Close (Esc)`, `OK (Enter)`
     - selection/progression: `Start (Enter)`, `Select (Enter)`, `Search (Enter)`, `Run BLAST (Ctrl+B)` when launched from a result table and `Run BLAST (Enter)` when it is the primary action of a dedicated BLAST start page, `Apply (Enter)`, `Auto identify (Enter)` when it is the primary empty-input action, `Save (Enter)`, `View (Enter)`
     - export/results: `Export (Ctrl+G)`; multi-table pages choose current table versus all tables inside the export scope modal instead of showing `Export all`
-    - table selection shortcuts only, not visible buttons: `Ctrl+A` select all, `Ctrl+N` clear all, `Space` toggle current row
-    - editing/recovery: `Paste (Ctrl+V)`, `Retry (Ctrl+R)`, `Skip (Ctrl+R)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
+    - table selection shortcuts only, not visible buttons: `Ctrl+A` select all, `F4` clear all, `Space` toggle current row
+    - editing/recovery: `Paste (Ctrl+V)`, `New group (F4)`, `Retry (F5)`, `Refresh (F5)`, `Skip (Ctrl+K)` when it is a secondary input-page action, `Install (Enter)`, `Yes (Enter)`, `No`
   - identical or similar actions must use identical labels across all pages; export actions are always `Export`, not `Generate file`, `Write file`, or `Create`
   - every interactive page after the startup page should expose a Home button that returns to database/startup selection
   - every full-screen page that exposes Back must map Back to the immediately previous full-screen page in the user-visible flow
@@ -450,9 +450,9 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - text input pages should use widget-local handlers such as `InputField.SetDoneFunc` or widget `SetInputCapture` for widget-specific behavior, following `fen`; app-level capture is only for global Ctrl navigation
   - do not install no-op Tab captures; only intercept Tab on pages with multiple focusable modules where Tab has an explicit app-level focus-switching meaning
   - navigation on input pages should primarily use real buttons and Ctrl shortcuts, avoiding duplicate key processing
-  - in multi-line text areas, Enter inserts a new line; the main/progression action must only use a key event that is explicitly `KeyEnter` with `ModCtrl`
+  - in multi-line text areas, Enter inserts a new line; `Ctrl+R` performs the page's main/progression action
   - do not treat `KeyCtrlJ` or `KeyCtrlM` as multi-line confirmation because many terminals encode ordinary Enter or pasted newlines as those values
-  - never bind plain letter shortcuts on input pages; use Ctrl shortcuts for navigation and secondary actions, and Enter for the page's primary action, including multi-line input pages
+  - never bind plain letter shortcuts on input pages; use Ctrl or function-key shortcuts for navigation and secondary actions; single-line input uses Enter for next/apply, while multi-line input uses Ctrl+R
 - Paste behavior:
   - keep the default tview/tcell paste path provided by `EnablePaste(true)` and the focused input widget
   - input, multi-line input, and search pages may also expose a Paste button plus `Ctrl+V` as an explicit app action that reads the system clipboard and inserts through the focused widget's paste handler
@@ -461,17 +461,18 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - pasted text must continue to pass through the shared clipboard read and sanitization path before insertion, including UTF-8 validation, newline normalization, ANSI escape stripping, control-character filtering, and empty-content validation
   - the app-level Paste action must not replace or disable normal terminal paste behavior
   - do not fix Paste focus problems with page-level focus locks or broad app-level mouse/key capture; keep focus behavior close to tview defaults and fix the Paste flow itself
-  - `Ctrl+Shift+C` is reserved for row-selection table cell copy. Do not bind `Ctrl+Shift+V` because terminals often reserve it for paste.
+  - `Ctrl+C`, `Ctrl+Enter`, `Ctrl+Shift+C`, and `Ctrl+Shift+V` are terminal-owned or ambiguous and must never be application shortcuts. Row-selection table copy is `Ctrl+Y`.
 - Color rules:
   - centralize all TUI colors in the shared theme constants
   - canvas/background: black
   - normal panel/select background: dark blue
   - normal text: ghost white
-  - secondary/help text: yellow
+  - secondary/help text: light gray
   - accent/status text: green
   - inactive borders and titles: white
   - focused borders, focused titles, selected text, and primary/progression buttons: the same bright blue
-  - primary/progression button text: black for contrast
+  - primary/progression button text: white
+  - yellow is reserved for warnings and deliberate highlight states; ordinary controls, option labels, metadata, IDs, and shortcut tokens are white. Canvas may retain its pale-yellow focus/highlight exception.
 - Use one consistent page pattern for interactive steps:
   - a short page title that names the step
   - one or two lines that explain what the user is doing
@@ -560,6 +561,10 @@ This file tracks the intended shape of `phytozome GO` and its release packaging,
   - every such modal should include a `Help (F1)` button using the shared three-language help template; remember the last help language for the current session
   - text and controls must wrap or use vertical module layout rather than overflowing horizontally; modal height should fit actual content without unnecessary dead space
 - Performance and concurrency:
+  - TUI mouse support must not redraw the application for idle, no-button pointer motion. PHgo has no hover-only visual state; swallow those events at the application mouse capture and retain button-held motion for text selection, dropdown dragging, clicks, and wheel input. This avoids full-screen redraw amplification in large windows.
+  - Bundled WezTerm periodic status callbacks must not repeatedly assign already-empty left/right status text. Keep tab-count close-confirmation synchronization, but avoid no-op status mutations whose render invalidation cost grows with the number of tabs.
+  - Custom editable grids must cache column widths, wrapped visual lines, row heights, display-row numbers, and unchanged status text across draws. Invalidate these caches on content edits, paste, row-count changes, or viewport-width changes so large windows do not repeatedly scan and re-wrap the full backing grid while preserving identical layout and interaction coordinates.
+  - Large result-table width scans may use a direct byte-width fast path only for printable ASCII strings that cannot contain tview style tags. Unicode, control text, and any string containing the `[` tag introducer must keep the full tview grapheme/tag-aware width path so column geometry and display remain unchanged.
   - all new network clients must use `internal/netconfig.DefaultHTTPClient()` or receive the shared workflow client; do not use `http.DefaultClient` or construct ad-hoc `http.Client` values in production code
   - global network fanout must come from `internal/netconfig.DefaultNetworkWorkers()` / `NetworkWorkerCount(total)`, which currently defaults to `max(GOMAXPROCS*16, 96)` and can be raised with `PHYTOZOME_GO_MAX_WORKERS`; HTTP idle pools use the same shared defaults and `PHYTOZOME_GO_MAX_IDLE_CONNS*` overrides
   - all new ordinary batch-safe parallel loops should reuse the existing shared/cancellable worker helpers where available, or the package's `netconfig`-backed worker count plus first-error cancellation, so dynamic worker counts, context cancellation, and first-error cancellation stay consistent
@@ -958,7 +963,9 @@ Priority 4 (low / optional)
 
 ## Output behavior
 
-- TUI shortcut safety: multiline bracketed paste may deliver embedded line breaks as `Ctrl+J`/line-feed events. `Ctrl+J` must never be treated as `Ctrl+R` or any submit action. Clear/new-group actions use `Ctrl+Shift+N`; do not introduce bare `Ctrl+N` or `Ctrl+M` shortcuts that can collide with terminal paste/edit control characters.
+- TUI shortcut safety: multiline bracketed paste may deliver embedded line breaks as `Ctrl+J`/line-feed events. `Ctrl+J` must never be treated as `Ctrl+R` or any submit action. Clear/new-group actions use `F4`, and refresh/retry uses `F5`; do not introduce bare `Ctrl+N` or `Ctrl+M` shortcuts that can collide with terminal paste/edit control characters.
+- `internal/tui/ShortcutMap` is the runtime shortcut registry and `doc2/ui/shortcuts.md` is its user/developer reference. New shortcuts must be added to both, must use exact modifier matching, and must avoid bundled WezTerm defaults documented there.
+- TUI background work must have bounded producer counts and explicit lifetime ownership. Page/overlay cancellation must release queued updates and stop timers; close paths must not synchronously wait for workers that may be waiting on the UI event loop. The local tview fork exposes `Application.Done` and cancellable queue helpers for this contract.
 
 - The website's `docs/wt.html` FASTA Header Tools includes a Batch FASTA Record Filter task. It takes one case-insensitive header substring per line and can either remove every matching FASTA record or retain only matching records; record parsing must preserve complete records and support normal adjacent FASTA entries as well as entries separated by blank lines.
 

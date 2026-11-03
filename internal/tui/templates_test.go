@@ -135,7 +135,8 @@ func TestExternalReferenceModalCtrlVPastesMotifs(t *testing.T) {
 		pasteClipboardText = oldPasteClipboardText
 	}()
 
-	pasteClipboardText = func() (string, error) { return "AX-[N/S]", nil }
+	pasteRead := make(chan struct{})
+	pasteClipboardText = func() (string, error) { close(pasteRead); return "AX-[N/S]", nil }
 	var screenRef tcell.SimulationScreen
 	newApp = func() *tview.Application {
 		configStyles()
@@ -152,13 +153,21 @@ func TestExternalReferenceModalCtrlVPastesMotifs(t *testing.T) {
 	runApp = func(app *tview.Application) error {
 		go func() {
 			screenRef.InjectKey(tcell.KeyCtrlV, 0, tcell.ModCtrl)
+			<-pasteRead
 			deadline := time.Now().Add(2 * time.Second)
 			for time.Now().Before(deadline) {
-				if input, ok := app.GetFocus().(*tview.InputField); ok && input.GetText() == "AX-[N/S]" {
-					screenRef.InjectKey(tcell.KeyEnter, 0, tcell.ModNone)
+				pasted := false
+				if !app.QueueUpdateContext(context.Background(), func() {
+					input, ok := app.GetFocus().(*tview.InputField)
+					pasted = ok && input.GetText() == "AX-[N/S]"
+				}) {
 					return
 				}
-				time.Sleep(10 * time.Millisecond)
+				if pasted {
+					app.QueueEvent(tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone))
+					return
+				}
+				time.Sleep(time.Millisecond)
 			}
 			t.Error("Ctrl+V did not paste into the motif input")
 			app.Stop()
@@ -1064,7 +1073,7 @@ func TestDetailOverlayAutoLoadsCurrentPage(t *testing.T) {
 			Value:    "Sequence not loaded yet.",
 			AutoLoad: true,
 		}}},
-	}, func() error { return nil }, func(pageIndex int, itemIndex int) (DetailItem, bool, error) {
+	}, func() error { return nil }, func(ctx context.Context, pageIndex int, itemIndex int) (DetailItem, bool, error) {
 		calls++
 		return DetailItem{Label: "FASTA", Value: ">PAL1\nMPEPTIDE"}, true, nil
 	}, func(int, int) {}, func() {})
@@ -1076,6 +1085,56 @@ func TestDetailOverlayAutoLoadsCurrentPage(t *testing.T) {
 	}
 	if got := overlay.pages[1].Items[0].Value; got != ">PAL1\nMPEPTIDE" {
 		t.Fatalf("autoload value = %q", got)
+	}
+}
+
+func TestDetailOverlayCloseCancelsLoadAndStopsUpdates(t *testing.T) {
+	app := newApp()
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	overlay := newDetailOverlay(app, "Row details", []DetailPage{{
+		Title: "FASTA",
+		Items: []DetailItem{{Label: "FASTA", Value: "Sequence not loaded yet.", AutoLoad: true}},
+	}}, func() error { return nil }, func(ctx context.Context, _, _ int) (DetailItem, bool, error) {
+		close(started)
+		<-ctx.Done()
+		close(finished)
+		return DetailItem{}, false, ctx.Err()
+	}, nil, func() {})
+	<-started
+	overlay.Close()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("detail load did not observe overlay cancellation")
+	}
+}
+
+func TestShortcutMatcherRejectsReservedAndExtraModifiers(t *testing.T) {
+	if shortcutMatchesEvent("Ctrl+C", tcell.NewEventKey(tcell.KeyCtrlC, 0, 0)) {
+		t.Fatal("Ctrl+C must remain terminal-owned")
+	}
+	if shortcutMatchesEvent("Ctrl+Enter", tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModCtrl)) {
+		t.Fatal("Ctrl+Enter must remain unbound")
+	}
+	if shortcutMatchesEvent("Ctrl+R", tcell.NewEventKey(tcell.KeyRune, 'R', tcell.ModCtrl|tcell.ModShift)) {
+		t.Fatal("Ctrl+Shift+R must not match Ctrl+R")
+	}
+	if !shortcutMatchesEvent("F5", tcell.NewEventKey(tcell.KeyF5, 0, 0)) {
+		t.Fatal("F5 should match refresh/retry")
+	}
+}
+
+func TestShortcutMapAvoidsTerminalOwnedBindings(t *testing.T) {
+	prohibited := map[string]bool{
+		"ctrl+c": true, "ctrl+enter": true, "ctrl+shift+c": true, "ctrl+shift+v": true,
+		"ctrl+h": true, "ctrl+j": true, "ctrl+m": true, "ctrl+n": true,
+		"ctrl+t": true, "ctrl+p": true, "ctrl+w": true,
+	}
+	for action, binding := range ShortcutMap {
+		if prohibited[strings.ToLower(binding.Key)] {
+			t.Fatalf("shortcut %q uses terminal-owned key %q", action, binding.Key)
+		}
 	}
 }
 
@@ -1246,7 +1305,7 @@ func TestFamilyBlastModalRootsKeepOnlyBaseBackground(t *testing.T) {
 	}
 }
 
-func TestButtonRowMouseDoesNotCaptureButton(t *testing.T) {
+func TestButtonRowMouseFocusesActiveButton(t *testing.T) {
 	row := buttonRow(buttonSpec{
 		Label:    ButtonPaste,
 		Shortcut: ShortcutPaste,
@@ -1263,8 +1322,8 @@ func TestButtonRowMouseDoesNotCaptureButton(t *testing.T) {
 	if !consumed {
 		t.Fatal("button row should consume mouse left down inside a button")
 	}
-	if capture != nil {
-		t.Fatal("button row should not capture mouse state after mouse down")
+	if capture != row {
+		t.Fatal("mouse down should focus and capture the active button row")
 	}
 }
 
@@ -1580,9 +1639,6 @@ func TestLocalizedHelpModalAddsExplicitCloseButton(t *testing.T) {
 func TestShortcutMatchesEventSupportsCtrlShiftCopyVariants(t *testing.T) {
 	tests := []*tcell.EventKey{
 		tcell.NewEventKey(tcell.KeyCtrlY, 0, 0),
-		tcell.NewEventKey(tcell.KeyCtrlC, 0, 0),
-		tcell.NewEventKey(tcell.KeyRune, 'C', tcell.ModCtrl|tcell.ModShift),
-		tcell.NewEventKey(tcell.KeyRune, 'c', tcell.ModCtrl|tcell.ModShift),
 	}
 	for index, event := range tests {
 		if event.Key() == tcell.KeyCtrlY && !shortcutMatchesEvent(ShortcutCopy, event) {
@@ -1590,6 +1646,14 @@ func TestShortcutMatchesEventSupportsCtrlShiftCopyVariants(t *testing.T) {
 		}
 		if !isCopyShortcut(event) {
 			t.Fatalf("isCopyShortcut variant %d was not recognized: %#v", index, event)
+		}
+	}
+	for _, event := range []*tcell.EventKey{
+		tcell.NewEventKey(tcell.KeyCtrlC, 0, 0),
+		tcell.NewEventKey(tcell.KeyRune, 'C', tcell.ModCtrl|tcell.ModShift),
+	} {
+		if isCopyShortcut(event) {
+			t.Fatalf("reserved terminal copy key was accepted: %#v", event)
 		}
 	}
 }
@@ -1883,6 +1947,23 @@ func BenchmarkRowSelectionColumnWidthsLargeTable(b *testing.B) {
 	}
 }
 
+func TestTaggedPaddedWidthFastPathMatchesTview(t *testing.T) {
+	values := []string{
+		"",
+		"row_0042_col_03_value_9",
+		"text with spaces",
+		"[green]styled[-]",
+		"Arabidopsis thaliana_日本語",
+		"line one\nline two",
+	}
+	for _, value := range values {
+		want := tview.TaggedStringWidth("  " + value + "  ")
+		if got := taggedPaddedWidth(value); got != want {
+			t.Errorf("taggedPaddedWidth(%q) = %d, want %d", value, got, want)
+		}
+	}
+}
+
 func TestClippedPrimitiveBlocksChildOverflowBelowItsRect(t *testing.T) {
 	screen := tcell.NewSimulationScreen("")
 	if err := screen.Init(); err != nil {
@@ -1989,12 +2070,12 @@ func TestFamilyBlastCustomizeModalDisplaysMemberProteinIDs(t *testing.T) {
 		t.Fatalf("grouped item count = %d, want member row", modal.groupedList.GetItemCount())
 	}
 	mainText, secondary := modal.groupedList.GetItemText(1)
-	if !strings.Contains(mainText, "PAL1") || !strings.Contains(mainText, "[yellow][PAC:1][-]") || secondary != "" {
-		t.Fatalf("grouped member row = %q / %q, want inline PAL1 [yellow][PAC:1][-]", mainText, secondary)
+	if !strings.Contains(mainText, "PAL1") || !strings.Contains(mainText, "[white][PAC:1][-]") || secondary != "" {
+		t.Fatalf("grouped member row = %q / %q, want inline PAL1 [white][PAC:1][-]", mainText, secondary)
 	}
 	mainText, secondary = modal.rightList.GetItemText(0)
-	if !strings.Contains(mainText, "PAL3") || !strings.Contains(mainText, "[yellow][PAC:3][-]") || secondary != "" {
-		t.Fatalf("right member row = %q / %q, want inline PAL3 [yellow][PAC:3][-]", mainText, secondary)
+	if !strings.Contains(mainText, "PAL3") || !strings.Contains(mainText, "[white][PAC:3][-]") || secondary != "" {
+		t.Fatalf("right member row = %q / %q, want inline PAL3 [white][PAC:3][-]", mainText, secondary)
 	}
 }
 

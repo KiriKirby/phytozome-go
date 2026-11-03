@@ -352,6 +352,50 @@ func TestMainGridDrawsColumnSeparators(t *testing.T) {
 	}
 }
 
+func TestMainGridLayoutCacheInvalidatesAfterEdit(t *testing.T) {
+	rows := []MainKeywordRow{{SearchTerm: "A"}}
+	state := GridEditorState{ActiveRow: 0, ActiveCol: 0}
+	grid := newKeywordGridEditor(&rows, &state, nil, mainKeywordSearchType("phytozome"))
+	before := append([]int(nil), grid.columnWidths(80)...)
+	grid.setCaret(1)
+	grid.insertText(strings.Repeat("B", 30))
+	after := grid.columnWidths(80)
+	if len(before) == 0 || len(after) == 0 || after[0] <= before[0] {
+		t.Fatalf("column width cache was not invalidated after edit: before=%v after=%v", before, after)
+	}
+}
+
+func BenchmarkMainGridDrawLargeWindow(b *testing.B) {
+	rows := make([]MainBlastRow, 2000)
+	for i := range rows {
+		rows[i] = MainBlastRow{
+			FASTA:      ">sequence\n" + strings.Repeat("ACGT", 40),
+			SymbolName: "PAL",
+			GeneLocus:  "LOCUS",
+		}
+	}
+	state := GridEditorState{}
+	grid := newBlastGridEditor(&rows, &state, nil, mainBlastCapability("phytozome"))
+	grid.SetRect(0, 0, 240, 80)
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		b.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(240, 80)
+	grid.Draw(screen)
+	b.Run("cached-layout", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			grid.Draw(screen)
+		}
+	})
+	b.Run("invalidated-layout", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			grid.invalidateLayout()
+			grid.Draw(screen)
+		}
+	})
+}
+
 func TestMainGridWrappedFastaCaretUsesContentWidth(t *testing.T) {
 	rows := []MainBlastRow{{FASTA: strings.Repeat("A", 20)}}
 	state := GridEditorState{ActiveRow: 0, ActiveCol: 0}

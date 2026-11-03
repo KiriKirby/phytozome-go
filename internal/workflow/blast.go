@@ -878,7 +878,7 @@ func NewBlastWizardWithTUIInfo(out io.Writer, tuiInfo tui.StartupInfo) *BlastWiz
 		proteinSequenceCache:      make(map[string]model.ProteinSequenceData),
 		proteinSequenceMiss:       make(map[string]error),
 	}
-	w.prompt.SetDetailLoaders(w.loadKeywordDetailFASTA, w.loadBlastDetailFASTA)
+	w.prompt.SetDetailContextLoaders(w.loadKeywordDetailFASTAContext, w.loadBlastDetailFASTAContext)
 	w.prompt.SetCanvasTreePanelChanged(func(state tui.CanvasTreePanelState, opened bool) {
 		_ = state
 		_ = opened
@@ -12221,6 +12221,10 @@ func keywordSequenceFetchTargetID(src source.DataSource, selected model.SpeciesC
 }
 
 func (w *BlastWizard) loadKeywordDetailFASTA(row model.KeywordResultRow) (string, error) {
+	return w.loadKeywordDetailFASTAContext(context.Background(), row)
+}
+
+func (w *BlastWizard) loadKeywordDetailFASTAContext(ctx context.Context, row model.KeywordResultRow) (string, error) {
 	if inline := inlineKeywordProteinSequenceData(row); strings.TrimSpace(inline.Sequence) != "" {
 		header := strings.TrimSpace(inline.OriginalHeader)
 		if header == "" {
@@ -12233,7 +12237,7 @@ func (w *BlastWizard) loadKeywordDetailFASTA(row model.KeywordResultRow) (string
 		return "", fmt.Errorf("keyword row is missing sequence id")
 	}
 	targetID := keywordSequenceFetchTargetID(w.source, w.lastKeywordSpecies)
-	record, err := w.fetchProteinSequenceCached(context.Background(), targetID, sequenceID)
+	record, err := w.fetchProteinSequenceCached(ctx, targetID, sequenceID)
 	if err != nil {
 		return "", err
 	}
@@ -12307,15 +12311,19 @@ func ensureFastaHeader(header string) string {
 }
 
 func (w *BlastWizard) loadBlastDetailFASTA(row model.BlastResultRow) (string, error) {
+	return w.loadBlastDetailFASTAContext(context.Background(), row)
+}
+
+func (w *BlastWizard) loadBlastDetailFASTAContext(ctx context.Context, row model.BlastResultRow) (string, error) {
 	sequenceID := strings.TrimSpace(firstNonEmpty(row.SequenceID, row.TranscriptID, row.Protein))
 	if sequenceID == "" {
 		return "", fmt.Errorf("BLAST row is missing sequence id")
 	}
 	targetID := row.TargetID
 	if targetID == 0 {
-		targetID = w.phytozomeTargetIDForRow(context.Background(), row)
+		targetID = w.phytozomeTargetIDForRow(ctx, row)
 	}
-	record, err := w.fetchProteinSequenceCached(context.Background(), targetID, sequenceID)
+	record, err := w.fetchProteinSequenceCached(ctx, targetID, sequenceID)
 	if err != nil {
 		return "", err
 	}

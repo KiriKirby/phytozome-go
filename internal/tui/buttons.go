@@ -42,18 +42,17 @@ const (
 )
 
 const (
-	ShortcutBack      = "Esc"
-	ShortcutHome      = "Ctrl+O"
-	ShortcutConfirm   = "Enter"
-	ShortcutApply     = "Enter"
-	ShortcutPaste     = "Ctrl+V"
-	ShortcutOpenFile  = "Ctrl+F"
-	ShortcutCancel    = "Esc"
-	ShortcutAuto      = "Enter"
-	ShortcutSelectAll = "Ctrl+A"
-	// Ctrl+N can be emitted as a line-feed/control character during
-	// bracketed multiline paste. Keep clear actions off that key.
-	ShortcutClear       = "Ctrl+Shift+N"
+	ShortcutBack        = "Esc"
+	ShortcutHome        = "Ctrl+O"
+	ShortcutConfirm     = "Enter"
+	ShortcutApply       = "Enter"
+	ShortcutPaste       = "Ctrl+V"
+	ShortcutOpenFile    = "Ctrl+F"
+	ShortcutCancel      = "Esc"
+	ShortcutAuto        = "Enter"
+	ShortcutSelectAll   = "Ctrl+A"
+	ShortcutRun         = "Ctrl+R"
+	ShortcutClear       = "F4"
 	ShortcutClearFilter = "Ctrl+L"
 	ShortcutToggle      = "Space"
 	ShortcutCopy        = "Ctrl+Y"
@@ -61,11 +60,18 @@ const (
 	ShortcutFilter      = "Ctrl+F"
 	ShortcutExport      = "Ctrl+G"
 	ShortcutExportAll   = "Ctrl+D"
-	ShortcutPreview     = "Ctrl+P"
+	ShortcutPreview     = "F7"
 	ShortcutBlast       = "Ctrl+B"
 	// Ctrl+R is reserved for the current page's Run/primary action.
 	// Retry remains available without shadowing Run.
-	ShortcutRetry      = "Ctrl+Shift+R"
-	ShortcutWideSearch = "Ctrl+W"
+	ShortcutRetry      = "F5"
+	ShortcutRefresh    = "F5"
+	ShortcutNewGroup   = "F4"
+	ShortcutRename     = "F2"
+	ShortcutAliases    = "Ctrl+L"
+	ShortcutTreeTools  = "F6"
+	ShortcutAdd        = "Ctrl+D"
+	ShortcutDelete     = "Del"
+	ShortcutWideSearch = "F8"
 	ShortcutHelp       = "F1"
 )

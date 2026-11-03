@@ -10,6 +10,7 @@
 package tui
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -123,17 +124,19 @@ func installConsoleResizeWatcher(app *tview.Application) func() {
 	if !ok {
 		return func() {}
 	}
-	var running atomic.Bool
-	running.Store(true)
-	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
 		lastWidth := initialWidth
 		lastHeight := initialHeight
 		for {
 			select {
-			case <-done:
+			case <-ctx.Done():
+				return
+			case <-app.Done():
 				return
 			case <-ticker.C:
 				width, height, ok := currentConsoleViewportSize(handle)
@@ -145,18 +148,17 @@ func installConsoleResizeWatcher(app *tview.Application) func() {
 				}
 				lastWidth = width
 				lastHeight = height
-				if !running.Load() {
+				if !app.QueueUpdateDrawContext(ctx, func() {}) {
 					return
 				}
-				app.QueueUpdateDraw(func() {})
 			}
 		}
 	}()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			running.Store(false)
-			close(done)
+			cancel()
+			<-exited
 		})
 	}
 }

@@ -19,6 +19,7 @@ The redesign is not an in-place replacement yet. The existing multi-screen workf
 - Normal startup uses the new page. Handoff/transfer paths keep their existing flow.
 - Keyword, BLAST, and Explore all remain backed by existing execution/review/export flows after the new page collects settings.
 - Species selection opens an in-page large modal in the new main interface. The legacy selector pages remain available for the old workflow path; the new path uses its own option model and callback.
+- Shared interaction, theme, shortcut, focus, hint-row, and background-lifetime rules are defined in [`../ui/interaction-and-theme.md`](../ui/interaction-and-theme.md) and [`../ui/shortcuts.md`](../ui/shortcuts.md). The homepage search grid retains its specialized interaction model.
 
 ## Document Map
 

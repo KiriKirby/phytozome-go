@@ -30,7 +30,9 @@ require (
 
 replace github.com/gdamore/tcell/v2 => github.com/kivattt/tcell-naively-faster/v2 v2.0.1
 
-replace github.com/rivo/tview => github.com/kivattt/tview v1.0.6
+// Keep the pinned performance fork in-tree so its lifecycle and mouse-event
+// fixes are reviewed and tested together with the TUI.
+replace github.com/rivo/tview => ./third_party/tview
 
 require (
 	github.com/aclements/go-moremath v0.0.0-20210112150236-f10218a38794 // indirect

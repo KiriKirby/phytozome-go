@@ -297,7 +297,7 @@ func renderTaskProgressSlots(frame string, slots []taskProgressSlot) string {
 		title := strings.TrimSpace(item.Title)
 		status := strings.TrimSpace(item.Status)
 		if title != "" {
-			titleLine := fmt.Sprintf("[yellow]%s[white] [::b]%s[::-]", frame, title)
+			titleLine := fmt.Sprintf("[deepskyblue]%s[white] [::b]%s[::-]", frame, title)
 			if !item.Active {
 				titleLine = fmt.Sprintf("[gray]%s[white] %s", frame, title)
 			}

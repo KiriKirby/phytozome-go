@@ -326,8 +326,9 @@ wezterm.on('gui-startup', function(cmd)
 end)
 
 wezterm.on('update-status', function(window, pane)
-  window:set_left_status('')
-  window:set_right_status('')
+  -- The status areas are already empty. Reassigning them on every timer tick
+  -- invalidates the window/tab-bar render path, with cost proportional to the
+  -- number of tabs. This callback only keeps close confirmation synchronized.
   sync_close_confirmation(window)
 end)
 
@@ -373,14 +374,13 @@ return {
   bypass_mouse_reporting_modifiers = 'CTRL',
 
   keys = {
-      {
-        key = 'Enter',
-        mods = 'CTRL',
-        -- tcell v2.0.1 does not decode CSI-u Ctrl+R.  F13 is unused by
-        -- PHgo and has a stable terminfo sequence, so use it as an internal
-        -- transport key and translate it back in the application.
-        action = act.SendKey { key = 'F13' },
-      },
+    {
+      key = 'R',
+      mods = 'CTRL',
+      -- WezTerm owns Ctrl+R for config reload. Forward it through an unused
+      -- keycode so PHgo can keep Ctrl+R as its multiline Apply shortcut.
+      action = act.SendKey { key = 'F13' },
+    },
   },
 
   mouse_bindings = {

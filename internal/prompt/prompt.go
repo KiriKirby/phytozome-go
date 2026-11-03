@@ -48,8 +48,9 @@ type Prompter struct {
 	lastExportSettings     ExportSettings
 	lastExternalRefs       ExternalReferenceSettings
 	externalRefsSet        bool
-	loadKeywordFASTA       func(row model.KeywordResultRow) (string, error)
-	loadBlastFASTA         func(row model.BlastResultRow) (string, error)
+	loadKeywordFASTA       func(context.Context, model.KeywordResultRow) (string, error)
+	loadBlastFASTA         func(context.Context, model.BlastResultRow) (string, error)
+	detailLoadMu           sync.Mutex
 	canvasTreePanelChanged func(state tui.CanvasTreePanelState, opened bool)
 	canvasExternalUpdateMu sync.Mutex
 	canvasExternalUpdate   func(selected [][]bool, msaFlags [][]bool)
@@ -98,8 +99,16 @@ func ColumnHelpEnglish(id string) string {
 }
 
 func (p *Prompter) SetDetailLoaders(keyword func(row model.KeywordResultRow) (string, error), blast func(row model.BlastResultRow) (string, error)) {
-	p.loadKeywordFASTA = keyword
-	p.loadBlastFASTA = blast
+	if keyword != nil {
+		p.loadKeywordFASTA = func(_ context.Context, row model.KeywordResultRow) (string, error) { return keyword(row) }
+	}
+	if blast != nil {
+		p.loadBlastFASTA = func(_ context.Context, row model.BlastResultRow) (string, error) { return blast(row) }
+	}
+}
+
+func (p *Prompter) SetDetailContextLoaders(keyword func(context.Context, model.KeywordResultRow) (string, error), blast func(context.Context, model.BlastResultRow) (string, error)) {
+	p.loadKeywordFASTA, p.loadBlastFASTA = keyword, blast
 }
 
 func (p *Prompter) SetCanvasTreePanelChanged(handler func(state tui.CanvasTreePanelState, opened bool)) {
@@ -3752,7 +3761,9 @@ func (p *Prompter) selectKeywordRows(groups []model.KeywordSearchGroup, initial 
 				tableRows[rowIndex] = refreshedRows[rowIndex]
 				return tableRows[rowIndex], nil
 			},
-			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+			LoadDetail: func(ctx context.Context, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				p.detailLoadMu.Lock()
+				defer p.detailLoadMu.Unlock()
 				if rowIndex < 0 || rowIndex >= len(flatRows) {
 					return tui.DetailItem{}, false, nil
 				}
@@ -3773,7 +3784,7 @@ func (p *Prompter) selectKeywordRows(groups []model.KeywordSearchGroup, initial 
 						ActionKey:   "Enter",
 					}, true, nil
 				}
-				sequence, err := p.loadKeywordFASTA(row)
+				sequence, err := p.loadKeywordFASTA(ctx, row)
 				if err != nil {
 					return detailFASTAUnavailableItem(err), true, nil
 				}
@@ -3994,7 +4005,9 @@ func (p *Prompter) selectBlastRunsWithState(runs []BlastRunView, backTarget erro
 				items[runIndex].Rows[rowIndex] = refreshedRows[rowIndex]
 				return items[runIndex].Rows[rowIndex], nil
 			},
-			LoadDetail: func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+			LoadDetail: func(ctx context.Context, runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				p.detailLoadMu.Lock()
+				defer p.detailLoadMu.Unlock()
 				if runIndex < 0 || runIndex >= len(runs) || rowIndex < 0 || rowIndex >= len(runs[runIndex].Rows) {
 					return tui.DetailItem{}, false, nil
 				}
@@ -4015,7 +4028,7 @@ func (p *Prompter) selectBlastRunsWithState(runs []BlastRunView, backTarget erro
 						ActionKey:   "Enter",
 					}, true, nil
 				}
-				sequence, err := p.loadBlastFASTA(row)
+				sequence, err := p.loadBlastFASTA(ctx, row)
 				if err != nil {
 					return detailFASTAUnavailableItem(err), true, nil
 				}
@@ -4586,7 +4599,9 @@ func (p *Prompter) selectBlastRowsWithInitial(rows []model.BlastResultRow, allow
 				tableRows[rowIndex] = refreshedRows[rowIndex]
 				return tableRows[rowIndex], nil
 			},
-			LoadDetail: func(rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+			LoadDetail: func(ctx context.Context, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				p.detailLoadMu.Lock()
+				defer p.detailLoadMu.Unlock()
 				if rowIndex < 0 || rowIndex >= len(rows) {
 					return tui.DetailItem{}, false, nil
 				}
@@ -4607,7 +4622,7 @@ func (p *Prompter) selectBlastRowsWithInitial(rows []model.BlastResultRow, allow
 						ActionKey:   "Enter",
 					}, true, nil
 				}
-				sequence, err := p.loadBlastFASTA(row)
+				sequence, err := p.loadBlastFASTA(ctx, row)
 				if err != nil {
 					return detailFASTAUnavailableItem(err), true, nil
 				}
@@ -5693,7 +5708,7 @@ func (p *Prompter) SelectCanvas(initial []model.CanvasItem, currentItem int, nex
 				{Value: "delete_rows", Label: "Delete row", Shortcut: "Del", TableOnly: true, RequiresItems: true, LeftPrimary: true},
 				{Value: "rename_row", Label: "Rename", Shortcut: "F2", TableOnly: true, RequiresItems: true, LeftPrimary: true},
 				{Value: "refresh_tree", Label: "Refresh tree", Shortcut: "Ctrl+R", RequiresItems: true, LeftPrimary: true},
-				{Value: "open_tree_viewer", Label: "Open preview", Shortcut: "Ctrl+P", RequiresItems: true, LeftPrimary: true},
+				{Value: "open_tree_viewer", Label: "Open preview", Shortcut: tui.ShortcutPreview, RequiresItems: true, LeftPrimary: true},
 			},
 			State:         p.blastRunStates[stateKey],
 			AliasColumnID: "label_name",
@@ -5800,7 +5815,9 @@ func (p *Prompter) SelectCanvas(initial []model.CanvasItem, currentItem int, nex
 					p.canvasTreePanelChanged(state, opened)
 				}
 			},
-			LoadDetail: func(runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+			LoadDetail: func(ctx context.Context, runIndex int, rowIndex int, pageIndex int, itemIndex int) (tui.DetailItem, bool, error) {
+				p.detailLoadMu.Lock()
+				defer p.detailLoadMu.Unlock()
 				if runIndex < 0 || runIndex >= len(items) || rowIndex < 0 || rowIndex >= len(items[runIndex].Rows) {
 					return tui.DetailItem{}, false, nil
 				}
@@ -5843,7 +5860,7 @@ func (p *Prompter) SelectCanvas(initial []model.CanvasItem, currentItem int, nex
 							ActionKey:   "Enter",
 						}, true, nil
 					}
-					sequence, err := p.loadKeywordFASTA(*row.KeywordRow)
+					sequence, err := p.loadKeywordFASTA(ctx, *row.KeywordRow)
 					if err != nil {
 						return detailFASTAUnavailableItem(err), true, nil
 					}
@@ -5869,7 +5886,7 @@ func (p *Prompter) SelectCanvas(initial []model.CanvasItem, currentItem int, nex
 							ActionKey:   "Enter",
 						}, true, nil
 					}
-					sequence, err := p.loadBlastFASTA(*row.BlastRow)
+					sequence, err := p.loadBlastFASTA(ctx, *row.BlastRow)
 					if err != nil {
 						return detailFASTAUnavailableItem(err), true, nil
 					}

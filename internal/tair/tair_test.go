@@ -255,7 +255,7 @@ func TestFetchENACodingRowsUsesSingleflightAndMemoryCache(t *testing.T) {
 
 func TestFetchENAFastaEntryUsesSingleflightAndMemoryCache(t *testing.T) {
 	var requests int32
-	accession := fmt.Sprintf("CAO9999%d", time.Now().UnixNano()%100000)
+	accession := fmt.Sprintf("CAO_TEST_%d_%d", time.Now().UnixNano(), os.Getpid())
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "www.ebi.ac.uk" || req.URL.Path != "/ena/browser/api/fasta/"+accession {
 			t.Fatalf("unexpected request URL: %s", req.URL.String())

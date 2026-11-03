@@ -27,14 +27,15 @@ const (
 	colorCanvas         = tcell.ColorBlack
 	colorPanel          = tcell.ColorDarkBlue
 	colorAction         = tcell.ColorDeepSkyBlue
-	colorActionText     = tcell.ColorBlack
+	colorActionText     = tcell.ColorWhite
 	colorText           = tcell.ColorGhostWhite
-	colorMuted          = tcell.ColorYellow
+	colorMuted          = tcell.ColorLightGray
+	colorWarning        = tcell.ColorYellow
 	colorAccent         = tcell.ColorGreen
 	colorSelectionOn    = tcell.ColorGreen
 	colorSelectionOff   = tcell.ColorRed
 	colorBorder         = tcell.ColorWhite
-	colorInactiveText   = tcell.ColorDarkCyan
+	colorInactiveText   = tcell.ColorLightGray
 	colorTreeAction     = tcell.ColorYellow
 	colorTreeActionText = tcell.ColorBlack
 	colorTreeBorder     = tcell.ColorYellow
@@ -220,19 +221,7 @@ func SelectStartup(in io.Reader, out io.Writer, info StartupInfo) (StartupChoice
 
 var newApp = func() *tview.Application {
 	configStyles()
-	app := tview.NewApplication().EnableMouse(true).EnablePaste(true)
-	app.SetMouseCapture(func(event *tcell.EventMouse, action tview.MouseAction) (*tcell.EventMouse, tview.MouseAction) {
-		if event == nil {
-			return nil, action
-		}
-		x, y := event.Position()
-		if x < 0 || y < 0 {
-			app.DontDrawOnThisEventMouse()
-			return nil, action
-		}
-		return event, action
-	})
-	return app
+	return tview.NewApplication().EnableMouse(true).EnablePaste(true)
 }
 
 var runApp = func(app *tview.Application) (err error) {
@@ -297,7 +286,7 @@ func configStyles() {
 		PrimaryTextColor:            colorText,
 		SecondaryTextColor:          colorMuted,
 		TertiaryTextColor:           colorAccent,
-		InverseTextColor:            colorAction,
+		InverseTextColor:            colorText,
 		ContrastSecondaryTextColor:  colorInactiveText,
 	}
 }
@@ -305,7 +294,23 @@ func configStyles() {
 type inputCaptureFunc func(*tcell.EventKey) *tcell.EventKey
 
 func installInputCapture(app *tview.Application, handler inputCaptureFunc) {
-	app.SetInputCapture(handler)
+	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event == nil {
+			return nil
+		}
+		// Bundled WezTerm reserves Ctrl+R for config reload. Its config sends
+		// that key as F13 so PHgo keeps the visible Ctrl+R contract.
+		if event.Key() == tcell.KeyF13 {
+			event = tcell.NewEventKey(tcell.KeyCtrlR, 0, tcell.ModNone)
+		}
+		if event.Key() == tcell.KeyEnter && event.Modifiers()&tcell.ModCtrl != 0 {
+			return nil
+		}
+		if handler != nil {
+			return handler(event)
+		}
+		return event
+	})
 }
 
 func chainInputCaptures(captures ...inputCaptureFunc) inputCaptureFunc {
@@ -344,7 +349,7 @@ func startupRoot(app *tview.Application, info StartupInfo, featureList *tview.Li
 		SetDynamicColors(true).
 		SetTextColor(tview.Styles.PrimaryTextColor).
 		SetText(fmt.Sprintf(
-			"[white]%s helps you run keyword searches, BLAST workflows, and pathway-oriented tools across plant protein resources.\n\n[yellow]Author[white] %s\n[yellow]Repository[white] %s\n[yellow]License[white] %s%s",
+			"[white]%s supports keyword search, BLAST, and plant-protein analysis.\n\n[lightgray]Author[white] %s\n[lightgray]Repository[white] %s\n[lightgray]License[white] %s%s",
 			productName(info),
 			fallbackText(info.Author, "unknown"),
 			fallbackText(info.RepoURL, "unknown"),
@@ -366,8 +371,7 @@ func startupRoot(app *tview.Application, info StartupInfo, featureList *tview.Li
 			start()
 		}, Visible: true, Primary: true},
 	))
-	module.AddItem(hintView("Tab/Left/Right switch selection box | Up/Down choose item | 1-3 choose function | 4+ choose sub-option"), 1, 0, false)
-	module.AddItem(hintView("Enter moves from function to sub-option, then starts the selected workflow."), 1, 0, false)
+	addHints(module, []string{"Tab/Left/Right switches section | Up/Down selects | 1-3 selects function | 4-9 selects workflow | Enter advances or starts"})
 
 	moduleFrame := tview.NewFrame(module)
 	moduleFrame.SetBorder(true)
@@ -447,9 +451,54 @@ func focusStartupList(app *tview.Application, featureList *tview.List, subOption
 }
 
 func hintView(text string) *tview.TextView {
-	return tview.NewTextView().
-		SetText(text).
-		SetTextColor(tview.Styles.SecondaryTextColor)
+	view := tview.NewTextView().SetText(text).SetDynamicColors(true).SetWrap(false).SetTextColor(tview.Styles.SecondaryTextColor)
+	var previous, formatted string
+	previousWidth := -1
+	view.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
+		text := view.GetText(false)
+		if text != previous || width != previousWidth {
+			previous, previousWidth = text, width
+			formatted = formatHintLine(strings.Join(strings.Fields(text), " "))
+		}
+		if height > 0 && width > 0 {
+			if tview.TaggedStringWidth(formatted) > width && width <= 3 {
+				tview.Print(screen, strings.Repeat(".", width), x, y, width, tview.AlignLeft, colorMuted)
+			} else if tview.TaggedStringWidth(formatted) > width {
+				tview.Print(screen, formatted, x, y, width-3, tview.AlignLeft, colorMuted)
+				tview.Print(screen, "...", x+width-3, y, 3, tview.AlignLeft, colorMuted)
+			} else {
+				tview.Print(screen, formatted, x, y, width, tview.AlignLeft, colorMuted)
+			}
+		}
+		return x, y, width, 0
+	})
+	return view
+}
+
+func elideHintLine(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= width {
+		return text
+	}
+	if width <= 3 {
+		return strings.Repeat(".", width)
+	}
+	return string(runes[:width-3]) + "..."
+}
+
+func formatHintLine(text string) string {
+	parts := strings.Fields(text)
+	for index, part := range parts {
+		key := strings.Trim(part, "()[]{}.,;:|")
+		lower := strings.ToLower(key)
+		if lower == "enter" || lower == "esc" || lower == "space" || lower == "tab" || lower == "up/down" || lower == "left/right" || lower == "pageup/pagedown" || strings.HasPrefix(lower, "ctrl+") || (len(lower) >= 2 && lower[0] == 'f' && lower[1] >= '0' && lower[1] <= '9') {
+			parts[index] = strings.Replace(part, key, "[white]"+key+"[lightgray]", 1)
+		}
+	}
+	return "[lightgray]" + strings.Join(parts, " ")
 }
 
 func currentItem(list *tview.List) int {

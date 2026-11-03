@@ -186,6 +186,13 @@ type mainGridEditor struct {
 	fastaGrid     bool
 	onFocusCell   func()
 	onSpecialCell func(row int, column string)
+	layoutWidth   int
+	layoutRows    int
+	layoutWidths  []int
+	layoutLines   [][][]string
+	layoutHeights []int
+	displayRows   []int
+	statusText    string
 }
 
 type gridVisualLine struct {
@@ -687,6 +694,7 @@ func RunMainInterfacePage(page MainInterfacePage) (MainInterfaceResult, error) {
 				state.Keyword.Rows[row].SymbolName = alias
 			}
 		}
+		grid.invalidateLayout()
 	}
 	showAliasModal = func() {
 		grid := activeGrid()
@@ -1697,17 +1705,13 @@ func printMainGridCell(screen tcell.Screen, x int, y int, width int, style tcell
 			runes = append(runes[:contentWidth-3], '.', '.', '.')
 		}
 	}
-	out := make([]rune, width)
-	for i := range out {
-		out[i] = ' '
-	}
 	offset := mainGridContentOffset()
-	for i, r := range runes {
-		if offset+i >= 0 && offset+i < len(out) {
-			out[offset+i] = r
+	for i := 0; i < width; i++ {
+		r := ' '
+		textIndex := i - offset
+		if textIndex >= 0 && textIndex < len(runes) {
+			r = runes[textIndex]
 		}
-	}
-	for i, r := range out {
 		screen.SetContent(x+i, y, r, nil, style)
 	}
 }
@@ -1741,13 +1745,17 @@ func (g *mainGridEditor) rowDisplayNumber(row int) string {
 	if row < 0 || row >= g.rowCount() || !g.rowHasContent(row) {
 		return ""
 	}
-	n := 0
-	for i := 0; i <= row; i++ {
-		if g.rowHasContent(i) {
-			n++
+	if len(g.displayRows) != g.rowCount() {
+		g.displayRows = make([]int, g.rowCount())
+		n := 0
+		for i := 0; i < g.rowCount(); i++ {
+			if g.rowHasContent(i) {
+				n++
+				g.displayRows[i] = n
+			}
 		}
 	}
-	return fmt.Sprintf("%d", n)
+	return fmt.Sprintf("%d", g.displayRows[row])
 }
 
 func (g *mainGridEditor) rowHasContent(row int) bool {
@@ -1763,6 +1771,9 @@ func (g *mainGridEditor) rowHasContent(row int) bool {
 }
 
 func (g *mainGridEditor) rowVisualHeight(row int, colWidths []int) int {
+	if row >= 0 && row < len(g.layoutHeights) && g.layoutHeights[row] > 0 {
+		return g.layoutHeights[row]
+	}
 	height := 1
 	for c := range g.columns {
 		width := 1
@@ -1771,14 +1782,29 @@ func (g *mainGridEditor) rowVisualHeight(row int, colWidths []int) int {
 		}
 		height = maxInt(height, len(g.cellVisualLines(row, c, mainGridContentWidth(width))))
 	}
+	if row >= 0 && row < len(g.layoutHeights) {
+		g.layoutHeights[row] = height
+	}
 	return height
 }
 
 func (g *mainGridEditor) cellVisualLines(row int, col int, width int) []string {
+	cacheable := row >= 0 && row < len(g.layoutLines) && col >= 0 && col < len(g.columns) && col < len(g.layoutWidths) && width == mainGridContentWidth(g.layoutWidths[col])
+	if cacheable {
+		if g.layoutLines[row] == nil {
+			g.layoutLines[row] = make([][]string, len(g.columns))
+		}
+		if lines := g.layoutLines[row][col]; lines != nil {
+			return lines
+		}
+	}
 	segments := g.cellVisualSegments(row, col, width)
 	lines := make([]string, len(segments))
 	for i, segment := range segments {
 		lines[i] = segment.Text
+	}
+	if cacheable {
+		g.layoutLines[row][col] = lines
 	}
 	return lines
 }
@@ -2043,6 +2069,7 @@ func (g *mainGridEditor) PasteText(text string) {
 		g.columns[g.state.ActiveCol].Set(start+i, line)
 		g.setCaretFor(start+i, g.state.ActiveCol, utf8.RuneCountInString(line))
 	}
+	g.invalidateLayout()
 	g.state.ActiveRow = start + len(lines) - 1
 	g.cleanRows()
 	g.normalizeCursor()
@@ -2294,6 +2321,10 @@ func (g *mainGridEditor) columnWidths(width int) []int {
 	if len(g.columns) == 0 {
 		return nil
 	}
+	rows := g.rowCount()
+	if width == g.layoutWidth && rows == g.layoutRows && len(g.layoutWidths) == len(g.columns) {
+		return g.layoutWidths
+	}
 	widths := make([]int, len(g.columns))
 	for i, col := range g.columns {
 		if g.fastaGrid && col.ID == "fasta" {
@@ -2305,14 +2336,32 @@ func (g *mainGridEditor) columnWidths(width int) []int {
 			continue
 		}
 		maxLen := taggedPaddedWidth(col.Title)
-		for row := 0; row < g.rowCount(); row++ {
+		for row := 0; row < rows; row++ {
 			for _, line := range strings.Split(strings.ReplaceAll(col.Get(row), "\r", ""), "\n") {
 				maxLen = maxInt(maxLen, taggedPaddedWidth(line))
 			}
 		}
 		widths[i] = maxInt(1, minInt(maxLen, maxInt(1, width)))
 	}
-	return widths
+	g.layoutWidth = width
+	g.layoutRows = rows
+	g.layoutWidths = widths
+	g.layoutLines = make([][][]string, rows)
+	g.layoutHeights = make([]int, rows)
+	g.displayRows = nil
+	return g.layoutWidths
+}
+
+func (g *mainGridEditor) invalidateLayout() {
+	if g == nil {
+		return
+	}
+	g.layoutWidth = 0
+	g.layoutRows = -1
+	g.layoutWidths = nil
+	g.layoutLines = nil
+	g.layoutHeights = nil
+	g.displayRows = nil
 }
 
 func (g *mainGridEditor) drawCursor(screen tcell.Screen, x, y, width int, colWidths []int) {
@@ -2367,6 +2416,7 @@ func (g *mainGridEditor) currentValue() string {
 
 func (g *mainGridEditor) setCurrentValue(value string) {
 	g.columns[g.state.ActiveCol].Set(g.state.ActiveRow, normalizeMainGridEditValueForColumn(value, g.columns[g.state.ActiveCol]))
+	g.invalidateLayout()
 }
 
 func (g *mainGridEditor) cellKey(row, col int) string {
@@ -2462,7 +2512,12 @@ func (g *mainGridEditor) updateStatus() {
 	if g.status == nil {
 		return
 	}
-	g.status.SetText(fmt.Sprintf("Row %d, %s. Space switches columns; arrows edit inside the grid.", g.state.ActiveRow+1, g.columns[g.state.ActiveCol].Title))
+	text := fmt.Sprintf("Row %d, %s. Space switches columns; arrows edit inside the grid.", g.state.ActiveRow+1, g.columns[g.state.ActiveCol].Title)
+	if text == g.statusText {
+		return
+	}
+	g.statusText = text
+	g.status.SetText(text)
 }
 
 type mainActionButton struct {
@@ -2819,7 +2874,7 @@ func mainDropDownWithRefresh(label string, options []Option, current string, cha
 	initializing = false
 	dropDown.SetFieldBackgroundColor(colorPanel)
 	dropDown.SetFieldTextColor(tview.Styles.PrimaryTextColor)
-	dropDown.SetLabelColor(tview.Styles.SecondaryTextColor)
+	dropDown.SetLabelColor(tview.Styles.PrimaryTextColor)
 	return dropDown
 }
 
@@ -2874,7 +2929,7 @@ func mainAliasChoices(current string, aliases []string) []string {
 }
 
 func mainInterfaceIntro(info StartupInfo) *tview.TextView {
-	text := fmt.Sprintf("[white]%s runs keyword searches, BLAST workflows, and exploration tools across plant protein resources; choose a tab, finish its settings, then start the action. Author: [yellow]%s[white]  Repository: [yellow]%s[white]  License: [yellow]%s%s[white]",
+	text := fmt.Sprintf("[white]%s supports keyword search, BLAST, and plant-protein analysis. [lightgray]Author:[white] %s  [lightgray]Repository:[white] %s  [lightgray]License:[white] %s%s",
 		productName(info),
 		fallbackText(info.Author, "unknown"),
 		fallbackText(info.RepoURL, "unknown"),
