@@ -13,12 +13,10 @@ function Copy-WezTermRuntimeFiles {
     $entries = Get-ChildItem -LiteralPath $WezRoot -Force
     foreach ($entry in $entries) {
         if ($entry.PSIsContainer) {
-            if ($entry.Name -ieq "mesa") {
-                $opengl32 = Join-Path $entry.FullName "opengl32.dll"
-                if (Test-Path -LiteralPath $opengl32 -PathType Leaf) {
-                    Copy-Item -LiteralPath $opengl32 -Destination (Join-Path $Destination "opengl32.dll") -Force
-                }
-            }
+            # PHgo requires the hardware WebGPU renderer. Do not flatten the
+            # bundled Mesa opengl32.dll beside wezterm-gui: if WebGPU cannot be
+            # created, silently falling back to CPU OpenGL makes a large
+            # terminal repaint one scan line at a time.
             continue
         }
 

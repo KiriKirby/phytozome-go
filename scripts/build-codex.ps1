@@ -7,7 +7,7 @@
 
 param(
     [string]$BuildVersion = "",
-    [string]$WezTermVersion = "latest",
+    [string]$WezTermVersion = "main",
     [switch]$SkipTests,
     [switch]$SkipVet,
     [switch]$SkipBuildCheck,
@@ -41,6 +41,10 @@ if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
 }
 
 if ($Publish) {
+    # build-release keeps stable prebuilt WezTerm assets for Linux/macOS while
+    # Windows follows the source-build revision selected by this entrypoint.
+    $forward.Remove("WezTermVersion")
+    $forward.WindowsWezTermVersion = $WezTermVersion
     $forward.Publish = $true
     & (Join-Path $PSScriptRoot "build-release.ps1") @forward
 } else {

@@ -8266,6 +8266,19 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 		interProIndex = index
 		setTopFocus(2)
 	}
+	setMotifFocus := func(index int) {
+		if len(motifControls) == 0 {
+			return
+		}
+		if index < 0 {
+			index = len(motifControls) - 1
+		}
+		if index >= len(motifControls) {
+			index = 0
+		}
+		motifIndex = index
+		setTopFocus(3)
+	}
 	syncFocusFromApp := func() {
 		current := app.GetFocus()
 		if current == autoLabelBox {
@@ -8404,8 +8417,8 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				return nil
 			}
 		}
-		if topIndex == 3 {
-			if input, ok := motifControls[1].(*tview.InputField); ok && inputFieldEditKey(event) {
+		if topIndex == 3 && motifIndex == 1 {
+			if input, ok := motifControls[1].(*tview.InputField); ok && event.Key() != tcell.KeyUp && event.Key() != tcell.KeyDown && inputFieldEditKey(event) {
 				deliverInputFieldKey(input, event, app)
 				return nil
 			}
@@ -8442,7 +8455,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				return nil
 			}
 			if topIndex == 3 {
-				setTopFocus(2)
+				setMotifFocus(motifIndex - 1)
 				return nil
 			}
 		case tcell.KeyDown:
@@ -8451,18 +8464,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 				return nil
 			}
 			if topIndex == 3 {
-				motifIndex = 1
-				setTopFocus(3)
-				return nil
-			}
-		case tcell.KeyLeft:
-			if topIndex > 0 {
-				setTopFocus(topIndex - 1)
-				return nil
-			}
-		case tcell.KeyRight:
-			if topIndex < 3 {
-				setTopFocus(topIndex + 1)
+				setMotifFocus(motifIndex + 1)
 				return nil
 			}
 		case tcell.KeyRune:

@@ -6,7 +6,7 @@
 # wangsychn. All Rights Reserved. Contributor(s): .
 
 param(
-    [string]$Version = "latest"
+    [string]$Version = "main"
 )
 
 $ErrorActionPreference = "Stop"

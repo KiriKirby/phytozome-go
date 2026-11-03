@@ -3,14 +3,11 @@ package phygoboost
 import (
 	"context"
 	"io"
-	"os"
 	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/shirou/gopsutil/v4/process"
 )
 
 type PressureLevel int
@@ -109,27 +106,11 @@ func (s *State) snapshot() runtimeSnapshot {
 	}
 }
 
-func sampleChildProcessCount() int {
-	parent := os.Getpid()
-	children := 0
-	procs, err := process.Processes()
-	if err != nil {
-		return 0
-	}
-	for _, proc := range procs {
-		if proc == nil {
-			continue
-		}
-		ppid, err := proc.Ppid()
-		if err == nil && int(ppid) == parent {
-			children++
-		}
-	}
-	return children
-}
-
 func (s *State) loop() {
-	ticker := time.NewTicker(2 * time.Second)
+	// Runtime telemetry is a guardrail, not an animation loop. Sampling every
+	// ten seconds keeps pressure detection responsive without making every idle
+	// PHgo tab wake up and enumerate system state several times per second.
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.sample()

@@ -90,6 +90,35 @@ local clean_cache_prog = './phgohelper.bin'
 local window_title = 'PHgo ($safeVersion)'
 local title_prefix = '__PHGO__|'
 
+-- Select an actual hardware adapter, not just a power preference. On hybrid
+-- Windows systems wgpu may otherwise return the first compatible integrated
+-- adapter; CPU/fallback adapters are never acceptable for the PHgo bundle.
+local preferred_gpu = nil
+local ok_gpus, gpus = pcall(function()
+  return wezterm.gui.enumerate_gpus()
+end)
+if ok_gpus and gpus ~= nil then
+  local type_rank = { DiscreteGpu = 4, IntegratedGpu = 3, VirtualGpu = 2, Other = 1, Cpu = 0 }
+  local backend_rank = { Dx12 = 5, Vulkan = 4, Metal = 3, Gl = 1, BrowserWebGpu = 0 }
+  local best_rank = -1
+  for _, gpu in ipairs(gpus) do
+    local device_type = tostring(gpu.device_type or '')
+    if device_type ~= 'Cpu' then
+      local rank = (type_rank[device_type] or 1) * 100 + (backend_rank[tostring(gpu.backend or '')] or 0)
+      if preferred_gpu == nil or rank > best_rank then
+        preferred_gpu = gpu
+        best_rank = rank
+      end
+    end
+  end
+end
+if preferred_gpu ~= nil then
+  wezterm.log_info('PHgo WebGPU adapter: ' .. tostring(preferred_gpu.name) ..
+    ' [' .. tostring(preferred_gpu.device_type) .. ', ' .. tostring(preferred_gpu.backend) .. ']')
+elseif ok_gpus then
+  wezterm.log_error('PHgo could not enumerate a hardware WebGPU adapter; software fallback is disabled')
+end
+
 local function normalize_prog(value)
   if value == nil then
     return ''
@@ -338,6 +367,7 @@ return {
   show_new_tab_button_in_tab_bar = true,
   window_decorations = is_windows and 'INTEGRATED_BUTTONS|RESIZE' or 'TITLE|RESIZE',
   integrated_title_button_style = 'Windows',
+  integrated_title_button_alignment = 'Right',
   integrated_title_buttons = { 'Hide', 'Maximize', 'Close' },
   window_close_confirmation = 'NeverPrompt',
   automatically_reload_config = false,
@@ -347,24 +377,32 @@ return {
 
   front_end = 'WebGpu',
   webgpu_power_preference = 'HighPerformance',
+  webgpu_force_fallback_adapter = false,
+  webgpu_preferred_adapter = preferred_gpu,
 
   font_size = 9.0,
   initial_cols = 120,
   initial_rows = 34,
   adjust_window_size_when_changing_font_size = false,
-  max_fps = 240,
+  -- Support high-refresh 120 Hz-class displays. WebGPU FIFO/vsync still paces
+  -- lower-refresh surfaces, while 120 avoids the needless scheduler pressure
+  -- of the former 240 fps setting on common 60/120 Hz displays.
+  max_fps = 120,
   animation_fps = 1,
   cursor_blink_rate = 0,
   text_blink_rate = 0,
   text_blink_rate_rapid = 0,
   warn_about_missing_glyphs = false,
   check_for_updates = false,
-  show_update_window = false,
+  -- Keep the native WezTerm tab strip requested by PHgo: each tab gets its
+  -- own close button and the Windows title buttons remain integrated at the
+  -- right edge of the same title bar.
   use_fancy_tab_bar = true,
   show_tabs_in_tab_bar = true,
   show_tab_index_in_tab_bar = false,
   switch_to_last_active_tab_when_closing_tab = true,
-  status_update_interval = 500,
+  -- update-status only synchronizes close confirmation. It is not animation.
+  status_update_interval = 5000,
 
   enable_scroll_bar = false,
   scrollback_lines = 5000,

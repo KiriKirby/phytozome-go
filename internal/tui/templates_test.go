@@ -184,6 +184,69 @@ func TestExternalReferenceModalCtrlVPastesMotifs(t *testing.T) {
 	}
 }
 
+func TestExternalReferenceModalMotifKeyboardNavigation(t *testing.T) {
+	oldNewApp := newApp
+	oldRunApp := runApp
+	defer func() {
+		newApp = oldNewApp
+		runApp = oldRunApp
+	}()
+
+	var screenRef tcell.SimulationScreen
+	newApp = func() *tview.Application {
+		configStyles()
+		app := tview.NewApplication().EnableMouse(true).EnablePaste(true)
+		screen := tcell.NewSimulationScreen("UTF-8")
+		if err := screen.Init(); err != nil {
+			t.Fatalf("screen init failed: %v", err)
+		}
+		screen.SetSize(140, 60)
+		app.SetScreen(screen)
+		screenRef = screen
+		return app
+	}
+	runApp = func(app *tview.Application) error {
+		go func() {
+			inject := func(key tcell.Key, ch rune) {
+				screenRef.InjectKey(key, ch, tcell.ModNone)
+				// Keep this interaction test below the application's intentional
+				// busy-queue navigation coalescing threshold.
+				time.Sleep(10 * time.Millisecond)
+			}
+			// Tab navigates the four top-level sections. Inside Motif checker,
+			// Down selects the input and Left remains an input-cursor key.
+			for range 3 {
+				inject(tcell.KeyTab, 0)
+			}
+			inject(tcell.KeyDown, 0)
+			inject(tcell.KeyLeft, 0)
+			inject(tcell.KeyRune, 'X')
+			// Up/Down must navigate between the checkbox and input without
+			// leaving the Motif checker section.
+			inject(tcell.KeyUp, 0)
+			inject(tcell.KeyRune, ' ')
+			inject(tcell.KeyDown, 0)
+			inject(tcell.KeyEnter, 0)
+		}()
+		return app.Run()
+	}
+
+	result, err := RunExternalReferenceModal(ExternalReferencePage{
+		Title:                "External references",
+		MotifPatternsInitial: "ABCD",
+		ConfirmText:          ButtonApply,
+	})
+	if err != nil {
+		t.Fatalf("RunExternalReferenceModal returned error: %v", err)
+	}
+	if !result.MotifChecker.Enabled {
+		t.Fatal("Space on the internally focused motif checkbox should enable motif checking")
+	}
+	if result.MotifChecker.Motifs != "ABCXD" {
+		t.Fatalf("motif input = %q, want ABCXD after Left then X", result.MotifChecker.Motifs)
+	}
+}
+
 func TestBlastRunSelectionShowsExportScopeFromOriginalQueryCount(t *testing.T) {
 	if blastRunSelectionShowsExportScope(BlastRunSelectionPage{Items: []BlastRunItem{{}}}) {
 		t.Fatal("single visible table without original multi-query context should not show export scope")

@@ -8,6 +8,7 @@
 param(
     [string]$BuildVersion = "",
     [string]$WezTermVersion = "latest",
+    [string]$WindowsWezTermVersion = "main",
     [switch]$SkipTests,
     [switch]$SkipVet,
     [switch]$SkipBuildCheck,
@@ -193,7 +194,7 @@ Website:
     }
 
     Invoke-Checked "Windows WezTerm package" {
-        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows-wezterm.ps1 -Version $WindowsWezTermVersion -BuildVersion $BuildVersion
     }
     Invoke-Checked "Linux WezTerm package" {
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\package-linux-wezterm.ps1 -Version $WezTermVersion -BuildVersion $BuildVersion
@@ -206,13 +207,34 @@ Website:
     }
 
     $entries = @(tar -tf $zipPath)
-    foreach ($required in @("phytozome-go.exe", "core.bin", "phgohelper.bin", "wezterm.bin", "wezterm-cli.bin", "wezterm.lua", "opengl32.dll", "mega-phgo-runtime.bin", "muscleWin64.bin")) {
+    foreach ($required in @("phytozome-go.exe", "core.bin", "phgohelper.bin", "wezterm.bin", "wezterm-cli.bin", "wezterm.lua", "mega-phgo-runtime.bin", "muscleWin64.bin")) {
         if (-not ($entries -contains $required)) {
             throw "Windows zip is missing required file: $required"
         }
     }
     if ($entries -contains "mesa/opengl32.dll") {
         throw "Windows zip must not package the legacy mesa directory."
+    }
+    if ($entries -contains "opengl32.dll") {
+        throw "Windows zip must not package the Mesa software OpenGL fallback."
+    }
+    if (-not ($entries -contains "wezterm-source.json")) {
+        throw "Windows zip must record the exact WezTerm source revision in wezterm-source.json."
+    }
+    $windowsConfigPath = Join-Path $resolvedBin "phytozome-go_windows_amd64_wezterm\wezterm.lua"
+    $windowsConfig = Get-Content -LiteralPath $windowsConfigPath -Raw
+    if ($windowsConfig -match '(?m)^\s*show_close_tab_button_in_tabs\s*=') {
+        throw "Windows release contains unsupported WezTerm field show_close_tab_button_in_tabs."
+    }
+    foreach ($requiredConfig in @(
+        'use_fancy_tab_bar = true',
+        "window_decorations = is_windows and 'INTEGRATED_BUTTONS|RESIZE'",
+        "integrated_title_button_style = 'Windows'",
+        "integrated_title_buttons = { 'Hide', 'Maximize', 'Close' }"
+    )) {
+        if (-not $windowsConfig.Contains($requiredConfig)) {
+            throw "Windows release is missing required window/tab setting: $requiredConfig"
+        }
     }
     $rootExeEntries = @($entries | Where-Object { $_ -match '^[^/\\]+\.exe$' })
     if ($rootExeEntries.Count -ne 1 -or $rootExeEntries[0] -ne "phytozome-go.exe") {

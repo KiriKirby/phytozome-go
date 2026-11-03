@@ -6,7 +6,7 @@
 # wangsychn. All Rights Reserved. Contributor(s): .
 
 param(
-    [string]$Version = "latest",
+    [string]$Version = "main",
     [string]$BuildVersion = "dev",
     [switch]$Prepare,
     [switch]$SkipZip
@@ -27,20 +27,28 @@ function Invoke-GoBuild {
 }
 
 $repoRoot = Get-PhytozomeRepoRoot
-$release = Resolve-WezTermWindowsRelease $Version
-$preparedDir = Get-PreparedWindowsWezTermDir $repoRoot $release.Tag
+$sourceBuild = $Version -eq "main" -or $Version.StartsWith("source:", [System.StringComparison]::OrdinalIgnoreCase)
+if ($sourceBuild) {
+    $revision = if ($Version -eq "main") { "main" } else { $Version.Substring("source:".Length) }
+    $preparedDir = (& (Join-Path $PSScriptRoot "prepare-windows-wezterm-source.ps1") -Revision $revision | Select-Object -Last 1)
+    if ([string]::IsNullOrWhiteSpace($preparedDir)) {
+        throw "WezTerm source build did not return a prepared runtime directory."
+    }
+} else {
+    $release = Resolve-WezTermWindowsRelease $Version
+    $preparedDir = Get-PreparedWindowsWezTermDir $repoRoot $release.Tag
+}
 $bundleDir = Join-Path $repoRoot "bin\phytozome-go_windows_amd64_wezterm"
 $appPath = Join-Path $bundleDir "core.bin"
 $zipPath = Join-Path $repoRoot "bin\phytozome-go_windows_amd64_wezterm.zip"
 $runtimeSourceDir = Join-Path $repoRoot "assets\mega-phgo-runtime\windows-amd64\runtime"
 
-if (
+if (-not $sourceBuild -and (
     $Prepare -or
     -not (Test-Path -LiteralPath (Join-Path $preparedDir "wezterm.bin") -PathType Leaf) -or
     -not (Test-Path -LiteralPath (Join-Path $preparedDir "phytozome-go.exe") -PathType Leaf) -or
-    -not (Test-Path -LiteralPath (Join-Path $preparedDir "opengl32.dll") -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $preparedDir "mesa") -PathType Container)
-) {
+)) {
     & (Join-Path $PSScriptRoot "prepare-windows-wezterm.ps1") -Version $release.Tag
 }
 & (Join-Path $PSScriptRoot "prepare-mega-phgo-runtime.ps1")
@@ -51,7 +59,23 @@ New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
 Copy-Item -Path (Join-Path $preparedDir "*") -Destination $bundleDir -Recurse -Force
 Copy-Item -Path (Join-Path $runtimeSourceDir "*") -Destination $bundleDir -Force
 Remove-Item -LiteralPath (Join-Path $bundleDir "mesa") -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $bundleDir "opengl32.dll") -Force -ErrorAction SilentlyContinue
 Write-PhytozomeWezTermConfig -Path (Join-Path $bundleDir "wezterm.lua") -Version $BuildVersion
+$generatedConfigPath = Join-Path $bundleDir "wezterm.lua"
+$generatedConfig = Get-Content -LiteralPath $generatedConfigPath -Raw
+if ($generatedConfig -match '(?m)^\s*show_close_tab_button_in_tabs\s*=') {
+    throw "Generated WezTerm config contains unsupported field show_close_tab_button_in_tabs."
+}
+foreach ($requiredConfig in @(
+    'use_fancy_tab_bar = true',
+    "window_decorations = is_windows and 'INTEGRATED_BUTTONS|RESIZE'",
+    "integrated_title_button_style = 'Windows'",
+    "integrated_title_buttons = { 'Hide', 'Maximize', 'Close' }"
+)) {
+    if (-not $generatedConfig.Contains($requiredConfig)) {
+        throw "Generated WezTerm config is missing required window/tab setting: $requiredConfig"
+    }
+}
 Remove-Item -LiteralPath (Join-Path $bundleDir "phytozome-go-window-icon.png") -Force -ErrorAction SilentlyContinue
 & (Join-Path $PSScriptRoot "update-windows-icon.ps1") -SmallSource "docs\logo3small.png" -LargeSource "docs\logo3large.png"
 

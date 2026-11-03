@@ -7,7 +7,7 @@
 
 param(
     [string]$BuildVersion = "dev",
-    [string]$WezTermVersion = "latest",
+    [string]$WezTermVersion = "main",
     [switch]$SkipTests,
     [switch]$SkipVet,
     [switch]$SkipBuildCheck
