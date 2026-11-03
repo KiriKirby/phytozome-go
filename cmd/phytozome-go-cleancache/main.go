@@ -18,6 +18,8 @@ import (
 	"github.com/KiriKirby/phytozome-go/internal/labelname"
 	"github.com/KiriKirby/phytozome-go/internal/notifyaudio"
 	"github.com/KiriKirby/phytozome-go/internal/startupstate"
+	"github.com/gofrs/flock"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 const mainProgramName = "core.bin"
@@ -31,6 +33,7 @@ const skipBundlePreflightEnv = "PHGO_SKIP_BUNDLE_PREFLIGHT"
 const autoAcceptUpdateEnv = "PHGO_AUTO_ACCEPT_UPDATE"
 const updateDebugLogEnv = "PHGO_UPDATE_DEBUG_LOG"
 const lastUpdateErrorEnv = "PHGO_LAST_UPDATE_ERROR"
+const maintenanceLockName = ".phgo-maintenance.lock"
 const windowsErrorSharingViolation syscall.Errno = 32
 const windowsErrorLockViolation syscall.Errno = 33
 const windowsErrorAccessDenied syscall.Errno = 5
@@ -75,36 +78,48 @@ func run() error {
 	if err := waitForPendingBundleUpdate(appDir); err != nil {
 		return err
 	}
+	lease, skipReason, err := acquireBundleMaintenance(appDir)
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		_, _ = fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintf(os.Stdout, "Startup maintenance skipped: %s.\n", skipReason)
+		if skipReason == "another startup helper is already performing it" {
+			if err := waitForStartupMaintenance(appDir); err != nil {
+				return err
+			}
+		} else {
+			_ = startupstate.Complete(appDir)
+		}
+		return launchMainProgram(os.Args[1:])
+	}
+	defer lease.release()
 	_ = startupstate.Write(appDir, startupstate.State{Status: startupstate.StatusInitializing, Message: "Startup helper is preparing phytozome GO."})
 	mainAlreadyLaunched := false
-	if shouldSkipBundleMaintenancePreflight() {
-		_, _ = fmt.Fprintln(os.Stdout)
-		_, _ = fmt.Fprintln(os.Stdout, "Bundle cache cleanup and release update check skipped for relaunch.")
-	} else {
-		cacheTargets, err := resolveCacheTargets()
-		if err != nil {
-			return err
-		}
+	cacheTargets, err := resolveCacheTargets()
+	if err != nil {
+		return err
+	}
 
-		_, _ = fmt.Fprintln(os.Stdout)
-		_, _ = fmt.Fprintln(os.Stdout, "Cache cleanup targets:")
-		for _, target := range cacheTargets {
-			_, _ = fmt.Fprintf(os.Stdout, "  - %s\n", target)
-		}
+	_, _ = fmt.Fprintln(os.Stdout)
+	_, _ = fmt.Fprintln(os.Stdout, "Cache cleanup targets:")
+	for _, target := range cacheTargets {
+		_, _ = fmt.Fprintf(os.Stdout, "  - %s\n", target)
+	}
 
-		writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Deleting startup cache directories.", "")
-		if err := runSpinner("Deleting .cache directories", func() error {
-			return removeCacheTargets(cacheTargets)
-		}); err != nil {
-			return err
-		}
+	writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Deleting startup cache directories.", "")
+	if err := runSpinner("Deleting .cache directories", func() error {
+		return removeCacheTargets(cacheTargets)
+	}); err != nil {
+		return err
+	}
 
-		_, _ = fmt.Fprintln(os.Stdout, "Cache cleanup complete.")
-		writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Checking for application updates.", "")
-		if updateLaunched := maybeHandleReleaseUpdate(appDir, os.Args[1:]); updateLaunched {
-			_ = startupstate.Complete(appDir)
-			return nil
-		}
+	_, _ = fmt.Fprintln(os.Stdout, "Cache cleanup complete.")
+	writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Checking for application updates.", "")
+	if updateLaunched := maybeHandleReleaseUpdate(appDir, os.Args[1:]); updateLaunched {
+		_ = startupstate.Complete(appDir)
+		return nil
 	}
 	writeStartupStatus(appDir, startupstate.StatusInitializing, false, "Checking symbol name database.", "")
 	symbolLaunched, err := maybeEnsureSymbolNameDatabase(appDir, os.Args[1:])
@@ -118,6 +133,92 @@ func run() error {
 		return nil
 	}
 	return launchMainProgram(os.Args[1:])
+}
+
+type bundleMaintenanceLease struct {
+	lock *flock.Flock
+}
+
+func (l *bundleMaintenanceLease) release() {
+	if l == nil || l.lock == nil {
+		return
+	}
+	_ = l.lock.Unlock()
+	_ = l.lock.Close()
+}
+
+func acquireBundleMaintenance(appDir string) (*bundleMaintenanceLease, string, error) {
+	if shouldSkipBundleMaintenancePreflight() {
+		return nil, "this is an updater relaunch", nil
+	}
+	lock := flock.New(filepath.Join(appDir, maintenanceLockName))
+	locked, lockErr := lock.TryLock()
+	if lockErr != nil {
+		_ = lock.Close()
+		return nil, "", fmt.Errorf("acquire startup maintenance lock: %w", lockErr)
+	}
+	if !locked {
+		_ = lock.Close()
+		return nil, "another startup helper is already performing it", nil
+	}
+	lease := &bundleMaintenanceLease{lock: lock}
+	running, err := mainProgramInstanceRunning(appDir)
+	if err != nil {
+		lease.release()
+		return nil, "", fmt.Errorf("inspect running phytozome GO instances: %w", err)
+	}
+	if err == nil && running {
+		lease.release()
+		return nil, "another phytozome GO instance is already running", nil
+	}
+	return lease, "", nil
+}
+
+func mainProgramInstanceRunning(appDir string) (bool, error) {
+	target, err := filepath.Abs(filepath.Join(appDir, mainProgramName))
+	if err != nil {
+		return false, err
+	}
+	processes, err := process.Processes()
+	if err != nil {
+		return false, err
+	}
+	for _, candidate := range processes {
+		exePath, exeErr := candidate.Exe()
+		if exeErr != nil || strings.TrimSpace(exePath) == "" {
+			continue
+		}
+		if executablePathMatches(exePath, target) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func executablePathMatches(candidate string, target string) bool {
+	candidate, candidateErr := filepath.Abs(strings.TrimSpace(candidate))
+	target, targetErr := filepath.Abs(strings.TrimSpace(target))
+	return candidateErr == nil && targetErr == nil && samePath(candidate, target)
+}
+
+func waitForStartupMaintenance(appDir string) error {
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		lock := flock.New(filepath.Join(appDir, maintenanceLockName))
+		locked, err := lock.TryLock()
+		if err != nil {
+			_ = lock.Close()
+			return fmt.Errorf("wait for startup maintenance lock: %w", err)
+		}
+		if locked {
+			_ = lock.Unlock()
+			_ = lock.Close()
+			return nil
+		}
+		_ = lock.Close()
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for another startup helper to finish")
 }
 
 func writeStartupStatus(appDir string, status string, allowUse bool, message string, dbPath string) {

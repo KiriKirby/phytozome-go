@@ -347,6 +347,7 @@ type HandoffStateV2 struct {
 	TransferSourceSpecies model.SpeciesCandidate     `json:"transfer_source_species"`
 	TransferKeywordRows   []model.KeywordResultRow   `json:"transfer_keyword_rows"`
 	TransferBlastRows     []model.BlastResultRow     `json:"transfer_blast_rows"`
+	TransferPreparedItems []BlastQueryItemV2         `json:"transfer_prepared_items,omitempty"`
 	TransferCanvasItems   []model.CanvasItem         `json:"transfer_canvas_items"`
 	TransferCanvasCurrent int                        `json:"transfer_canvas_current"`
 	TransferCanvasNextID  int                        `json:"transfer_canvas_next_id"`

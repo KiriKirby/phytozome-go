@@ -4237,6 +4237,86 @@ func TestResolveTransferredKeywordRowsToBlastItemsUsesRowSourceDatabase(t *testi
 	}
 }
 
+func TestResolveTransferredKeywordRowsSupportsMixedNCBIAndPLAZAInlineSequences(t *testing.T) {
+	targetFetchCount := make(map[string]int)
+	w := &BlastWizard{
+		source:                fakeSource{name: "lemna", fetchCount: targetFetchCount},
+		suppressTaskModals:    true,
+		proteinSequenceCache:  make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:   make(map[string]error),
+		keywordBlastItemCache: make(map[string]blastQueryItem),
+	}
+	rows := []model.KeywordResultRow{
+		{
+			SourceDatabase: "plaza",
+			SequenceID:     "PLAZA_PROTEIN",
+			ProteinID:      "PLAZA_PROTEIN",
+			ExtraColumns: map[string]string{
+				"plaza_fasta": ">PLAZA_PROTEIN\nMPLAZA",
+			},
+		},
+		{
+			SourceDatabase: "ncbi",
+			SequenceID:     "XP_001",
+			ProteinID:      "XP_001",
+			ExtraColumns: map[string]string{
+				"ncbi_fasta": ">XP_001\nMNCBI",
+			},
+		},
+	}
+	items, err := w.resolveTransferredKeywordRowsToBlastItems(context.Background(), model.SpeciesCandidate{JBrowseName: "ncbi_protein"}, rows)
+	if err != nil {
+		t.Fatalf("resolveTransferredKeywordRowsToBlastItems returned error: %v", err)
+	}
+	if len(items) != 2 || items[0].Sequence != "MPLAZA" || items[1].Sequence != "MNCBI" {
+		t.Fatalf("mixed inline items = %#v", items)
+	}
+	if len(targetFetchCount) != 0 {
+		t.Fatalf("inline mixed rows unexpectedly used the target source: %#v", targetFetchCount)
+	}
+}
+
+func TestResolveTransferredKeywordRowsUsesPerRowSourcesForLegacyMixedBatch(t *testing.T) {
+	ncbiFetchCount := make(map[string]int)
+	w := &BlastWizard{
+		source: fakeSource{name: "lemna"},
+		sourceFactory: func(name string) source.DataSource {
+			if strings.EqualFold(strings.TrimSpace(name), "ncbi") {
+				return fakeSource{name: "ncbi", sequences: map[string]string{"XP_002": "MREMOTE"}, fetchCount: ncbiFetchCount}
+			}
+			return nil
+		},
+		suppressTaskModals:    true,
+		proteinSequenceCache:  make(map[string]model.ProteinSequenceData),
+		proteinSequenceMiss:   make(map[string]error),
+		keywordBlastItemCache: make(map[string]blastQueryItem),
+	}
+	rows := []model.KeywordResultRow{
+		{
+			SourceDatabase: "plaza",
+			SequenceID:     "PLAZA_PROTEIN",
+			ExtraColumns:   map[string]string{"plaza_fasta": ">PLAZA_PROTEIN\nMPLAZA"},
+		},
+		{
+			SourceDatabase: "ncbi",
+			SequenceID:     "XP_002",
+		},
+	}
+	items, err := w.resolveTransferredKeywordRowsToBlastItems(context.Background(), model.SpeciesCandidate{JBrowseName: "ncbi_protein"}, rows)
+	if err != nil {
+		t.Fatalf("resolveTransferredKeywordRowsToBlastItems returned error: %v", err)
+	}
+	if len(items) != 2 || items[0].Sequence != "MPLAZA" || items[1].Sequence != "MREMOTE" {
+		t.Fatalf("legacy mixed items = %#v", items)
+	}
+	if ncbiFetchCount["XP_002"] != 1 {
+		t.Fatalf("NCBI fetch count = %d, want 1", ncbiFetchCount["XP_002"])
+	}
+	if w.source == nil || !strings.EqualFold(w.source.Name(), "lemna") {
+		t.Fatalf("target source was not restored: %#v", w.source)
+	}
+}
+
 func TestResolveTransferredBlastRowsToBlastItemsUsesRowSourceDatabase(t *testing.T) {
 	sourceFetchCount := make(map[string]int)
 	targetFetchCount := make(map[string]int)
@@ -4315,6 +4395,51 @@ func TestRunTransferredBlastModeKeepsTransferStateForBackNavigation(t *testing.T
 	}
 	if len(w.transferKeywordRows) != 1 {
 		t.Fatalf("transferKeywordRows length = %d, want 1", len(w.transferKeywordRows))
+	}
+}
+
+func TestKeywordBlastPreparedItemsSurviveChildHandoff(t *testing.T) {
+	w := &BlastWizard{
+		transferPreparedItems: []blastQueryItem{{
+			RawInput:        "XP_001",
+			LabelName:       "PAL1",
+			Sequence:        "MPEPTIDE",
+			ProteinSequence: "MPEPTIDE",
+			FromKeyword:     true,
+			QuerySource: &model.QuerySequenceSource{
+				SourceDatabase:  "ncbi",
+				ProteinID:       "XP_001",
+				Sequence:        "MPEPTIDE",
+				ProteinSequence: "MPEPTIDE",
+				SequenceKind:    model.SequenceProtein,
+			},
+		}},
+	}
+	handoff := w.SnapshotHandoff("", ModeBlast, "", "1", "run")
+	launch := NewBlastWizardWithLaunch(io.Discard, tui.StartupInfo{}, InstanceLaunchRequest{
+		RunID:   "run",
+		Handoff: handoff,
+	})
+	if len(launch.transferPreparedItems) != 1 {
+		t.Fatalf("prepared item count = %d, want 1", len(launch.transferPreparedItems))
+	}
+	item := launch.transferPreparedItems[0]
+	if item.Sequence != "MPEPTIDE" || item.QuerySource == nil || item.QuerySource.SourceDatabase != "ncbi" {
+		t.Fatalf("prepared item was not preserved: %#v", item)
+	}
+	if item.QuerySource == w.transferPreparedItems[0].QuerySource {
+		t.Fatal("prepared query source should be cloned across the handoff")
+	}
+}
+
+func TestClearTransferBlastStateDropsPreparedItems(t *testing.T) {
+	w := &BlastWizard{
+		transferKind:          "keyword_rows",
+		transferPreparedItems: []blastQueryItem{{Sequence: "MPEPTIDE"}},
+	}
+	w.clearTransferBlastState()
+	if w.transferKind != "" || len(w.transferPreparedItems) != 0 {
+		t.Fatalf("transfer state was not cleared: kind=%q prepared=%#v", w.transferKind, w.transferPreparedItems)
 	}
 }
 

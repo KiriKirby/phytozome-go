@@ -144,6 +144,56 @@ func TestShouldSkipBundleMaintenancePreflight(t *testing.T) {
 	}
 }
 
+func TestAcquireBundleMaintenanceSkipsEveryMaintenanceStepForUpdaterRelaunch(t *testing.T) {
+	t.Setenv(skipBundlePreflightEnv, "1")
+	lease, reason, err := acquireBundleMaintenance(t.TempDir())
+	if err != nil {
+		t.Fatalf("acquireBundleMaintenance returned error: %v", err)
+	}
+	if lease != nil {
+		lease.release()
+		t.Fatal("updater relaunch unexpectedly acquired the maintenance lease")
+	}
+	if reason != "this is an updater relaunch" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestAcquireBundleMaintenanceDeduplicatesConcurrentHelpers(t *testing.T) {
+	t.Setenv(skipBundlePreflightEnv, "")
+	appDir := t.TempDir()
+	first, reason, err := acquireBundleMaintenance(appDir)
+	if err != nil {
+		t.Fatalf("first acquireBundleMaintenance returned error: %v", err)
+	}
+	if first == nil {
+		t.Fatalf("first helper did not acquire lease: %s", reason)
+	}
+	defer first.release()
+	second, reason, err := acquireBundleMaintenance(appDir)
+	if err != nil {
+		t.Fatalf("second acquireBundleMaintenance returned error: %v", err)
+	}
+	if second != nil {
+		second.release()
+		t.Fatal("second helper unexpectedly acquired maintenance lease")
+	}
+	if reason != "another startup helper is already performing it" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestExecutablePathMatchesRequiresSameBundleBinary(t *testing.T) {
+	appDir := t.TempDir()
+	target := filepath.Join(appDir, mainProgramName)
+	if !executablePathMatches(target, filepath.Join(appDir, ".", mainProgramName)) {
+		t.Fatal("equivalent core paths did not match")
+	}
+	if executablePathMatches(filepath.Join(t.TempDir(), mainProgramName), target) {
+		t.Fatal("same executable name from another bundle unexpectedly matched")
+	}
+}
+
 func TestShouldSpawnMainProgramInNewTabOnlyInsideWezTerm(t *testing.T) {
 	t.Setenv("WEZTERM_PANE", "1")
 	if !shouldSpawnMainProgramInNewTab() {

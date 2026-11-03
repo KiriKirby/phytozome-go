@@ -90,6 +90,7 @@ type BlastWizard struct {
 	transferTargetDatabase  string
 	transferKeywordRows     []model.KeywordResultRow
 	transferBlastRows       []model.BlastResultRow
+	transferPreparedItems   []blastQueryItem
 	transferCanvasItems     []model.CanvasItem
 	transferCanvasCurrent   int
 	transferCanvasNextID    int
@@ -906,6 +907,7 @@ func NewBlastWizardWithLaunch(out io.Writer, tuiInfo tui.StartupInfo, launch Ins
 		w.transferSourceSpecies = launch.Handoff.BlastContext.TransferSourceSpecies
 		w.transferKeywordRows = append([]model.KeywordResultRow(nil), launch.Handoff.BlastContext.TransferKeywordRows...)
 		w.transferBlastRows = append([]model.BlastResultRow(nil), launch.Handoff.BlastContext.TransferBlastRows...)
+		w.transferPreparedItems = cloneBlastQueryItems(launch.Handoff.BlastContext.TransferPreparedItems)
 		w.transferCanvasItems = cloneCanvasItems(launch.Handoff.BlastContext.TransferCanvasItems)
 		w.transferCanvasCurrent = launch.Handoff.BlastContext.TransferCanvasCurrent
 		w.transferCanvasNextID = launch.Handoff.BlastContext.TransferCanvasNextID
@@ -1302,6 +1304,7 @@ func (w *BlastWizard) clearTransferBlastState() {
 	w.transferTargetDatabase = ""
 	w.transferKeywordRows = nil
 	w.transferBlastRows = nil
+	w.transferPreparedItems = nil
 	w.transferSourceSpecies = model.SpeciesCandidate{}
 }
 
@@ -1512,21 +1515,54 @@ func blastRowsSourceDatabase(rows []model.BlastResultRow) string {
 }
 
 func (w *BlastWizard) resolveTransferredKeywordRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.KeywordResultRow) ([]blastQueryItem, error) {
-	override, err := w.transferSourceForDatabase(transferredKeywordRowsSourceDatabase(rows))
-	if err != nil {
-		return nil, err
+	// Current NCBI and PLAZA-priority keyword rows carry their protein FASTA
+	// inline.  Resolve those rows without constructing a source client from the
+	// first row: mixed result sets are valid, and "plaza" is provenance rather
+	// than a standalone PHgo data source.
+	if keywordRowsHaveInlineProteinSequences(rows) {
+		return w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
 	}
-	var (
-		items  []blastQueryItem
-		runErr error
-	)
-	if err := w.withTemporarySource(override, func() error {
-		items, runErr = w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
-		return runErr
-	}); err != nil {
-		return nil, err
+
+	// Legacy handoffs may contain a mixed batch and no prepared-query payload.
+	// Resolve each row against its own provenance source so row order is kept
+	// and a PLAZA inline row cannot force later NCBI rows through a nonexistent
+	// PLAZA data-source client.
+	items := make([]blastQueryItem, 0, len(rows))
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var override source.DataSource
+		if strings.TrimSpace(inlineKeywordProteinSequenceData(row).Sequence) == "" {
+			var err error
+			override, err = w.transferSourceForDatabase(strings.TrimSpace(row.SourceDatabase))
+			if err != nil {
+				return nil, err
+			}
+		}
+		var resolved []blastQueryItem
+		if err := w.withTemporarySource(override, func() error {
+			var resolveErr error
+			resolved, resolveErr = w.resolveKeywordRowsToBlastItems(ctx, selected, []model.KeywordResultRow{row})
+			return resolveErr
+		}); err != nil {
+			return nil, err
+		}
+		items = append(items, resolved...)
 	}
 	return items, nil
+}
+
+func keywordRowsHaveInlineProteinSequences(rows []model.KeywordResultRow) bool {
+	if len(rows) == 0 {
+		return false
+	}
+	for _, row := range rows {
+		if strings.TrimSpace(inlineKeywordProteinSequenceData(row).Sequence) == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *BlastWizard) resolveTransferredBlastRowsToBlastItems(ctx context.Context, selected model.SpeciesCandidate, rows []model.BlastResultRow) ([]blastQueryItem, error) {
@@ -2677,6 +2713,20 @@ func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.Sp
 		return nil
 	}
 	if w.shouldSpawnChildTab() {
+		prepared, err := w.resolveKeywordRowsToBlastItems(ctx, selected, rows)
+		if err != nil {
+			return err
+		}
+		if len(prepared) == 0 {
+			return w.showInfo("Keyword BLAST", "None of the selected keyword rows contains or resolves to a protein sequence that can be used as a BLAST query.", prompt.ErrBackToRowSelection)
+		}
+		prepared, err = w.prepareKeywordBlastItems(ctx, selected, prepared)
+		if err != nil {
+			return err
+		}
+		if len(prepared) == 0 {
+			return w.showInfo("Keyword BLAST", "No selected keyword rows remained after BLAST query preparation.", prompt.ErrBackToRowSelection)
+		}
 		w.lastKeywordGroups = cloneKeywordSearchGroups(groups)
 		w.lastKeywordSpecies = selected
 		if reportCtx != nil {
@@ -2688,6 +2738,7 @@ func (w *BlastWizard) runKeywordBlastMode(ctx context.Context, selected model.Sp
 		handoff.BlastContext.TransferKind = "keyword_rows"
 		handoff.BlastContext.TransferSourceSpecies = selected
 		handoff.BlastContext.TransferKeywordRows = append([]model.KeywordResultRow(nil), rows...)
+		handoff.BlastContext.TransferPreparedItems = cloneBlastQueryItems(prepared)
 		handoff.BlastContext.ReuseLastKeywordRows = true
 		handoff.BlastContext.RewindKeywordToInput = false
 		return w.spawnChildTab(ctx, "", ModeBlast, handoff)
@@ -3421,6 +3472,9 @@ func (w *BlastWizard) runTransferredBlastMode(ctx context.Context, targetSpecies
 	sourceSpecies := w.transferSourceSpecies
 	switch transferKind {
 	case "keyword_rows":
+		if len(w.transferPreparedItems) > 0 {
+			return w.runPreparedBlastAgainstDatabase(ctx, sourceSpecies, cloneKeywordSearchGroups(w.lastKeywordGroups), w.lastKeywordReport, cloneBlastQueryItems(w.transferPreparedItems), targetSpecies)
+		}
 		rows := append([]model.KeywordResultRow(nil), w.transferKeywordRows...)
 		if len(rows) == 0 {
 			return w.showInfo("Keyword BLAST", "No transferred keyword rows were available for BLAST.", prompt.ErrBackToDatabaseSelection)

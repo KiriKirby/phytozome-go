@@ -958,6 +958,7 @@ func (w *BlastWizard) snapshotHandoffState() *sessionsnapshot.HandoffStateV2 {
 		TransferSourceSpecies: w.transferSourceSpecies,
 		TransferKeywordRows:   append([]model.KeywordResultRow(nil), w.transferKeywordRows...),
 		TransferBlastRows:     append([]model.BlastResultRow(nil), w.transferBlastRows...),
+		TransferPreparedItems: snapshotQueryItems(w.transferPreparedItems),
 		TransferCanvasItems:   cloneCanvasItems(w.transferCanvasItems),
 		TransferCanvasCurrent: w.transferCanvasCurrent,
 		TransferCanvasNextID:  w.transferCanvasNextID,
@@ -1051,6 +1052,7 @@ func (w *BlastWizard) hydrateCommonSnapshotState(snapshot sessionsnapshot.Snapsh
 		w.transferSourceSpecies = snapshot.Handoff.TransferSourceSpecies
 		w.transferKeywordRows = append([]model.KeywordResultRow(nil), snapshot.Handoff.TransferKeywordRows...)
 		w.transferBlastRows = append([]model.BlastResultRow(nil), snapshot.Handoff.TransferBlastRows...)
+		w.transferPreparedItems = blastQueryItemsFromSnapshot(snapshot.Handoff.TransferPreparedItems)
 		w.transferCanvasItems = cloneCanvasItems(snapshot.Handoff.TransferCanvasItems)
 		w.transferCanvasCurrent = snapshot.Handoff.TransferCanvasCurrent
 		w.transferCanvasNextID = snapshot.Handoff.TransferCanvasNextID

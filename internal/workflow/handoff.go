@@ -41,6 +41,7 @@ type blastHandoffContext struct {
 	TransferSourceSpecies  model.SpeciesCandidate     `json:"transfer_source_species"`
 	TransferKeywordRows    []model.KeywordResultRow   `json:"transfer_keyword_rows"`
 	TransferBlastRows      []model.BlastResultRow     `json:"transfer_blast_rows"`
+	TransferPreparedItems  []blastQueryItem           `json:"transfer_prepared_items,omitempty"`
 	TransferCanvasItems    []model.CanvasItem         `json:"transfer_canvas_items"`
 	TransferCanvasCurrent  int                        `json:"transfer_canvas_current"`
 	TransferCanvasNextID   int                        `json:"transfer_canvas_next_id"`
@@ -76,6 +77,7 @@ func (w *BlastWizard) SnapshotHandoff(database string, mode QueryMode, instanceI
 		TransferCanvasItems:   cloneCanvasItems(w.transferCanvasItems),
 		TransferCanvasCurrent: w.transferCanvasCurrent,
 		TransferCanvasNextID:  w.transferCanvasNextID,
+		TransferPreparedItems: cloneBlastQueryItems(w.transferPreparedItems),
 	}
 	if w.lastKeywordReport != nil {
 		reportCopy := *w.lastKeywordReport

@@ -134,48 +134,6 @@ func CacheRoot() (string, error) {
 	return base, nil
 }
 
-func ResetRunCache() error {
-	roots, err := cacheRootPaths()
-	if err != nil {
-		return err
-	}
-	for _, base := range roots {
-		if err := os.RemoveAll(base); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("reset cache directory %s: %w", base, err)
-		}
-	}
-	return nil
-}
-
-func cacheRootPaths() ([]string, error) {
-	seen := make(map[string]struct{}, 2)
-	roots := make([]string, 0, 2)
-	add := func(base string) {
-		base = strings.TrimSpace(base)
-		if base == "" {
-			return
-		}
-		base = filepath.Clean(base)
-		key := strings.ToLower(base)
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		roots = append(roots, base)
-	}
-
-	appDir, err := ApplicationDir()
-	if err != nil {
-		return nil, err
-	}
-	add(filepath.Join(appDir, ".cache"))
-
-	if wd, err := os.Getwd(); err == nil {
-		add(filepath.Join(wd, ".cache"))
-	}
-	return roots, nil
-}
-
 func RemoveCacheSubtree(parts ...string) error {
 	root, err := CacheRoot()
 	if err != nil {
@@ -186,7 +144,7 @@ func RemoveCacheSubtree(parts ...string) error {
 		return err
 	}
 	if samePath(target, root) {
-		return fmt.Errorf("refusing to remove entire cache root without using ResetRunCache")
+		return fmt.Errorf("refusing to remove entire cache root from the main program")
 	}
 	if err := os.RemoveAll(target); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove cache subtree %s: %w", target, err)
