@@ -7,6 +7,26 @@
 
 <body bgcolor="#FFFFFF">
 
+<p>phytozome GO v20261103T172131Z - Multi-tab performance and window fixes</p>
+<p>This release focuses on multi-tab responsiveness, GPU rendering, and the native Windows tab/title-bar experience.</p>
+<p>Highlights:</p>
+<p>- Fixed high idle CPU across multiple PHgo tabs by replacing quadratic Windows child-process observation with a single Toolhelp snapshot and reducing idle telemetry frequency.</p>
+<p>- Fixed the WezTerm configuration error caused by the unsupported show_close_tab_button_in_tabs field.</p>
+<p>- Restored the fancy/native tab bar with a close button on each tab and integrated Windows Hide/Maximize/Close buttons.</p>
+<p>- Windows now builds and bundles the latest WezTerm main source revision with Release optimizations (thin LTO, one codegen unit, stripped symbols), recording the exact upstream commit.</p>
+<p>- Persistently caches the WezTerm source build by exact commit outside the application runtime cache, so unchanged commits are reused without recompilation.</p>
+<p>- Forces high-performance hardware WebGPU selection, preferring discrete GPU and DX12, and removes the Mesa software-rendering fallback.</p>
+<p>- Improves Motif checker keyboard navigation: Up/Down changes controls while Left/Right remains text-cursor editing.</p>
+<p>Validation:</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- go build ./...</p>
+<p>- PowerShell parser checks</p>
+<p>- Stable WezTerm configuration parsing</p>
+<p>- Windows package content/config validation</p>
+<p>- Linux and macOS package validation</p>
+<p>- SHA-256 checksums</p>
+<p>&nbsp;</p>
 <p>phytozome GO v20261103T142237Z</p>
 <p>InterPro and external-reference update. Seven active InterPro columns, query comparison colors, original query metadata, Query Metadata details/XLSX, documentation updates. Validation: go test ./..., go vet ./..., go build ./...</p>
 <p>&nbsp;</p>
