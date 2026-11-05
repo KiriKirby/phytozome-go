@@ -28,7 +28,17 @@ function Invoke-GoBuild {
 
 $repoRoot = Get-PhytozomeRepoRoot
 $sourceBuild = $Version -eq "main" -or $Version.StartsWith("source:", [System.StringComparison]::OrdinalIgnoreCase)
-if ($sourceBuild) {
+$phgoReleaseBuild = $Version.StartsWith("phgo-release:", [System.StringComparison]::OrdinalIgnoreCase)
+if ($phgoReleaseBuild) {
+    $releaseTag = $Version.Substring("phgo-release:".Length)
+    if ([string]::IsNullOrWhiteSpace($releaseTag)) {
+        $releaseTag = "latest"
+    }
+    $preparedDir = (& (Join-Path $PSScriptRoot "prepare-windows-wezterm-phgo-release.ps1") -Tag $releaseTag | Select-Object -Last 1)
+    if ([string]::IsNullOrWhiteSpace($preparedDir)) {
+        throw "PHgo release did not return a prepared WezTerm runtime directory."
+    }
+} elseif ($sourceBuild) {
     $revision = if ($Version -eq "main") { "main" } else { $Version.Substring("source:".Length) }
     $preparedDir = (& (Join-Path $PSScriptRoot "prepare-windows-wezterm-source.ps1") -Revision $revision | Select-Object -Last 1)
     if ([string]::IsNullOrWhiteSpace($preparedDir)) {
@@ -43,7 +53,7 @@ $appPath = Join-Path $bundleDir "core.bin"
 $zipPath = Join-Path $repoRoot "bin\phytozome-go_windows_amd64_wezterm.zip"
 $runtimeSourceDir = Join-Path $repoRoot "assets\mega-phgo-runtime\windows-amd64\runtime"
 
-if (-not $sourceBuild -and (
+if (-not $sourceBuild -and -not $phgoReleaseBuild -and (
     $Prepare -or
     -not (Test-Path -LiteralPath (Join-Path $preparedDir "wezterm.bin") -PathType Leaf) -or
     -not (Test-Path -LiteralPath (Join-Path $preparedDir "phytozome-go.exe") -PathType Leaf) -or

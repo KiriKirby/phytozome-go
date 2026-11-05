@@ -7,7 +7,7 @@
 
 param(
     [string]$BuildVersion = "",
-    [string]$WezTermVersion = "main",
+    [string]$WezTermVersion = "phgo-release:latest",
     [switch]$SkipTests,
     [switch]$SkipVet,
     [switch]$SkipBuildCheck,
@@ -42,7 +42,7 @@ if (-not [string]::IsNullOrWhiteSpace($ReleaseNotes)) {
 
 if ($Publish) {
     # build-release keeps stable prebuilt WezTerm assets for Linux/macOS while
-    # Windows follows the source-build revision selected by this entrypoint.
+    # Windows reuses the runtime from the latest PHgo release by default.
     $forward.Remove("WezTermVersion")
     $forward.WindowsWezTermVersion = $WezTermVersion
     $forward.Publish = $true
