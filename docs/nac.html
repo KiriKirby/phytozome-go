@@ -7,6 +7,24 @@
 
 <body bgcolor="#FFFFFF">
 
+<p>phytozome GO v20261105T104645Z</p>
+<p>Release v20261105T104645Z</p>
+<p>Critical MSA fix:</p>
+<p>- Kept retained Canvas rows on their original PHgo taxon IDs after MSA Apply instead of renumbering the filtered alignment.</p>
+<p>- Restored saved Jalview motif features and colours by authoritative taxon ID before legacy index/name fallbacks.</p>
+<p>- Prevented features for removed taxa from being attached to rows that moved into their former indexes.</p>
+<p>- Rebuilt MSA selection state from exact Canvas item/row coordinates, including duplicate Canvas titles.</p>
+<p>- Verified with C3&#39;H - 副本.pgo and motifs PPGP, (AG)GX(DE)T(TS), FXXGXRXCXG: 29 aligned records contain all three motifs.</p>
+<p>Validation:</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- go build ./...</p>
+<p>- Jalview PHgo bridge tests</p>
+<p>- Finder motif and feature integration tests</p>
+<p>- release archive and checksum validation</p>
+<p>Packaging:</p>
+<p>- Windows WezTerm runtime reused from published PHgo release v20261105T101053Z; WezTerm was not rebuilt locally.</p>
+<p>&nbsp;</p>
 <p>phytozome GO v20261105T101053Z</p>
 <p>Release v20261105T101053Z</p>
 <p>Fixes:</p>
