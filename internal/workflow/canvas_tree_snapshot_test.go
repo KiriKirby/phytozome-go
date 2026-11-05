@@ -2140,6 +2140,36 @@ func TestApplyMSASelectionToCanvasStateUsesCanvasItemIndexWithDuplicateTitles(t 
 	}
 }
 
+func TestCanvasTreeRowSourcesPreserveTaxonIDsAfterMSAFiltering(t *testing.T) {
+	w := NewBlastWizard(nil)
+	w.canvasTreeLastPlan = phylo.RunPlan{Records: []phylo.InputRecord{
+		{TaxonID: "PHGOT000001", CanvasItem: "motifs", CanvasItemIndex: 0, CanvasRow: 0},
+		{TaxonID: "PHGOT000002", CanvasItem: "motifs", CanvasItemIndex: 0, CanvasRow: 1},
+		{TaxonID: "PHGOT000003", CanvasItem: "motifs", CanvasItemIndex: 0, CanvasRow: 2},
+	}}
+	w.updateCanvasTreeMSARowMap(w.canvasTreeLastPlan)
+	state := canvasLaunchState{Items: []model.CanvasItem{{
+		Title: "motifs",
+		Rows: []model.CanvasRow{
+			{Kind: model.CanvasKindFasta, FASTA: &model.QuerySequenceSource{Sequence: "AAAA"}},
+			{Kind: model.CanvasKindFasta, FASTA: &model.QuerySequenceSource{Sequence: "BBBB"}},
+			{Kind: model.CanvasKindFasta, FASTA: &model.QuerySequenceSource{Sequence: "CCCC"}},
+		},
+	}}}
+	selected := []canvasSelectedRow{
+		{ItemTitle: "motifs", ItemIndex: 0, RowIndex: 0, Row: state.Items[0].Rows[0]},
+		{ItemTitle: "motifs", ItemIndex: 0, RowIndex: 2, Row: state.Items[0].Rows[2]},
+		{ItemTitle: "new motifs", ItemIndex: 1, RowIndex: 0, Row: model.CanvasRow{Kind: model.CanvasKindFasta, FASTA: &model.QuerySequenceSource{Sequence: "DDDD"}}},
+	}
+	sources, err := w.canvasTreeRowSourcesWithSkippedForSettings(context.Background(), state, selected, phylo.DefaultTreeSettings())
+	if err != nil {
+		t.Fatalf("canvasTreeRowSourcesWithSkippedForSettings returned error: %v", err)
+	}
+	if got, want := []string{sources[0].TaxonID, sources[1].TaxonID, sources[2].TaxonID}, []string{"PHGOT000001", "PHGOT000003", "PHGOT000004"}; !slices.Equal(got, want) {
+		t.Fatalf("retained taxon IDs = %#v, want %#v", got, want)
+	}
+}
+
 func TestApplyMSASelectionToCanvasStateEditsDisplayNameAndSequence(t *testing.T) {
 	w := NewBlastWizard(nil)
 	w.canvasTreeLastPlan = phylo.RunPlan{
@@ -2212,6 +2242,21 @@ func TestCanvasMSAStateUsesSharedSelectedPayloadOnly(t *testing.T) {
 	state := canvasMSAStateFromItems(items, payload)
 	if len(state.Rows) != 1 || state.Rows[0].TaxonID != "PHGOT000001" || state.Rows[0].State != "green" {
 		t.Fatalf("MSA state = %#v, want only shared selected green row", state.Rows)
+	}
+}
+
+func TestCanvasMSAStateUsesIndexedCanvasCoordinatesWithDuplicateTitles(t *testing.T) {
+	items := []model.CanvasItem{
+		{Title: "duplicate", Rows: []model.CanvasRow{{Kind: model.CanvasKindFasta}}, Selected: []bool{true}},
+		{Title: "duplicate", Rows: []model.CanvasRow{{Kind: model.CanvasKindFasta}}, Selected: []bool{false}, MSAFlags: []bool{true}},
+	}
+	payload := phylo.ViewerPayload{Metadata: phylo.Metadata{Records: []phylo.InputRecord{
+		{TaxonID: "PHGOT000001", CanvasItem: "duplicate", CanvasItemIndex: 0, CanvasRow: 0},
+		{TaxonID: "PHGOT000002", CanvasItem: "duplicate", CanvasItemIndex: 1, CanvasRow: 0},
+	}}}
+	state := canvasMSAStateFromItems(items, payload)
+	if got, want := []string{state.Rows[0].State, state.Rows[1].State}, []string{"green", "yellow"}; !slices.Equal(got, want) {
+		t.Fatalf("MSA states = %#v, want exact indexed Canvas states %#v", got, want)
 	}
 }
 

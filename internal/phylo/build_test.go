@@ -1,6 +1,7 @@
 package phylo
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,23 @@ func TestBuildInputUsesDisplayNameThenSourceThenHead(t *testing.T) {
 	}
 	if meta.DisplayNameSource != "label_name" || len(meta.Records) != 3 {
 		t.Fatalf("unexpected metadata: %#v", meta)
+	}
+}
+
+func TestBuildInputPreservesRetainedTaxonIDsWithoutCollidingGeneratedIDs(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	records, _, err := BuildInput([]RowSource{
+		{TaxonID: "PHGOT000003", ItemTitle: "group", ItemIndex: 0, RowIndex: 2, Sequence: "CCC"},
+		{ItemTitle: "group", ItemIndex: 0, RowIndex: 0, Sequence: "AAA"},
+		{TaxonID: "PHGOT000001", ItemTitle: "group", ItemIndex: 0, RowIndex: 1, Sequence: "BBB"},
+	}, "label_name", "session", now)
+	if err != nil {
+		t.Fatalf("BuildInput returned error: %v", err)
+	}
+	got := []string{records[0].TaxonID, records[1].TaxonID, records[2].TaxonID}
+	want := []string{"PHGOT000003", "PHGOT000002", "PHGOT000001"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("taxon IDs = %#v, want stable/non-colliding %#v", got, want)
 	}
 }
 

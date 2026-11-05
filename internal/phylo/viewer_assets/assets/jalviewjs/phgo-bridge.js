@@ -910,15 +910,19 @@
     const taxon = String(ref && (ref.taxon_id || ref.taxonID) || "").trim();
     const name = String(ref && (ref.display_name || ref.displayName || ref.name || ref.sequence) || "").trim();
     const index = Number.parseInt(ref && (ref.sequence_index ?? ref.index), 10);
-    if (Number.isFinite(index) && index >= 0 && index < sequences.length) return sequences[index];
     if (taxon) {
       const found = sequences.find((seq) => sequenceTaxonID(seq) === taxon);
       if (found) return found;
+      // A saved PHgo taxon is authoritative. Falling through to a stale row
+      // index after MSA filtering would restore motif features/colours onto a
+      // different sequence.
+      return null;
     }
     if (name) {
       const found = sequences.find((seq) => sequenceName(seq) === name);
       if (found) return found;
     }
+    if (Number.isFinite(index) && index >= 0 && index < sequences.length) return sequences[index];
     return null;
   }
 
@@ -3030,7 +3034,8 @@
       featureCellColours,
       featureTextColour,
       collectFeatureLegendEntries,
-      layoutFeatureLegend
+      layoutFeatureLegend,
+      findSequenceBySavedReference
     }
   };
 })();

@@ -708,9 +708,8 @@ func applyMSAEditedSequenceToCanvasRow(row *model.CanvasRow, sequence string, ki
 }
 
 func canvasMSAStateFromItems(items []model.CanvasItem, payload phylo.ViewerPayload) phylo.MSAState {
-	stateByCanvasRow := map[string]string{}
+	stateByCanvasRow := map[[2]int]string{}
 	for itemIndex := range items {
-		itemTitle := strings.TrimSpace(items[itemIndex].Title)
 		selected := normalizeCanvasSelection(items[itemIndex].Selected, len(items[itemIndex].Rows))
 		msaFlags := normalizeCanvasMSAFlags(items[itemIndex].MSAFlags, len(items[itemIndex].Rows))
 		for rowIndex := range items[itemIndex].Rows {
@@ -720,7 +719,7 @@ func canvasMSAStateFromItems(items []model.CanvasItem, payload phylo.ViewerPaylo
 			} else if rowIndex < len(msaFlags) && msaFlags[rowIndex] {
 				state = "yellow"
 			}
-			stateByCanvasRow[itemTitle+"\x00"+strconv.Itoa(rowIndex)] = state
+			stateByCanvasRow[[2]int{itemIndex, rowIndex}] = state
 		}
 	}
 	rows := make([]phylo.MSASelectionRow, 0, len(payload.Metadata.Records))
@@ -729,15 +728,25 @@ func canvasMSAStateFromItems(items []model.CanvasItem, payload phylo.ViewerPaylo
 		if taxonID == "" {
 			continue
 		}
-		state := stateByCanvasRow[strings.TrimSpace(record.CanvasItem)+"\x00"+strconv.Itoa(record.CanvasRow)]
+		state := stateByCanvasRow[[2]int{record.CanvasItemIndex, record.CanvasRow}]
 		if state == "" {
 			state = "green"
 		}
+		displayName := strings.TrimSpace(firstNonEmpty(record.BaseDisplayName, record.DisplayName))
+		displayPrefix := strings.TrimSpace(record.DisplayPrefix)
+		displayLabel := displayName
+		if displayPrefix != "" {
+			displayLabel = strings.TrimSpace(displayPrefix + " " + displayName)
+		}
 		rows = append(rows, phylo.MSASelectionRow{
-			TaxonID:     taxonID,
-			DisplayName: strings.TrimSpace(record.DisplayName),
-			Index:       index,
-			State:       state,
+			TaxonID:         taxonID,
+			DisplayName:     displayName,
+			DisplayPrefix:   displayPrefix,
+			DisplayLabel:    displayLabel,
+			CanvasItemIndex: record.CanvasItemIndex,
+			CanvasRow:       record.CanvasRow,
+			Index:           index,
+			State:           state,
 		})
 	}
 	return phylo.MSAState{
@@ -1086,14 +1095,31 @@ func (w *BlastWizard) canvasTreeRowSourcesWithSkipped(ctx context.Context, state
 }
 
 func (w *BlastWizard) canvasTreeRowSourcesWithSkippedForSettings(ctx context.Context, state canvasLaunchState, selectedRows []canvasSelectedRow, settings phylo.TreeSettings) ([]phylo.RowSource, error) {
-	itemIndexByTitle := make(map[string]int, len(state.Items))
-	for i, item := range state.Items {
-		title := strings.TrimSpace(item.Title)
-		if title == "" {
-			title = fmt.Sprintf("%d", i+1)
+	// Keep taxon IDs stable across selection-only refreshes. Jalview sequence
+	// features and checkbox state are persisted by taxon ID, so renumbering the
+	// remaining rows after Apply would attach saved motif colours to unrelated
+	// sequences.
+	taxonIDByCanvasRow := make(map[[2]int]string, len(w.canvasTreeMSARowMap)+len(w.canvasTreeLastPlan.Records))
+	nextTaxonNumber := 1
+	observeTaxonID := func(taxonID string) {
+		taxonID = strings.ToUpper(strings.TrimSpace(taxonID))
+		if !strings.HasPrefix(taxonID, "PHGOT") {
+			return
 		}
-		if _, exists := itemIndexByTitle[title]; !exists {
-			itemIndexByTitle[title] = i
+		if number, err := strconv.Atoi(strings.TrimPrefix(taxonID, "PHGOT")); err == nil && number >= nextTaxonNumber {
+			nextTaxonNumber = number + 1
+		}
+	}
+	for _, record := range w.canvasTreeMSARowMap {
+		if taxonID := strings.TrimSpace(record.TaxonID); taxonID != "" {
+			taxonIDByCanvasRow[[2]int{record.CanvasItemIndex, record.CanvasRow}] = taxonID
+			observeTaxonID(taxonID)
+		}
+	}
+	for _, record := range w.canvasTreeLastPlan.Records {
+		if taxonID := strings.TrimSpace(record.TaxonID); taxonID != "" {
+			taxonIDByCanvasRow[[2]int{record.CanvasItemIndex, record.CanvasRow}] = taxonID
+			observeTaxonID(taxonID)
 		}
 	}
 	out := make([]phylo.RowSource, 0, len(selectedRows))
@@ -1104,8 +1130,15 @@ func (w *BlastWizard) canvasTreeRowSourcesWithSkippedForSettings(ctx context.Con
 		}
 		row := selected.Row
 		values := canvasTreeTableValues(row, selected.ItemTitle)
-		itemIndex := itemIndexByTitle[strings.TrimSpace(selected.ItemTitle)]
+		itemIndex := selected.ItemIndex
+		taxonID := taxonIDByCanvasRow[[2]int{itemIndex, selected.RowIndex}]
+		if strings.TrimSpace(taxonID) == "" {
+			taxonID = fmt.Sprintf("PHGOT%06d", nextTaxonNumber)
+			nextTaxonNumber++
+			taxonIDByCanvasRow[[2]int{itemIndex, selected.RowIndex}] = taxonID
+		}
 		out = append(out, phylo.RowSource{
+			TaxonID:      taxonID,
 			ItemTitle:    strings.TrimSpace(selected.ItemTitle),
 			ItemIndex:    itemIndex,
 			RowIndex:     selected.RowIndex,

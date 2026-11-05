@@ -17,6 +17,7 @@ import (
 )
 
 type RowSource struct {
+	TaxonID      string
 	ItemTitle    string
 	ItemIndex    int
 	RowIndex     int
@@ -60,8 +61,27 @@ func BuildInput(records []RowSource, sourceColumn string, sessionID string, now 
 		DisplayNameSource: sourceColumn,
 		Records:           make([]InputRecord, 0, len(records)),
 	}
-	for i, src := range records {
-		taxonID := fmt.Sprintf("PHGOT%06d", i+1)
+	reservedTaxonIDs := make(map[string]struct{}, len(records))
+	for _, src := range records {
+		if taxonID := strings.TrimSpace(src.TaxonID); taxonID != "" {
+			reservedTaxonIDs[taxonID] = struct{}{}
+		}
+	}
+	nextTaxonNumber := 1
+	for _, src := range records {
+		taxonID := strings.TrimSpace(src.TaxonID)
+		if taxonID == "" {
+			for {
+				candidate := fmt.Sprintf("PHGOT%06d", nextTaxonNumber)
+				nextTaxonNumber++
+				if _, exists := reservedTaxonIDs[candidate]; exists {
+					continue
+				}
+				taxonID = candidate
+				reservedTaxonIDs[taxonID] = struct{}{}
+				break
+			}
+		}
 		name := ""
 		if src.CanvasRow.DisplayNameLocked {
 			name = strings.TrimSpace(src.CanvasRow.DisplayName)

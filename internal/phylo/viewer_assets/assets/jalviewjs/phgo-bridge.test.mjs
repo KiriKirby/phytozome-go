@@ -87,6 +87,26 @@ const styleFor = (viewportOptions, group = null) => {
 console.log("phgo bridge format tests passed");
 
 {
+  const find = context.window.PHGOJalviewBridge.testHooks.findSequenceBySavedReference;
+  const sequence = (taxonID, name) => ({
+    phgoTaxonID: taxonID,
+    getName$: () => name
+  });
+  const sequences = [sequence("PHGOT000001", "first"), sequence("PHGOT000003", "third")];
+  const frame = {
+    viewport: {
+      alignment: {
+        getSequences$: () => sequences
+      }
+    }
+  };
+  assert.equal(find(frame, { taxon_id: "PHGOT000003", sequence_index: 1 }), sequences[1]);
+  assert.equal(find(frame, { taxon_id: "PHGOT000002", sequence_index: 1 }), null);
+  assert.equal(find(frame, { display_name: "third", sequence_index: 0 }), sequences[1]);
+  assert.equal(find(frame, { sequence_index: 0 }), sequences[0]);
+}
+
+{
   const hook = context.window.PHGOJalviewBridge.testHooks.featureTextColour;
   assert.equal(hook(["#ff0000"], "#111111"), "#ffffff");
   assert.equal(hook(["#ffff00"], "#111111"), "#111111");
