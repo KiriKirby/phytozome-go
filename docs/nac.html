@@ -7,6 +7,23 @@
 
 <body bgcolor="#FFFFFF">
 
+<p>phytozome GO v20261105T101053Z</p>
+<p>Release v20261105T101053Z</p>
+<p>Fixes:</p>
+<p>- Fixed MSA Apply selection write-back so each taxon updates its exact Canvas item and row, including Canvas projects with duplicate or edited item titles.</p>
+<p>- Restored persistent pale-blue highlighting for the Canvas tree actions Refresh tree and Open preview.</p>
+<p>- Added regression coverage for duplicate-title MSA selection mapping and unfocused tree-action styling.</p>
+<p>Validation:</p>
+<p>- go test ./...</p>
+<p>- go vet ./...</p>
+<p>- go build ./...</p>
+<p>- Jalview/PHgo bridge tests</p>
+<p>- Finder motif tests</p>
+<p>- release archive and checksum validation</p>
+<p>Packaging:</p>
+<p>- Windows WezTerm runtime reused from the published PHgo release v20261105T085644Z; WezTerm was not rebuilt locally.</p>
+<p>- Includes Windows amd64, Linux amd64, macOS amd64, macOS arm64, and SHA256SUMS.txt assets.</p>
+<p>&nbsp;</p>
 <p>phytozome GO v20261105T085644Z</p>
 <p>- Add MSA motif search with arbitrary-length `...` spans.</p>
 <p>- Extend external-reference motif checks with the same syntax, including `EXXR...P(E/F)R...R`.</p>
