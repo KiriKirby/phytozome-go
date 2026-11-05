@@ -2119,6 +2119,27 @@ func TestApplyMSASelectionToCanvasStateUpdatesCanvasSelection(t *testing.T) {
 	}
 }
 
+func TestApplyMSASelectionToCanvasStateUsesCanvasItemIndexWithDuplicateTitles(t *testing.T) {
+	w := NewBlastWizard(nil)
+	w.canvasTreeLastPlan = phylo.RunPlan{Records: []phylo.InputRecord{
+		{TaxonID: "first", CanvasItem: "duplicate", CanvasItemIndex: 0, CanvasRow: 0},
+		{TaxonID: "second", CanvasItem: "duplicate", CanvasItemIndex: 1, CanvasRow: 0},
+	}}
+	state := canvasLaunchState{Items: []model.CanvasItem{
+		{Title: "duplicate", Selected: []bool{true}, Rows: []model.CanvasRow{{Kind: model.CanvasKindFasta}}},
+		{Title: "duplicate", Selected: []bool{true}, Rows: []model.CanvasRow{{Kind: model.CanvasKindFasta}}},
+	}}
+
+	if !w.applyMSASelectionToCanvasState(&state, phylo.MSAApplyRequest{Rows: []phylo.MSAApplyRow{
+		{TaxonID: "second", State: "red"},
+	}}) {
+		t.Fatal("applyMSASelectionToCanvasState reported no change")
+	}
+	if !state.Items[0].Selected[0] || state.Items[1].Selected[0] {
+		t.Fatalf("MSA selection applied to the wrong duplicate-title Canvas item: %#v", state.Items)
+	}
+}
+
 func TestApplyMSASelectionToCanvasStateEditsDisplayNameAndSequence(t *testing.T) {
 	w := NewBlastWizard(nil)
 	w.canvasTreeLastPlan = phylo.RunPlan{

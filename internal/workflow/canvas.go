@@ -623,10 +623,21 @@ func (w *BlastWizard) applyMSASelectionToCanvasState(state *canvasLaunchState, r
 			continue
 		}
 		wantSelected := strings.EqualFold(strings.TrimSpace(row.State), "green")
-		for itemIndex := range state.Items {
-			if strings.TrimSpace(state.Items[itemIndex].Title) != strings.TrimSpace(record.CanvasItem) {
-				continue
+		itemIndexes := make([]int, 0, 1)
+		// InputRecord carries the zero-based Canvas item coordinate that created
+		// the MSA row.  Prefer it over the human-editable title: duplicate Canvas
+		// titles are valid, and title matching can otherwise apply one MSA row to
+		// the wrong table.
+		if record.CanvasItemIndex >= 0 && record.CanvasItemIndex < len(state.Items) {
+			itemIndexes = append(itemIndexes, record.CanvasItemIndex)
+		} else {
+			for itemIndex := range state.Items {
+				if strings.TrimSpace(state.Items[itemIndex].Title) == strings.TrimSpace(record.CanvasItem) {
+					itemIndexes = append(itemIndexes, itemIndex)
+				}
 			}
+		}
+		for _, itemIndex := range itemIndexes {
 			mask := normalizeCanvasSelection(state.Items[itemIndex].Selected, len(state.Items[itemIndex].Rows))
 			rowIndex := record.CanvasRow
 			if rowIndex < 0 || rowIndex >= len(mask) {

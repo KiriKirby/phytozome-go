@@ -583,6 +583,27 @@ func TestLeftPrimaryButtonUsesNormalStyle(t *testing.T) {
 	}
 }
 
+func TestLeftPrimaryPrimaryButtonKeepsActionHighlightWithoutFocus(t *testing.T) {
+	configStyles()
+	row := buttonRow(buttonSpec{Label: "Refresh tree", Shortcut: "Ctrl+R", Visible: true, Primary: true, LeftPrimary: true})
+	row.SetRect(0, 0, 40, row.requiredHeight(40))
+	screen := tcell.NewSimulationScreen("UTF-8")
+	if err := screen.Init(); err != nil {
+		t.Fatalf("screen init failed: %v", err)
+	}
+	screen.SetSize(40, 2)
+	row.Draw(screen)
+	positions := row.buttonPositions(40)
+	if len(positions) != 1 {
+		t.Fatalf("unexpected button count: %d", len(positions))
+	}
+	_, _, style, _ := screen.GetContent(positions[0].left+1, positions[0].row)
+	fg, bg, _ := style.Decompose()
+	if fg != colorActionText || bg != colorAction {
+		t.Fatalf("left-primary action style = fg=%v bg=%v, want action highlight fg=%v bg=%v", fg, bg, colorActionText, colorAction)
+	}
+}
+
 func TestPrimaryButtonUsesBlackTextOnPaleBlueBackground(t *testing.T) {
 	configStyles()
 	row := buttonRow(buttonSpec{Label: "Create canvas", Shortcut: "F3", Visible: true, Primary: true})
