@@ -20,6 +20,26 @@ func TestXDoesNotMatchGap(t *testing.T) {
 	}
 }
 
+func TestEllipsisMatchesAnyLengthSequence(t *testing.T) {
+	tests := []struct {
+		sequence string
+		motif    string
+		want     bool
+	}{
+		{sequence: "AAEXXRQQPERGGGR", motif: "EXXR...P(E/F)R...R", want: true},
+		{sequence: "EXXRPERR", motif: "EXXR...P(E/F)R...R", want: true},
+		{sequence: "EXXRQQPFRR", motif: "EXXR...P(E/F)R...R", want: true},
+		{sequence: "EXXRQQPDRR", motif: "EXXR...P(E/F)R...R", want: false},
+		{sequence: "ABC---XYZ", motif: "ABC...XYZ", want: true},
+	}
+	for _, test := range tests {
+		got := MatchingIndexes(test.sequence, []string{test.motif})
+		if matched := len(got) == 1; matched != test.want {
+			t.Fatalf("MatchingIndexes(%q, %q) matched = %v, want %v", test.sequence, test.motif, matched, test.want)
+		}
+	}
+}
+
 func TestAllMatchedRequiresEveryMotifIndex(t *testing.T) {
 	tests := []struct {
 		matches string

@@ -8181,7 +8181,7 @@ func RunExternalReferenceModal(page ExternalReferencePage) (ExternalReferenceRes
 	setFocusBorder(motifModule.Box, false)
 	attachFocusBorder(motifModule.Box)
 	motifModule.AddItem(motifBox, 1, 0, true)
-	motifModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 2, 0, false)
+	motifModule.AddItem(textBlock("Search complete motif patterns in each BLAST hit protein sequence. X matches one non-gap residue; - matches a gap; ... matches zero or more residues/gaps; [A/B] and (A/B) allow alternatives. Separate motifs with , or ，."), 2, 0, false)
 	motifInputRow := tview.NewFlex().SetDirection(tview.FlexColumn)
 	motifInputRow.AddItem(motifInput, 0, 1, false)
 	motifInputRow.AddItem(motifPasteStatus.view, 36, 0, false)
@@ -10836,7 +10836,7 @@ func motifCheckerHelpPages() []localizedHelpPage {
 			Title:    "Motif checker help",
 			Text: strings.TrimSpace(`The motif checker is disabled by default. Enter one or more motifs separated by an English comma (,) or Chinese comma (，). Each motif is searched independently anywhere in the complete BLAST hit protein sequence.
 
-Literal residues match exactly. X matches one non-gap residue. -, －, and − match one gap. [A/B] and (A/B) mean A or B; compact alternatives such as [ABC] mean A, B, or C. Full-width bracket and slash forms are accepted like the MSA Finder syntax.
+Literal residues match exactly. X matches one non-gap residue. -, －, and − match one gap. ... matches zero or more sequence characters (including gaps). [A/B] and (A/B) mean A or B; compact alternatives such as [ABC] mean A, B, or C. Full-width bracket and slash forms are accepted like the MSA Finder syntax. For example, EXXR...P(E/F)R...R matches EXXR, then any-length sequence, then PE or PF followed by R, then any-length sequence and a final R.
 
 The phgo_motif_matches column lists the 1-based numbers of completely matched motifs. For example, 1,3 means motifs 1 and 3 matched. No match is blank. The cell becomes green only when every configured motif matched; a partial set keeps the normal text color.`),
 		},
@@ -10846,7 +10846,7 @@ The phgo_motif_matches column lists the 1-based numbers of completely matched mo
 			Title:    "Motif 检查器帮助",
 			Text: strings.TrimSpace(`Motif 检查器默认不勾选。多个 motif 用英文逗号 , 或中文逗号 ， 分隔；程序会在每条 BLAST 命中蛋白的完整序列中分别查找每个 motif。
 
-普通氨基酸字母必须完全匹配。X 匹配一个非 gap 残基；-、－、− 匹配一个 gap；[A/B] 和 (A/B) 表示 A 或 B；[ABC] 表示 A、B、C 中任意一个。支持与 MSA Finder 相同的全角括号和分隔符形式。
+普通氨基酸字母必须完全匹配。X 匹配一个非 gap 残基；-、－、− 匹配一个 gap；... 匹配零个或任意多个序列字符（包括 gap）；[A/B] 和 (A/B) 表示 A 或 B；[ABC] 表示 A、B、C 中任意一个。支持与 MSA Finder 相同的全角括号和分隔符形式。例如 EXXR...P(E/F)R...R 可匹配 EXXR、任意长度序列、PE/PF 后的 R、任意长度序列以及末尾 R。
 
 phgo_motif_matches 列显示完全匹配的 motif 序号，从 1 开始。例如 1,3 表示第 1 和第 3 个 motif 匹配。一个都没匹配时为空。只有所有配置的 motif 全部匹配时单元格才显示绿色；部分匹配仍显示序号，但保持普通颜色。`),
 		},
@@ -10856,7 +10856,7 @@ phgo_motif_matches 列显示完全匹配的 motif 序号，从 1 开始。例如
 			Title:    "Motif checker ヘルプ",
 			Text: strings.TrimSpace(`Motif checker は既定でオフです。複数の motif は , または ， で区切り、各 motif を BLAST hit protein の完全配列内で個別に検索します。
 
-通常の残基文字は完全一致です。X は gap 以外の 1 残基、-・－・− は 1 gap、[A/B] と (A/B) は A または B を表します。[ABC] は A・B・C のいずれかです。MSA Finder と同じ全角記号も使用できます。
+通常の残基文字は完全一致です。X は gap 以外の 1 残基、-・－・− は 1 gap、... は gap を含む 0 個以上の配列文字、[A/B] と (A/B) は A または B を表します。[ABC] は A・B・C のいずれかです。MSA Finder と同じ全角記号も使用できます。
 
 phgo_motif_matches 列は完全一致した motif の 1 始まり番号を表示します。たとえば 1,3 は motif 1 と 3 の一致です。一致なしは空欄です。設定したすべての motif が一致した場合だけ緑色になり、部分一致は通常色のまま番号を表示します。`),
 		},

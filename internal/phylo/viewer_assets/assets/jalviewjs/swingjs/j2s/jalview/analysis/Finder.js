@@ -13,6 +13,7 @@ this.sequenceIndex=0;
 this.columnIndex=0;
 this.phgoMatchCase=false;
 this.phgoTailMapMode=false;
+this.phgoTailMapActive=false;
 this.phgoTailAnchors=[];
 this.phgoTailTokens=[];
 this.phgoTailMappedColumns=[];
@@ -57,8 +58,9 @@ var selection=this.viewport.getSelectionGroup$();
 if (selection != null  && selection.getSize$() < 1 ) {
 selection=null;
 }var alignment=this.viewport.getAlignment$();
-this.phgoTailAnchors=this.phgoTailMapMode ? C$.buildPhgoTailAnchors$jalview_api_AlignViewportI$OA$Z(this.viewport, searchPattern, matchCase) : [];
-this.phgoTailMappedColumns=this.phgoTailMapMode ? C$.buildPhgoTailMappedColumns$jalview_api_AlignViewportI$OA$OA$Z(this.viewport, this.phgoTailAnchors, searchPattern, matchCase) : [];
+this.phgoTailMapActive=this.phgoTailMapMode && !C$.phgoHasVariableSpan$OA(searchPattern);
+this.phgoTailAnchors=this.phgoTailMapActive ? C$.buildPhgoTailAnchors$jalview_api_AlignViewportI$OA$Z(this.viewport, searchPattern, matchCase) : [];
+this.phgoTailMappedColumns=this.phgoTailMapActive ? C$.buildPhgoTailMappedColumns$jalview_api_AlignViewportI$OA$OA$Z(this.viewport, this.phgoTailAnchors, searchPattern, matchCase) : [];
 var end=alignment.getHeight$();
 while (this.sequenceIndex < end){
 var seq=alignment.getSequenceAt$I(this.sequenceIndex);
@@ -114,7 +116,8 @@ var visible=this.getNextVisibleSequenceRegion$jalview_datamodel_SequenceI$I(seq,
 if (visible == null ) {
 return false;
 }
-if (this.phgoTailMapMode) {
+var tailMappingEnabled=this.phgoTailMapActive || (this.phgoTailMapMode && !C$.phgoHasVariableSpan$OA(this.phgoTailTokens));
+if (tailMappingEnabled) {
 var mappedColumns=[];
 var mappedRows=this.phgoTailMappedColumns || [];
 for (var mappedRowIndex=0; mappedRowIndex < mappedRows.length; mappedRowIndex++) {
@@ -412,7 +415,8 @@ return C$.buildPhgoTailAnchors$jalview_api_AlignViewportI$OA$Z(viewport, tokens,
 
 // PHgo MSA motif syntax is deliberately parsed without a regular expression.
 // X is one non-gap residue. '-' is one alignment gap (including Jalview's '.'
-// gap form). Bracketed candidates may use slashes, e.g. (N/S/G), or compact
+// gap form). '...' is a non-greedy span of zero or more alignment columns.
+// Bracketed candidates may use slashes, e.g. (N/S/G), or compact
 // one-character alternatives, e.g. (NSG). ASCII and full-width punctuation
 // are accepted. Matching runs against alignment columns so gap-containing
 // motifs retain exact highlight coordinates.
@@ -437,6 +441,11 @@ var tokens=[];
 var i=0;
 while (i < source.length) {
 var c=source.charAt(i);
+if (c == "." && source.substring(i, i + 3) == "...") {
+if (tokens.length == 0 || tokens[tokens.length - 1].kind != "many") tokens.push({kind:"many"});
+i += 3;
+continue;
+}
 if (c == "X" || c == "x") { tokens.push({kind:"any"}); i++; continue; }
 if (c == "-" || c == "－" || c == "−") { tokens.push({kind:"gap"}); i++; continue; }
 var close=null;
@@ -469,11 +478,28 @@ return tokens;
 }, 1);
 
 Clazz.newMeth(C$, 'matchPhgoCandidate$OA$S$I', function (tokens, text, start) {
-var position=start;
-for (var i=0; i < tokens.length; i++) {
+var visit=function (tokenIndex, position) {
+if (tokenIndex >= tokens.length) return position;
+var token=tokens[tokenIndex];
+if (token.kind == "many") {
+for (var spanEnd=position; spanEnd <= text.length; spanEnd++) {
+var spanResult=visit(tokenIndex + 1, spanEnd);
+if (spanResult >= 0) return spanResult;
+}
+return -1;
+}
 if (position >= text.length) return -1;
-var token=tokens[i];
 var current=text.charAt(position);
+if (token.kind == "alternatives") {
+for (var alternativeIndex=0; alternativeIndex < token.candidates.length; alternativeIndex++) {
+var alternativeEnd=C$.matchPhgoCandidate$OA$S$I(token.candidates[alternativeIndex], text, position);
+if (alternativeEnd >= 0) {
+var alternativeResult=visit(tokenIndex + 1, alternativeEnd);
+if (alternativeResult >= 0) return alternativeResult;
+}
+}
+return -1;
+}
 if (token.kind == "any") {
 if (C$.phgoGapCharacter$C(current)) return -1;
 } else if (token.kind == "gap") {
@@ -481,13 +507,14 @@ if (!C$.phgoGapCharacter$C(current)) return -1;
 } else if (current != token.value) {
 return -1;
 }
-position++;
-}
-return position;
+return visit(tokenIndex + 1, position + 1);
+};
+return visit(0, start);
 }, 1);
 
 Clazz.newMeth(C$, 'matchPhgoTokenAt$O$S$I', function (token, text, start) {
 if (token == null || text == null || start < 0 || start >= text.length) return false;
+if (token.kind == "many") return false;
 if (token.kind == "alternatives") {
 for (var i=0; i < token.candidates.length; i++) {
 if (C$.matchPhgoCandidate$OA$S$I(token.candidates[i], text, start) == start + 1) return true;
@@ -498,20 +525,39 @@ return C$.matchPhgoCandidate$OA$S$I([token], text, start) == start + 1;
 }, 1);
 
 Clazz.newMeth(C$, 'matchPhgoMotifFrom$OA$S$I$I', function (tokens, text, tokenIndex, position) {
-if (tokenIndex >= tokens.length) return position;
-if (position >= text.length) return -1;
-var token=tokens[tokenIndex];
+var memo={};
+var visit=function (currentTokenIndex, currentPosition) {
+var key=currentTokenIndex + ":" + currentPosition;
+if (Object.prototype.hasOwnProperty.call(memo, key)) return memo[key];
+if (currentTokenIndex >= tokens.length) return currentPosition;
+var token=tokens[currentTokenIndex];
+if (token.kind == "many") {
+for (var spanEnd=currentPosition; spanEnd <= text.length; spanEnd++) {
+var spanResult=visit(currentTokenIndex + 1, spanEnd);
+if (spanResult >= 0) return memo[key]=spanResult;
+}
+return memo[key]=-1;
+}
+if (currentPosition >= text.length) return memo[key]=-1;
 if (token.kind == "alternatives") {
 for (var i=0; i < token.candidates.length; i++) {
-var next=C$.matchPhgoCandidate$OA$S$I(token.candidates[i], text, position);
+var next=C$.matchPhgoCandidate$OA$S$I(token.candidates[i], text, currentPosition);
 if (next < 0) continue;
-var alternativeEnd=C$.matchPhgoMotifFrom$OA$S$I$I(tokens, text, tokenIndex + 1, next);
-if (alternativeEnd >= 0) return alternativeEnd;
+var alternativeEnd=visit(currentTokenIndex + 1, next);
+if (alternativeEnd >= 0) return memo[key]=alternativeEnd;
 }
-return -1;
+return memo[key]=-1;
 }
-var nextPosition=C$.matchPhgoCandidate$OA$S$I([token], text, position);
-return nextPosition < 0 ? -1 : C$.matchPhgoMotifFrom$OA$S$I$I(tokens, text, tokenIndex + 1, nextPosition);
+var nextPosition=C$.matchPhgoCandidate$OA$S$I([token], text, currentPosition);
+return memo[key]=(nextPosition < 0 ? -1 : visit(currentTokenIndex + 1, nextPosition));
+};
+return visit(tokenIndex, position);
+}, 1);
+
+Clazz.newMeth(C$, 'phgoHasVariableSpan$OA', function (tokens) {
+if (tokens == null) return false;
+for (var i=0; i < tokens.length; i++) if (tokens[i] != null && tokens[i].kind == "many") return true;
+return false;
 }, 1);
 
 Clazz.newMeth(C$, 'findPhgoMotifMatch$OA$S$I$I', function (tokens, text, start, endExclusive) {

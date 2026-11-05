@@ -59,6 +59,13 @@ func parse(input string) []token {
 	tokens := make([]token, 0, len(runes))
 	for i := 0; i < len(runes); {
 		c := runes[i]
+		if c == '.' && i+2 < len(runes) && runes[i+1] == '.' && runes[i+2] == '.' {
+			if len(tokens) == 0 || tokens[len(tokens)-1].kind != '*' {
+				tokens = append(tokens, token{kind: '*'})
+			}
+			i += 3
+			continue
+		}
 		switch c {
 		case 'X', 'x':
 			tokens = append(tokens, token{kind: 'x'})
@@ -117,8 +124,17 @@ func parse(input string) []token {
 }
 
 func parseCandidate(input string) []token {
-	out := make([]token, 0, len([]rune(input)))
-	for _, r := range []rune(input) {
+	runes := []rune(input)
+	out := make([]token, 0, len(runes))
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '.' && i+2 < len(runes) && runes[i+1] == '.' && runes[i+2] == '.' {
+			if len(out) == 0 || out[len(out)-1].kind != '*' {
+				out = append(out, token{kind: '*'})
+			}
+			i += 2
+			continue
+		}
 		switch r {
 		case 'X', 'x':
 			out = append(out, token{kind: 'x'})
@@ -133,60 +149,94 @@ func parseCandidate(input string) []token {
 
 func contains(tokens []token, text string) bool {
 	runes := []rune(text)
-	for start := range runes {
-		if matchFrom(tokens, 0, runes, start) >= 0 {
+	for start := 0; start <= len(runes); start++ {
+		if matchFrom(tokens, 0, runes, start, make(map[matchState]int)) >= 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func matchFrom(tokens []token, ti int, text []rune, pos int) int {
+type matchState struct {
+	tokenIndex int
+	position   int
+}
+
+func matchFrom(tokens []token, ti int, text []rune, pos int, memo map[matchState]int) int {
 	if ti >= len(tokens) {
 		return pos
 	}
-	if pos >= len(text) {
-		return -1
+	state := matchState{tokenIndex: ti, position: pos}
+	if result, ok := memo[state]; ok {
+		return result
 	}
 	t := tokens[ti]
+	if t.kind == '*' {
+		for next := pos; next <= len(text); next++ {
+			if end := matchFrom(tokens, ti+1, text, next, memo); end >= 0 {
+				memo[state] = end
+				return end
+			}
+		}
+		memo[state] = -1
+		return -1
+	}
+	if pos >= len(text) {
+		memo[state] = -1
+		return -1
+	}
 	if t.kind == 'a' {
 		for _, candidate := range t.alternates {
 			if next := matchCandidate(candidate, text, pos); next >= 0 {
-				if end := matchFrom(tokens, ti+1, text, next); end >= 0 {
+				if end := matchFrom(tokens, ti+1, text, next, memo); end >= 0 {
+					memo[state] = end
 					return end
 				}
 			}
 		}
+		memo[state] = -1
 		return -1
 	}
 	next := matchCandidate([]token{t}, text, pos)
 	if next < 0 {
+		memo[state] = -1
 		return -1
 	}
-	return matchFrom(tokens, ti+1, text, next)
+	result := matchFrom(tokens, ti+1, text, next, memo)
+	memo[state] = result
+	return result
 }
 
 func matchCandidate(tokens []token, text []rune, pos int) int {
-	for _, t := range tokens {
-		if pos >= len(text) {
+	if len(tokens) == 0 {
+		return pos
+	}
+	t := tokens[0]
+	if t.kind == '*' {
+		for next := pos; next <= len(text); next++ {
+			if end := matchCandidate(tokens[1:], text, next); end >= 0 {
+				return end
+			}
+		}
+		return -1
+	}
+	if pos >= len(text) {
+		return -1
+	}
+	current := text[pos]
+	switch t.kind {
+	case 'x':
+		if current == '-' || current == '.' {
 			return -1
 		}
-		current := text[pos]
-		switch t.kind {
-		case 'x':
-			if current == '-' || current == '.' {
-				return -1
-			}
-		case '-':
-			if current != '-' && current != '.' {
-				return -1
-			}
-		case 'l':
-			if current != t.literal {
-				return -1
-			}
+	case '-':
+		if current != '-' && current != '.' {
+			return -1
 		}
-		pos++
+	case 'l':
+		if current != t.literal {
+			return -1
+		}
 	}
-	return pos
+	return matchCandidate(tokens[1:], text, pos+1)
 }

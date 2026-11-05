@@ -73,6 +73,10 @@ const cases = [
   ["(A/BC/G)D", "ZZBCD", [2, 4]],
   ["(P/I)PGPX(P/G)XP", "ZZIPGPQGRPYY", [2, 9]],
   ["(P/I)PGPX(P/G)XP", "ZZPPGP-GRPYY", null],
+  ["EXXR...P(E/F)R...R", "AAEXXRQQQPERGGGRYY", [2, 15]],
+  ["EXXR...P(E/F)R...R", "EXXRPERR", [0, 7]],
+  ["ABC...XYZ", "ZZABC---XYZYY", [2, 10]],
+  ["EXXR...P(E/F)R...R", "EXXRQQPDRR", null],
 ];
 
 for (const [motif, sequence, expected] of cases) {
@@ -88,6 +92,9 @@ assert.equal(matchToken(parse("(N/S/G)")[0], "S", 0), true);
 assert.equal(matchToken(parse("X")[0], "A", 0), true);
 assert.equal(matchToken(parse("X")[0], "-", 0), false);
 assert.equal(matchToken(parse("-")[0], ".", 0), true);
+assert.equal(parse("A...B")[1].kind, "many");
+assert.equal(Finder.phgoHasVariableSpan$OA(parse("A...B")), true);
+assert.equal(Finder.phgoHasVariableSpan$OA(parse("AXB")), false);
 
 const results = {
   added: [],
@@ -335,6 +342,47 @@ assert.deepEqual(
   "the real visible-region search path must find every compact alternative plus gap without looping"
 );
 assert.equal(actualFinder.columnIndex, 6);
+
+const variableFinder = new Finder();
+const variableResults = makeSearchResults();
+Finder.installPhgoColumnResultBridge$jalview_datamodel_SearchResults(variableResults);
+variableFinder.searchResults = variableResults;
+variableFinder.columnIndex = 0;
+variableFinder.phgoMatchCase = true;
+variableFinder.phgoTailMapMode = true;
+variableFinder.phgoTailMapActive = false;
+variableFinder.phgoTailTokens = parse("EXXR...P(E/F)R...R");
+variableFinder.viewport = {
+  getSelectionGroup$: () => null,
+  getAlignment$: () => ({
+    getWidth$: () => 12,
+    getHiddenColumns$: () => ({
+      getVisContigsIterator$I$I$Z: (column) => {
+        let returned = false;
+        return {
+          hasNext$: () => !returned && column < 12,
+          next$: () => {
+            returned = true;
+            return [column, 11];
+          }
+        };
+      }
+    })
+  })
+};
+const variableSequence = makeSequence("EXXRQQPER--R");
+assert.equal(
+  variableFinder.searchNextVisibleRegion$jalview_datamodel_SequenceI$com_stevesoft_pat_Regex(
+    variableSequence,
+    variableFinder.phgoTailTokens
+  ),
+  true,
+  "variable-span motifs must use exact search when prefix mapping is enabled"
+);
+assert.deepEqual(
+  Array.from(variableResults.__phgoColumnMatches, (value) => [value.start, value.end]),
+  [[0, 11]]
+);
 
 const tailSearchResults = makeSearchResults();
 Finder.installPhgoColumnResultBridge$jalview_datamodel_SearchResults(tailSearchResults);
